@@ -136,6 +136,50 @@ pub struct PowerPreset {
 /// PSU efficiency at 120V (typical for home mining). Used to estimate wall power.
 pub const PSU_EFFICIENCY_120V: f32 = 0.88;
 
+/// Requested board-power ceilings, not calibrated operating points or acoustic
+/// promises. The live heater owner retains its power, circuit and thermal guards.
+/// S19j Pro uses an APW supply; S9's assumed 120 V PSU efficiency is not applied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeaterPowerTarget {
+    pub name: &'static str,
+    pub watts: u32,
+}
+
+pub const S19J_PRO_HEATER_TARGETS: [HeaterPowerTarget; 3] = [
+    HeaterPowerTarget { name: "s19j_low", watts: 600 },
+    HeaterPowerTarget { name: "s19j_medium", watts: 900 },
+    HeaterPowerTarget { name: "s19j_high", watts: 1200 },
+];
+
+/// Exact identity keeps these requests off sibling models and controllers.
+pub fn heater_target_watts(board_target: &str, name: &str) -> Option<u32> {
+    match board_target {
+        "am2-s19j" => S19J_PRO_HEATER_TARGETS.iter()
+            .find(|preset| preset.name == name).map(|preset| preset.watts),
+        "am1-s9" => PowerPreset::s9_presets().iter()
+            .find(|preset| preset.name == name).map(|preset| preset.watts),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod heater_target_tests {
+    use super::*;
+
+    #[test]
+    fn s19j_targets_are_bounded_requests_and_reject_sibling_or_s9_names() {
+        for preset in &S19J_PRO_HEATER_TARGETS {
+            assert!((50..=1200).contains(&preset.watts));
+            assert_eq!(heater_target_watts("am2-s19j", preset.name), Some(preset.watts));
+            for board in ["am2-s19pro", "am3-bb-s19jpro", "am3-s19jpro-aml", "am1-s9", "unknown"] {
+                assert_eq!(heater_target_watts(board, preset.name), None);
+            }
+        }
+        assert_eq!(heater_target_watts("am2-s19j", "max"), None);
+        assert_eq!(heater_target_watts("am1-s9", "max"), Some(1400));
+    }
+}
+
 impl PowerPreset {
     /// Compute wall watts from board watts (accounting for PSU efficiency at 120V).
     pub fn compute_wall_watts(watts: u32) -> u32 {

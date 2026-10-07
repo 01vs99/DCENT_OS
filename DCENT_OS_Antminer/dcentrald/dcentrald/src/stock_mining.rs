@@ -84,7 +84,7 @@ const HW_DIFFICULTY: u64 = 256;
 /// Stock DHASH autonomously increments extranonce2 and returns only a work ID.
 /// The exact FPGA-written nonce2/job-id DMA schema is still hardware-beta
 /// evidence, so this path is fail-closed before opening any device unless the
-/// operator explicitly opts into correlation testing.
+/// a compiled lab session explicitly requests correlation testing.
 const STOCK_FPGA_NONCE2_BETA_ENV: &str = "DCENT_EXPERIMENTAL_STOCK_FPGA_NONCE2";
 
 fn stock_fpga_nonce2_beta_enabled_value(raw: Option<&str>) -> bool {
@@ -97,7 +97,11 @@ fn stock_fpga_nonce2_beta_enabled_value(raw: Option<&str>) -> bool {
 }
 
 fn stock_fpga_nonce2_beta_enabled() -> bool {
-    stock_fpga_nonce2_beta_enabled_value(std::env::var(STOCK_FPGA_NONCE2_BETA_ENV).ok().as_deref())
+    stock_fpga_nonce2_beta_enabled_value(
+        dcentrald_common::lab_env::var(STOCK_FPGA_NONCE2_BETA_ENV)
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Resolve the same V1/V2 endpoint choice as the Stratum router without

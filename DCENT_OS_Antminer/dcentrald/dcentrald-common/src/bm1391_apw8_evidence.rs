@@ -379,7 +379,7 @@ mod tests {
     use crate::board_desc::{
         AsicProtocolIdentity, BoardDesc, ChainTransportKind, VoltageControllerClass, WorkEngineKind,
     };
-    use dcent_schema::hardware::RuntimeStatus;
+    use dcent_schema::hardware::{GenericConstruction, LifecycleLane, RuntimeStatus};
 
     #[test]
     fn six_artifact_and_sixteen_function_pins_are_exact() {
@@ -445,21 +445,43 @@ mod tests {
 
     #[test]
     fn registered_s15_t15_compositions_remain_capture_first_and_closed() {
+        // 2026-09 refresh: both rows carry their exact held native BM1391
+        // runtime (stock-FPGA fabric + application-PIC custody) as a
+        // SpecialisedLifecycle lane, but the composition stays closed:
+        // BM1391 is pure-only (no active protocol admit), install stays
+        // Denied with Ring-2 opt-in dispatch only, and mining never
+        // auto-starts. A conflicting 60/72-chip variant cannot borrow this
+        // admission.
         for target in ["am1-s15", "am1-t15"] {
             let board = BoardDesc::lookup(target).expect("registered BM1391 board");
-            assert_eq!(board.chain_transport, ChainTransportKind::None);
-            assert_eq!(board.work_engine, WorkEngineKind::ManagementOnly);
+            assert_eq!(board.chain_transport, ChainTransportKind::StockFpga);
+            assert_eq!(board.work_engine, WorkEngineKind::FpgaWorkFifo);
             assert_eq!(board.asic_protocol, AsicProtocolIdentity::Bm1391);
             assert_eq!(
                 board.voltage_controller,
-                VoltageControllerClass::RuntimeDiscovered
+                VoltageControllerClass::Bm1391Application
             );
             assert!(matches!(
                 board.runtime_status,
-                RuntimeStatus::CaptureFirst { .. }
+                RuntimeStatus::SpecialisedLifecycle {
+                    lane: LifecycleLane::Bm1391Native,
+                    generic_construction: GenericConstruction::Refused
+                }
             ));
-            assert!(!board.public_beta_install);
+            assert!(board.release_channel.is_publishable());
+            assert!(!board.public_beta_install());
             assert!(!board.mining_default_enabled);
+            assert_eq!(
+                board.enablement.install_authorization,
+                dcent_schema::hardware::InstallAuthorization::Denied
+            );
+            // The generic protocol+transport+work admit must still refuse:
+            // BM1391 is pure-only and the stock-FPGA fabric takes no
+            // FpgaWorkFifo work admit.
+            assert!(
+                board.admit_protocol_transport_and_work_engine().is_err(),
+                "{target} must refuse the generic mining admit"
+            );
         }
     }
 }

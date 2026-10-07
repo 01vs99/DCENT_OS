@@ -6,7 +6,8 @@
 //!   `S99bosminer stop` / cooldown `PSU: Disable` → 1; after `PSU: Enable` → 0
 //! - ePIC UMC OS writes 1 to DISABLE (GPIO comparison only; six 2026-08-01 caveats)
 //!
-//! `serial_mining.rs` still comments S21-class NoPic as active HIGH 1=ON.
+//! Exact S21 was independently corrected to active-low in R13 production RE;
+//! this S19k evidence still does not establish any other product polarity.
 //! That comment is a **different board_target**. This module does not flip it.
 //! Never write sysfs from here. Observe-only helpers.
 //!
@@ -289,208 +290,195 @@ pub fn am3_s19k_install_safe_off_value() -> u8 {
     S19K_AM3_GPIO437_VALUE_OFF
 }
 
-/// : `disable_psu_checked` must export GPIO437 before writing SafeOff.
-/// Track-1 crash/planned-stop on Braiins never calls `enable_psu_gpio`.
+fn gpio437_source_section<'a>(
+    source: &'a str,
+    start: &str,
+    end: &str,
+) -> Result<&'a str, &'static str> {
+    let start = source.find(start).ok_or("missing GPIO437 source owner")?;
+    let length = source[start..]
+        .find(end)
+        .ok_or("cannot bound GPIO437 source owner")?;
+    Ok(&source[start..start + length])
+}
+
+/// The shared recipe writer must export, normalize inversion while input,
+/// establish OFF direction, write the selected raw level and check readback.
 pub fn admit_s19k_disable_psu_checked_exports_before_write(hal: &str) -> Result<(), &'static str> {
-    let write_start = hal
-        .find("fn disable_psu_checked_at(")
-        .ok_or("missing polarity-bound disable implementation")?;
-    let write_end = hal[write_start..]
-        .find("fn disable_psu_checked_for_polarity")
-        .map(|offset| write_start + offset)
-        .ok_or("cannot bound polarity-bound disable implementation")?;
-    let write_body = &hal[write_start..write_end];
-    if !write_body.contains("gpio_root.join(\"export\")") {
-        return Err("disable_psu_checked must export GPIO437 when unexported");
+    let body = gpio437_source_section(
+        hal,
+        "fn drive_psu_checked_at(",
+        "fn read_psu_active_low_disabled_checked_at(",
+    )?;
+    let mut after = 0;
+    for needle in [
+        "write(&gpio_root.join(\"export\"), &n.to_string())",
+        "write(&base.join(\"direction\"), \"in\")",
+        "fs::read_to_string(base.join(\"direction\"))?.trim() != \"in\"",
+        "write(&base.join(\"active_low\"), \"0\")",
+        "read_psu_active_low_disabled_checked_at(gpio_root, n)?",
+        "write(&base.join(\"direction\"), recipe.off_direction())",
+        "let raw = if on",
+        "recipe.on_raw()",
+        "recipe.off_raw()",
+        "write(&base.join(\"value\"), &raw.to_string())",
+        "read_psu_enabled_on_with_recipe_at(gpio_root, n, recipe)? != on",
+    ] {
+        after += body[after..]
+            .find(needle)
+            .ok_or("GPIO437 writer lost ordered export/normalization/OFF/raw/readback")?
+            + needle.len();
     }
-    if !write_body.contains("still unexported after export") {
-        return Err("unexported GPIO437 after export must fail closed");
+    let generic = gpio437_source_section(
+        hal,
+        "pub fn disable_psu_checked()",
+        "pub fn disable_s19k_track1_psu_checked()",
+    )?;
+    if !generic.contains("disable_psu_checked_for_recipe(amlogic_marker_drive_recipe()?)") {
+        return Err("standalone cut must resolve the exact marker through the qualified table");
     }
-    if write_body.contains("enable_psu_gpio()?;") || write_body.contains("let _ = enable_psu_gpio")
-    {
-        return Err("disable_psu_checked must not call enable_psu_gpio");
-    }
-    let export = write_body
-        .find("gpio_root.join(\"export\")")
-        .ok_or("missing export")?;
-    let dir_high = write_body
-        .find("fs::write(&dir_path, \"high\")")
-        .ok_or("s19k SafeOff must set direction high")?;
-    let write1 = write_body
-        .find("fs::write(&gpio_path, \"1\")")
-        .ok_or("missing s19k SafeOff write 1")?;
-    if export > write1 {
-        return Err("export must precede SafeOff value write");
-    }
-    if dir_high > write1 {
-        return Err("s19k direction high must precede value 1");
-    }
-    let generic_start = hal
-        .find("pub fn disable_psu_checked()")
-        .ok_or("missing generic disable_psu_checked")?;
-    let explicit_start = hal[generic_start..]
-        .find("pub fn disable_s19k_track1_psu_checked()")
-        .map(|offset| generic_start + offset)
-        .ok_or("missing explicit Track-1 S19k disable")?;
-    let generic = &hal[generic_start..explicit_start];
-    if !generic.contains("amlogic_board_target_is_s19k()?") {
-        return Err("generic disable must remain bound to persistent board_target");
-    }
-    let explicit_end = hal[explicit_start..]
-        .find("pub fn disable_psu()")
-        .map(|offset| explicit_start + offset)
-        .ok_or("cannot bound explicit Track-1 S19k disable")?;
-    let explicit = &hal[explicit_start..explicit_end];
-    if !explicit.contains("disable_psu_checked_for_polarity(true)")
-        || explicit.contains("amlogic_board_target_is_s19k")
+    let explicit = gpio437_source_section(
+        hal,
+        "pub fn disable_s19k_track1_psu_checked()",
+        "pub fn disable_psu()",
+    )?;
+    if !explicit.contains("amlogic_gpio437::resolve_drive_recipe(\"am3-s19k\")")
+        || !explicit.contains("disable_psu_checked_for_recipe(recipe)")
+        || explicit.contains("amlogic_marker_drive_recipe")
         || explicit.contains("/etc/dcentos")
     {
-        return Err("Track-1 disable must be fixed to S19k polarity without marker reads");
+        return Err("Track-1 cut must retain the exact S19k table recipe without marker reads");
     }
     Ok(())
 }
 
-/// : disable/enable must resolve `PWR_CONTROL` before sysfs 437.
+/// Both recipe-bound entry points resolve PWR_CONTROL before the shared writer.
 pub fn admit_s19k_hal_resolves_pwr_control_before_sysfs(hal: &str) -> Result<(), &'static str> {
     admit_s19k_disable_psu_checked_exports_before_write(hal)?;
-    let start = hal
-        .find("fn disable_psu_checked_for_polarity")
-        .ok_or("missing polarity-bound disable resolver")?;
-    let end = hal[start..]
-        .find("pub fn disable_psu_checked()")
-        .ok_or("cannot bound polarity-bound disable resolver")?;
-    let body = &hal[start..start + end];
-    if !body.contains("resolve_psu_gpio_global") {
-        return Err("disable_psu_checked must resolve PSU GPIO before export");
+    let resolver = gpio437_source_section(
+        hal,
+        "pub fn resolve_psu_gpio_global()",
+        "fn resolve_plug_gpio_global",
+    )?;
+    if !resolver.contains("resolve_name_or_legacy(\"PWR_CONTROL\", GPIO_PSU_ENABLE)") {
+        return Err("HAL must resolve the PWR_CONTROL name with its explicit carrier fallback");
     }
-    if !hal.contains("resolve_name_or_legacy") {
-        return Err("HAL must resolve PWR_CONTROL by name");
-    }
-    if !hal.contains("\"PWR_CONTROL\"") {
-        return Err("HAL must use DT label PWR_CONTROL");
-    }
-    if !hal.contains("GPIO_PSU_ENABLE") {
-        return Err("HAL must keep 437 as explicit legacy fallback");
-    }
-    let resolve = body
-        .find("resolve_psu_gpio_global")
-        .ok_or("missing resolve")?;
-    let delegate = body
-        .find("disable_psu_checked_at")
-        .ok_or("missing polarity-bound write delegate")?;
-    if resolve > delegate {
-        return Err("PWR_CONTROL resolve must precede sysfs SafeOff delegate");
+    for (start, end) in [
+        ("fn enable_psu_gpio_for_recipe(", "fn drive_psu_checked_at("),
+        (
+            "fn disable_psu_checked_for_recipe(",
+            "pub fn disable_psu_with_retained_recipe_checked(",
+        ),
+    ] {
+        let body = gpio437_source_section(hal, start, end)?;
+        let resolve = body
+            .find("resolve_psu_gpio_global()?")
+            .ok_or("missing PWR_CONTROL resolver")?;
+        let write = body
+            .find("drive_psu_checked_at(")
+            .ok_or("missing qualified recipe writer")?;
+        if resolve > write {
+            return Err("PWR_CONTROL resolution must precede any recipe GPIO write");
+        }
     }
     Ok(())
 }
 
-/// Retained NoPic power custody must freeze the admitted board profile through
-/// enable, unwind rollback, poisoned-lock rollback, and terminal SafeOff.
-/// Re-reading `/etc/dcentos/board_target` in any of those paths creates a
-/// polarity TOCTOU: each SKU's SafeOff value energizes the other SKU.
+/// Population admission freezes one exact table recipe in OnceLock. Enable,
+/// poisoned-lock rollback, unwind and terminal cutoff must reuse that recipe.
 pub fn admit_amlogic_retained_power_owner_freezes_profile_polarity(
     hal: &str,
 ) -> Result<(), &'static str> {
-    if hal.contains("fn enable_psu_gpio() -> Result<()>") {
-        return Err(
-            "generic marker-selected GPIO437 enable must not exist after profile admission",
-        );
-    }
-    let profile_start = hal
-        .find("impl AmlogicNoPicProfile")
-        .ok_or("missing Amlogic NoPic profile implementation")?;
-    let profile_end = hal[profile_start..]
-        .find("pub struct AmlogicNoPicAdmission")
-        .map(|offset| profile_start + offset)
-        .ok_or("cannot bound Amlogic NoPic profile implementation")?;
-    let profile = &hal[profile_start..profile_end];
-    if !profile.contains("fn psu_is_active_low(self) -> bool")
-        || !profile.contains("matches!(self, Self::S19k)")
-    {
-        return Err("Amlogic profile must own immutable GPIO437 polarity");
-    }
-
-    let authority_start = hal
-        .find("struct AmlogicPsuCommitAuthority")
-        .ok_or("missing Amlogic PSU commit authority")?;
-    let authority_end = hal[authority_start..]
-        .find("fn amlogic_psu_enable_superseded")
-        .map(|offset| authority_start + offset)
-        .ok_or("cannot bound Amlogic PSU commit authority")?;
-    let authority = &hal[authority_start..authority_end];
+    let authority = gpio437_source_section(
+        hal,
+        "struct AmlogicPsuCommitAuthority",
+        "fn amlogic_psu_enable_superseded",
+    )?;
     for needle in [
-        "s19k_active_low: bool",
-        "fn new(profile: AmlogicNoPicProfile, s19k_native_generation: Option<Arc<()>>)",
-        "s19k_active_low: profile.psu_is_active_low()",
-        "disable_psu_checked_for_polarity(self.s19k_active_low)",
+        "board_target: profile.board_target()",
+        "recipe: OnceLock<Gpio437DriveRecipe>",
+        "recipe: OnceLock::new()",
+        "self.recipe.get().copied().ok_or_else",
+        ".any(|(name, present)| name.is_some() != present)",
+        "amlogic_gpio437::resolve_population_recipe(self.board_target, &names)",
+        "let _commit = self.begin_enable()?",
+        "self.recipe.set(recipe).map_err",
+        "self.recipe().and_then(disable_psu_checked_for_recipe)",
     ] {
         if !authority.contains(needle) {
-            return Err("Amlogic PSU commit authority lost admitted-polarity custody");
+            return Err("PSU owner lost exact population/table/single-assignment custody");
         }
     }
-    if authority.contains("disable_psu_checked()")
-        || authority.contains("amlogic_board_target_is_s19k")
+    let service = gpio437_source_section(
+        hal,
+        "impl AmlogicPowerThermalService",
+        "pub fn hold_track1_leftover_fans_pwm100",
+    )?;
+    let compact = service.split_whitespace().collect::<String>();
+    if !compact.contains("admission.populated_slots(),admission.profile(),")
+        || !compact.contains("AmlogicPsuCommitAuthority::new(profile,native_generation)")
     {
-        return Err("Amlogic PSU commit authority must not re-read generic marker polarity");
+        return Err("retained Amlogic service must bind its admitted profile and generation");
     }
-
-    let service_start = hal
-        .find("impl AmlogicPowerThermalService")
-        .ok_or("missing Amlogic power/thermal service implementation")?;
-    let service_end = hal[service_start..]
-        .find("pub fn hold_track1_leftover_fans_pwm100")
-        .map(|offset| service_start + offset)
-        .ok_or("cannot bound Amlogic power/thermal service implementation")?;
-    let service = &hal[service_start..service_end];
-    // The commit-authority call site binds the admitted profile (plus the
-    // native-generation fence); match it whitespace-tolerantly so rustfmt
-    // line-wrapping cannot break the custody needle.
-    let service_bound = service.split_whitespace().collect::<Vec<_>>().join(" ");
-    if !service.contains("admission.populated_slots(), admission.profile()")
-        || !service_bound
-            .contains("AmlogicPsuCommitAuthority::new( profile, s19k_native_generation, )")
-    {
-        return Err("retained Amlogic service must bind the admitted profile to its PSU owner");
+    let lifecycle = gpio437_source_section(
+        hal,
+        "impl AmlogicPowerThermalLifecycleOwner",
+        "pub struct AmlogicPsuEnableOperation",
+    )?;
+    let fence = lifecycle
+        .find("self.psu_commit.begin_terminal_cut()")
+        .ok_or("missing terminal GPIO fence")?;
+    let cut = lifecycle
+        .find("disable_psu_checked_for_recipe(self.psu_commit.recipe()?)?")
+        .ok_or("terminal cut must use the retained population recipe")?;
+    if fence > cut {
+        return Err("terminal GPIO fence must precede the recipe cut");
     }
-
-    let lifecycle_start = hal
-        .find("impl AmlogicPowerThermalLifecycleOwner")
-        .ok_or("missing Amlogic power lifecycle owner")?;
-    let lifecycle_end = hal[lifecycle_start..]
-        .find("pub struct AmlogicPsuEnableOperation")
-        .map(|offset| lifecycle_start + offset)
-        .ok_or("cannot bound Amlogic power lifecycle owner")?;
-    let lifecycle = &hal[lifecycle_start..lifecycle_end];
-    if !lifecycle.contains("disable_psu_checked_for_polarity(self.psu_commit.s19k_active_low())")
-        || lifecycle.contains("disable_psu_checked()")
-        || lifecycle.contains("amlogic_board_target_is_s19k")
-    {
-        return Err("terminal Amlogic SafeOff must use the retained admitted polarity");
-    }
-
-    let rollback_start = hal
-        .find("struct AmlogicPsuGpioRollback")
-        .ok_or("missing Amlogic PSU rollback owner")?;
-    let operation_end = hal[rollback_start..]
-        .find("impl AmlogicThermalPort")
-        .map(|offset| rollback_start + offset)
-        .ok_or("cannot bound Amlogic PSU rollback and enable operation")?;
-    let operation = &hal[rollback_start..operation_end];
+    let operation = gpio437_source_section(
+        hal,
+        "struct AmlogicPsuGpioRollback",
+        "impl AmlogicThermalPort",
+    )?;
     for needle in [
-        "s19k_active_low: bool",
-        "disable_psu_checked_for_polarity(self.s19k_active_low)",
-        "let s19k_active_low = self.psu_commit.s19k_active_low()",
-        "AmlogicPsuGpioRollback::armed(s19k_active_low)",
-        "enable_psu_gpio_for_polarity(s19k_active_low)",
+        "recipe: Gpio437DriveRecipe",
+        "let recipe = self.psu_commit.recipe()?",
+        "let gpio_commit = self.psu_commit.begin_enable()?",
+        "AmlogicPsuGpioRollback::armed(recipe)",
+        "enable_psu_gpio_for_recipe(recipe)",
     ] {
         if !operation.contains(needle) {
-            return Err("Amlogic enable/rollback path lost retained admitted polarity");
+            return Err("enable/unwind owner lost its retained population recipe");
         }
     }
-    if operation.contains("disable_psu_checked()")
-        || operation.contains("if amlogic_board_target_is_s19k")
+    if operation
+        .matches("disable_psu_checked_for_recipe(self.recipe)")
+        .count()
+        != 2
     {
-        return Err("Amlogic enable/rollback owner must not re-select polarity after admission");
+        return Err("checked-error and unwind rollback must both reuse the retained recipe");
+    }
+    let armed = operation
+        .find("AmlogicPsuGpioRollback::armed(recipe)")
+        .unwrap();
+    if armed
+        > operation
+            .find("enable_psu_gpio_for_recipe(recipe)")
+            .unwrap()
+    {
+        return Err("rollback must arm before any enable mutation");
+    }
+    for owner in [authority, lifecycle, operation] {
+        for forbidden in [
+            "disable_psu_checked()",
+            "amlogic_marker_drive_recipe",
+            "resolve_drive_recipe(",
+            "/etc/dcentos",
+            "psu_is_active_low",
+        ] {
+            if owner.contains(forbidden) {
+                return Err("retained owner must not reselect mutable marker or blanket polarity");
+            }
+        }
     }
     Ok(())
 }
@@ -1428,17 +1416,27 @@ mod tests {
         assert!(admit_amlogic_retained_power_owner_freezes_profile_polarity(hal).is_ok());
 
         for (from, to) in [
+            ("self.recipe.set(recipe)", "self.recipe.get()"),
             (
-                "s19k_active_low: profile.psu_is_active_low(),",
-                "s19k_active_low: false,",
+                "board_target: profile.board_target(),",
+                "board_target: \"am3-s21\",",
             ),
             (
-                "disable_psu_checked_for_polarity(self.psu_commit.s19k_active_low())?",
+                "disable_psu_checked_for_recipe(self.psu_commit.recipe()?)?",
                 "disable_psu_checked()?",
             ),
+            ("enable_psu_gpio_for_recipe(recipe)", "enable_psu_gpio()"),
             (
-                "enable_psu_gpio_for_polarity(s19k_active_low)",
-                "enable_psu_gpio()",
+                "amlogic_gpio437::resolve_population_recipe(self.board_target, &names)",
+                "amlogic_gpio437::resolve_drive_recipe(self.board_target)",
+            ),
+            (
+                "self.recipe.set(recipe).map_err",
+                "self.recipe.set(recipe).or_else",
+            ),
+            (
+                "disable_psu_checked_for_recipe(self.recipe)",
+                "disable_psu_checked_for_recipe(amlogic_marker_drive_recipe()?)",
             ),
         ] {
             assert!(hal.contains(from), "missing mutation anchor {from:?}");
@@ -1448,6 +1446,44 @@ mod tests {
                 "retained-polarity gate accepted mutation {from:?} -> {to:?}"
             );
         }
+    }
+
+    #[test]
+    fn recipe_writer_refuses_missing_export_inversion_off_and_readback_steps() {
+        let hal = include_str!("../../dcentrald-hal/src/platform/amlogic/mod.rs");
+        for needle in [
+            "write(&gpio_root.join(\"export\"), &n.to_string())",
+            "write(&base.join(\"direction\"), \"in\")",
+            "read_psu_active_low_disabled_checked_at(gpio_root, n)?",
+            "write(&base.join(\"direction\"), recipe.off_direction())",
+            "read_psu_enabled_on_with_recipe_at(gpio_root, n, recipe)? != on",
+        ] {
+            assert!(hal.contains(needle), "missing mutation anchor {needle:?}");
+            assert!(
+                admit_s19k_disable_psu_checked_exports_before_write(&hal.replacen(
+                    needle,
+                    "removed_recipe_guard",
+                    1
+                ))
+                .is_err(),
+                "recipe writer accepted missing {needle:?}"
+            );
+        }
+        let recipe = crate::amlogic_gpio437::resolve_population_recipe(
+            "am3-s19k",
+            &["BHB56902", "BHB56903"],
+        )
+        .unwrap();
+        assert_eq!(
+            (recipe.on_raw(), recipe.off_raw(), recipe.off_direction()),
+            (0, 1, "high")
+        );
+        assert!(
+            crate::amlogic_gpio437::resolve_population_recipe("am3-s19k", &["BHB42601"]).is_err()
+        );
+        assert!(
+            crate::amlogic_gpio437::resolve_population_recipe("am3-bb", &["BHB56902"]).is_err()
+        );
     }
 
     #[test]

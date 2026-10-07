@@ -204,6 +204,42 @@ EOF
 "$SIGNER" "$TEST_ROOT/s9-piggyback.img" --check-only >/dev/null \
     || fail_test "S9 piggyback manifest policy was rejected"
 
+# The exact native sibling builders share the complete standalone boot format.
+# Their admission is deliberately not a prefix rule or a piggyback promotion.
+for variant in s9i s9j; do
+    cp "$TEST_ROOT/complete.img" "$TEST_ROOT/$variant.img"
+    "$PYTHON" - "$TEST_ROOT/complete.img.manifest.json" \
+        "$TEST_ROOT/$variant.img.manifest.json" "$variant" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+data = json.loads(Path(sys.argv[1]).read_text())
+data.update(schema="dcentos.am1_s9_sd_image_manifest.v1",
+            target=f"am1-{sys.argv[3]}-sd-standalone", image=f"{sys.argv[3]}.img")
+Path(sys.argv[2]).write_text(json.dumps(data), encoding="utf-8")
+PY
+    "$SIGNER" "$TEST_ROOT/$variant.img" --key "$TEST_ROOT/private.pem" \
+        --pubkey "$TEST_ROOT/public.pem" >/dev/null \
+        || fail_test "$variant exact standalone signing was rejected"
+    openssl pkeyutl -verify -rawin -pubin -inkey "$TEST_ROOT/public.pem" \
+        -sigfile "$TEST_ROOT/$variant.img.sig" -in "$TEST_ROOT/$variant.img" \
+        >/dev/null || fail_test "$variant published signature does not verify"
+    "$PYTHON" - "$TEST_ROOT/$variant.img.manifest.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["target"] = data["target"].replace("-standalone", "-piggyback")
+path.write_text(json.dumps(data), encoding="utf-8")
+PY
+    if "$SIGNER" "$TEST_ROOT/$variant.img" --check-only >/dev/null 2>&1; then
+        fail_test "$variant unsupported piggyback policy was accepted"
+    fi
+done
+
 if "$SIGNER" "$TEST_ROOT/complete.img" --key "$TEST_ROOT/private.pem" \
     --pubkey "$TEST_ROOT/wrong-public.pem" \
     --output-sig "$TEST_ROOT/wrong-key.sig" >/dev/null 2>&1; then

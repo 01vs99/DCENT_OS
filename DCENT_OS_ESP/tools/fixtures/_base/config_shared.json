@@ -1,0 +1,37 @@
+{
+ "schema": 1,
+ "family": "bitaxe",
+ "deviceModel": "suprahex",
+ "boardTarget": "bitaxe-hex-supra",
+ "boardVersion": "701",
+ "network": {
+  "hostname": "dcentaxe-mock",
+  "ipv4": "192.0.2.42",
+  "ssid": "MOCK-WIFI-SSID"
+ },
+ "primaryPool": {
+  "url": "solo.ckpool.org",
+  "port": 3333,
+  "worker": "bc1pMOCK…MOCK",
+  "passwordSet": true,
+  "protocol": "stratum-v1",
+  "enabled": true
+ },
+ "fallbackPool": null,
+ "mining": {
+  "enabled": true,
+  "frequencyMhz": 525,
+  "voltageMv": 1220,
+  "overclockEnabled": false
+ },
+ "thermal": {
+  "targetTempC": null,
+  "manualFanSpeedPct": 100
+ },
+ "auth": {
+  "passwordSet": false,
+  "metricsRequireAuth": true,
+  "allowUnsignedOta": false,
+  "sessionAuth": true
+ }
+}

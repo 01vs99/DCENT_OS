@@ -2,14 +2,9 @@
 #
 # S37board_setup - checked Amlogic A113D safe baseline and board pinmux
 #
-# GPIO437 is PWR_EN and is active HIGH: 1=ON, 0=OFF.
-# Exception: board_target=am3-s19k uses SafeOff=1 (T6 2026-08-12: sysfs 0
-# engages the rail). S21-class images keep SafeOff=0. Linux starts from an
-# UnknownInherited power state because U-Boot may have touched APW bus 1 and a
-# warm reset may preserve GPIO state.  The first safety-critical Linux
-# mutation is therefore a glitch-free direction write, followed by direction
-# and value readback.  Readback is software evidence only; it is not a
-# measurement of the physical rail.
+# GPIO437 levels come from the generated exact-target/revision authority.
+# Undriven input is not an OFF command. A qualified OFF command/readback is
+# software evidence only; it does not measure the physical rail.
 
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 
@@ -21,6 +16,44 @@ RECEIPT=$RECEIPT_DIR/amlogic-boot-safe-state-v2
 MUTATION_POLICY_FILE=$IDENTITY_ROOT/mutation_policy
 MUTATION_POLICY_HELPER=/usr/libexec/dcentos/mutation-policy.sh
 PWR_GPIO=437
+
+GPIO437_POLICY_HELPER=/usr/share/dcentos/amlogic-gpio437.sh
+
+psu_polarity_class() {
+    [ -r "$GPIO437_POLICY_HELPER" ] || return 1
+    . "$GPIO437_POLICY_HELPER" || return 1
+    dcent_gpio437_policy_state "$1"
+}
+
+read_psu_recipe() {
+    [ -r "$GPIO437_POLICY_HELPER" ] || {
+        log_error 'GPIO437 polarity authority is missing'
+        return 1
+    }
+    . "$GPIO437_POLICY_HELPER" || return 1
+    PSU_CLASS=$(dcent_gpio437_policy_state "$BOARD_TARGET") || {
+        log_error "GPIO437 refuse: missing or unsealed board_target='$BOARD_TARGET'"
+        return 1
+    }
+    PWR_ON_VALUE=
+    PWR_OFF_VALUE=
+    PWR_OFF_DIRECTION=
+    case "$PSU_CLASS" in
+        qualified-software)
+            LEVELS=$(dcent_gpio437_drive_levels "$BOARD_TARGET") || return 1
+            case "$LEVELS" in
+                '0 1 high'|'1 0 low') ;;
+                *) return 1 ;;
+            esac
+            set -- $LEVELS
+            PWR_ON_VALUE=$1
+            PWR_OFF_VALUE=$2
+            PWR_OFF_DIRECTION=$3
+            ;;
+        undriven) ;;
+        *) return 1 ;;
+    esac
+}
 FAN_PERIOD_NS=100000
 FAN_BOOT_DUTY_NS=30000
 
@@ -37,43 +70,22 @@ read_trimmed() {
 require_mutation_authority() {
     # Seal the complete platform:target:rail tuple before any electrical
     # mutation. A board_target-only peek is not sufficient: a cross-paired
-    # S21 platform + S19k target would otherwise select S19k's inverse GPIO437
-    # SafeOff value before exact identity rejection.
+    # mismatched platform and target must fail before any GPIO437 mutation.
     read_identity || {
         log_error 'exact Amlogic platform:target:rail identity is required before mutation'
         return 1
     }
-    TARGET_HINT=$BOARD_TARGET
-    PLATFORM_HINT=$PLATFORM
-    case "$PLATFORM_HINT:$TARGET_HINT" in
-        am3-aml-s19k:am3-s19k)
-            if [ ! -r "$MUTATION_POLICY_HELPER" ]; then
-                log_error 'S19k mutation-policy helper is missing; refusing electrical mutation'
-                return 1
-            fi
-            . "$MUTATION_POLICY_HELPER"
-            if ! dcent_mutation_policy_has "$MUTATION_POLICY_FILE" boot-safeoff; then
-                log_error 'S19k boot-safeoff capability is missing or insecure; refusing electrical mutation'
-                return 1
-            fi
-            return 0
-            ;;
-    esac
-    if [ -e "$MUTATION_POLICY_FILE" ]; then
-        MUTATION_POLICY=$(read_trimmed "$MUTATION_POLICY_FILE") || {
-            log_error 'unreadable mutation_policy; refusing electrical mutation'
-            return 1
-        }
-        [ "$MUTATION_POLICY" = hardware-enabled ] || {
-            log_error "mutation_policy=$MUTATION_POLICY; refusing electrical mutation"
-            return 1
-        }
+    if [ ! -r "$MUTATION_POLICY_HELPER" ]; then
+        log_error 'mutation-policy helper is missing; refusing electrical mutation'
+        return 1
     fi
-
-    # Defense in depth for older package images that predate mutation_policy.
-    case "$PLATFORM_HINT:$TARGET_HINT" in
-        am3-aml-t21:*|*:am3-t21|am3-aml-s21xp:*|*:am3-s21xp|\
-        am3-aml-s19xp:*|*:am3-s19xp|am3-aml-s19jxp:*|*:am3-s19jxp)
+    . "$MUTATION_POLICY_HELPER"
+    if ! dcent_mutation_policy_has "$MUTATION_POLICY_FILE" boot-safeoff; then
+        log_error 'boot-safeoff capability is missing or insecure; refusing electrical mutation'
+        return 1
+    fi
+    case "$PLATFORM:$BOARD_TARGET" in
+        am3-aml-t21:*|*:am3-t21)
             log_error 'target controller/rail ownership is unresolved; refusing electrical mutation'
             return 1
             ;;
@@ -102,9 +114,14 @@ read_identity() {
     case "$PLATFORM:$BOARD_TARGET" in
         am3-aml-s19jpro:am3-s19jpro-aml|\
         am3-aml-s19k:am3-s19k|\
+        am3-aml-s19kpro:am3-s19kpro|\
         am3-aml-s21:am3-s21|\
         am3-aml-s21pro:am3-s21pro|\
-        am3-aml-s21xp:am3-s21xp)
+        am3-aml-s21xp:am3-s21xp|\
+        am3-aml-s19xp:am3-s19xp|\
+        am3-aml-s19jxp:am3-s19jxp|\
+        am3-aml-s19jproa:am3-s19jproa|\
+        am3-aml-s19jproplus:am3-s19jproplus)
             ;;
         *)
             log_error "unsealed Amlogic identity platform=$PLATFORM board_target=$BOARD_TARGET"
@@ -164,8 +181,12 @@ set_gpio_value_checked() {
 }
 
 force_psu_safe_low() {
+    # Resolve before any GPIO mutation; an unknown target supplies no level.
+    read_psu_recipe || return 1
     export_gpio_checked "$PWR_GPIO" || return 1
-
+    if [ "$PSU_CLASS" = undriven ] || [ "$(read_trimmed "$GPIO_ROOT/gpio$PWR_GPIO/active_low")" != 0 ]; then
+        set_gpio_direction_checked "$PWR_GPIO" in in || return 1
+    fi
     ACTIVE_LOW_PATH=$GPIO_ROOT/gpio$PWR_GPIO/active_low
     [ -e "$ACTIVE_LOW_PATH" ] || {
         log_error "GPIO$PWR_GPIO active_low control is unavailable"
@@ -175,24 +196,13 @@ force_psu_safe_low() {
         log_error "GPIO$PWR_GPIO active_low=0 write/readback failed"
         return 1
     }
-
-    # Kernel GPIO sysfs ABI: writing `low`/`high` selects output with an
-    # initial level without the out-then-value glitch of two operations.
-    # S21-class / RE-4C: SafeOff drives 0. am3-s19k: SafeOff drives 1.
-    case "$BOARD_TARGET" in
-        am3-s19k|am3-s19kpro|am3-aml-s19kpro)
-            set_gpio_direction_checked "$PWR_GPIO" high out || return 1
-            set_gpio_value_checked "$PWR_GPIO" 1 || return 1
-            ;;
-        am3-s19jpro-aml|am3-s21|am3-s21pro|am3-s21xp)
-            set_gpio_direction_checked "$PWR_GPIO" low out || return 1
-            set_gpio_value_checked "$PWR_GPIO" 0 || return 1
-            ;;
-        *)
-            log_error "GPIO437 refuse: missing or unsealed board_target='$BOARD_TARGET'"
-            return 1
-            ;;
-    esac
+    if [ "$PSU_CLASS" = qualified-software ]; then
+        # Kernel direction high/low establishes output without an out/value glitch.
+        set_gpio_direction_checked "$PWR_GPIO" "$PWR_OFF_DIRECTION" out || return 1
+        set_gpio_value_checked "$PWR_GPIO" "$PWR_OFF_VALUE" || return 1
+    else
+        log_error "GPIO$PWR_GPIO left undriven for board_target='$BOARD_TARGET': exact revision coverage is incomplete; no OFF level is claimed"
+    fi
 }
 
 configure_input_gpio() {
@@ -335,6 +345,11 @@ dcentrald_may_execute() {
 
 write_receipt() {
     STATE=$1
+    read_psu_recipe || return 1
+    if [ "$STATE" = terminal-safe ] && [ "$PSU_CLASS" != qualified-software ]; then
+        log_error 'undriven GPIO437 cannot establish terminal SafeOff'
+        return 1
+    fi
     verify_hashboards_reset_low || {
         log_error 'refusing safe-state receipt without all three checked reset-low legs'
         return 1
@@ -354,17 +369,20 @@ write_receipt() {
         printf 'platform=%s\n' "$PLATFORM"
         printf 'board_target=%s\n' "$BOARD_TARGET"
         printf 'resource=amlogic-gpio437-power-gate\n'
-        printf 'gpio_direction=out\n'
         printf 'gpio_active_low=0\n'
-        case "$BOARD_TARGET" in
-            am3-s19k|am3-s19kpro|am3-aml-s19kpro)
-                printf 'commanded_value=1\n'
-                printf 'readback_value=1\n'
+        printf 'psu_polarity_class=%s\n' "$PSU_CLASS"
+        case "$PSU_CLASS" in
+            qualified-software)
+                printf 'gpio_direction=out\n'
+                printf 'commanded_value=%s\n' "$PWR_OFF_VALUE"
+                printf 'readback_value=%s\n' "$PWR_OFF_VALUE"
                 ;;
-            *)
-                printf 'commanded_value=0\n'
-                printf 'readback_value=0\n'
+            undriven)
+                printf 'gpio_direction=in\n'
+                printf 'commanded_value=undriven\n'
+                printf 'readback_value=%s\n' "$(read_trimmed "$GPIO_ROOT/gpio$PWR_GPIO/value" 2>/dev/null || printf 'unknown\n')"
                 ;;
+            *) return 1 ;;
         esac
         printf 'fan0_duty_ns=%s\n' "$FAN_BOOT_DUTY_NS"
         printf 'fan0_period_ns=%s\n' "$FAN_PERIOD_NS"
@@ -418,19 +436,23 @@ verify_safe_receipt() {
     receipt_field_is platform "$PLATFORM" || return 1
     receipt_field_is board_target "$BOARD_TARGET" || return 1
     receipt_field_is resource amlogic-gpio437-power-gate || return 1
-    receipt_field_is gpio_direction out || return 1
     receipt_field_is gpio_active_low 0 || return 1
-    case "$BOARD_TARGET" in
-        am3-s19k|am3-s19kpro|am3-aml-s19kpro)
-            receipt_field_is commanded_value 1 || return 1
-            receipt_field_is readback_value 1 || return 1
-            SAFE_OFF_VALUE=1
+    read_psu_recipe || return 1
+    receipt_field_is psu_polarity_class "$PSU_CLASS" || return 1
+    case "$PSU_CLASS" in
+        qualified-software)
+            receipt_field_is gpio_direction out || return 1
+            receipt_field_is commanded_value "$PWR_OFF_VALUE" || return 1
+            receipt_field_is readback_value "$PWR_OFF_VALUE" || return 1
+            SAFE_OFF_VALUE=$PWR_OFF_VALUE
             ;;
-        *)
-            receipt_field_is commanded_value 0 || return 1
-            receipt_field_is readback_value 0 || return 1
-            SAFE_OFF_VALUE=0
+        undriven)
+            receipt_field_is gpio_direction in || return 1
+            receipt_field_is commanded_value undriven || return 1
+            # Input readback may follow the external pull; it is not an OFF proof.
+            SAFE_OFF_VALUE=
             ;;
+        *) return 1 ;;
     esac
     receipt_field_is fan0_duty_ns "$FAN_BOOT_DUTY_NS" || return 1
     receipt_field_is fan0_period_ns "$FAN_PERIOD_NS" || return 1
@@ -458,10 +480,20 @@ verify_safe_receipt() {
     DIRECTION=$(read_trimmed "$GPIO_ROOT/gpio$PWR_GPIO/direction") || return 1
     VALUE=$(read_trimmed "$GPIO_ROOT/gpio$PWR_GPIO/value") || return 1
     ACTIVE_LOW=$(read_trimmed "$GPIO_ROOT/gpio$PWR_GPIO/active_low") || return 1
-    [ "$DIRECTION" = out ] && [ "$VALUE" = "$SAFE_OFF_VALUE" ] && [ "$ACTIVE_LOW" = 0 ] || {
-        log_error "GPIO$PWR_GPIO revalidation failed direction=$DIRECTION value=$VALUE want=$SAFE_OFF_VALUE active_low=$ACTIVE_LOW"
-        return 1
-    }
+    if [ -n "$SAFE_OFF_VALUE" ]; then
+        [ "$DIRECTION" = out ] && [ "$VALUE" = "$SAFE_OFF_VALUE" ] && [ "$ACTIVE_LOW" = 0 ] || {
+            log_error "GPIO$PWR_GPIO revalidation failed direction=$DIRECTION value=$VALUE want=$SAFE_OFF_VALUE active_low=$ACTIVE_LOW"
+            return 1
+        }
+    else
+        # Unqualified target: the invariant is that nothing has started
+        # driving the pin behind our back, not that it sits at a level we
+        # cannot justify calling safe.
+        [ "$DIRECTION" = in ] && [ "$ACTIVE_LOW" = 0 ] || {
+            log_error "GPIO$PWR_GPIO revalidation failed: expected an undriven pin for unqualified board_target='$BOARD_TARGET' but found direction=$DIRECTION value=$VALUE active_low=$ACTIVE_LOW"
+            return 1
+        }
+    fi
     for CHANNEL in 0 1; do
         PWM_DIR=$PWM_ROOT/pwm$CHANNEL
         DUTY=$(read_trimmed "$PWM_DIR/duty_cycle") || return 1
@@ -569,19 +601,29 @@ emergency_safe_off() {
 
 mark_runtime_handoff() {
     require_mutation_authority || return 1
-    verify_boot_safe_receipt || return 1
+    # S82 prepares the persistent session before this transition. A checked
+    # terminal baseline may serve the next session; its receipt alone cannot
+    # clear a crashed or unresolved hardware session.
+    verify_start_safe_receipt || return 1
     configure_fans_checked || return 1
     # Revalidate the power gate after cooling and immediately before the
     # supervisor publishes the runtime owner.
     DIRECTION=$(read_trimmed "$GPIO_ROOT/gpio$PWR_GPIO/direction") || return 1
     VALUE=$(read_trimmed "$GPIO_ROOT/gpio$PWR_GPIO/value") || return 1
-    # Boot-safe is SafeOff. S21-class SafeOff=0; am3-s19k SafeOff=1 (0 engages).
     read_identity || return 1
-    case "$BOARD_TARGET" in
-        am3-s19k|am3-s19kpro|am3-aml-s19kpro) WANT_SAFE_OFF=1 ;;
-        *) WANT_SAFE_OFF=0 ;;
+    read_psu_recipe || return 1
+    case "$PSU_CLASS" in
+        qualified-software)
+            [ "$DIRECTION" = out ] && [ "$VALUE" = "$PWR_OFF_VALUE" ] || return 1
+            ;;
+        undriven)
+            [ "$DIRECTION" = in ] || {
+                log_error "GPIO$PWR_GPIO runtime handoff refused: unqualified board_target='$BOARD_TARGET' must remain undriven"
+                return 1
+            }
+            ;;
+        *) return 1 ;;
     esac
-    [ "$DIRECTION" = out ] && [ "$VALUE" = "$WANT_SAFE_OFF" ] || return 1
     write_receipt runtime-handoff
 }
 
@@ -590,8 +632,15 @@ verify_boot_safe_receipt() {
     receipt_field_is state boot-safe
 }
 
+verify_start_safe_receipt() {
+    verify_safe_receipt || return 1
+    receipt_field_is state boot-safe && return 0
+    [ "$PSU_CLASS" = qualified-software ] && receipt_field_is state terminal-safe
+}
+
 verify_terminal_safe_receipt() {
     verify_safe_receipt || return 1
+    [ "$PSU_CLASS" = qualified-software ] || return 1
     receipt_field_is state terminal-safe
 }
 
@@ -599,7 +648,7 @@ case "${1:-start}" in
     start)
         printf '  Establishing checked Amlogic boot-safe baseline...\n'
         if start_board; then
-            printf '  [OK] GPIO437 software readback SafeOff; fan PWM <=30; pinmux checked\n'
+            printf '  [OK] GPIO437 policy baseline checked; fan PWM <=30; pinmux checked\n'
         else
             log_error 'safe baseline incomplete; dcentrald admission must remain blocked'
             exit 1
@@ -608,6 +657,12 @@ case "${1:-start}" in
     verify-safe-state)
         verify_boot_safe_receipt || {
             log_error 'boot-safe receipt or live GPIO revalidation failed'
+            exit 1
+        }
+        ;;
+    verify-start-safe-state)
+        verify_start_safe_receipt || {
+            log_error 'start requires a boot-safe or terminal-safe receipt and full live revalidation'
             exit 1
         }
         ;;
@@ -632,7 +687,7 @@ case "${1:-start}" in
         :
         ;;
     *)
-        echo "Usage: $0 {start|stop|verify-safe-state|mark-runtime-handoff|verify-terminal-safe-state|emergency-safe-off}" >&2
+        echo "Usage: $0 {start|stop|verify-safe-state|verify-start-safe-state|mark-runtime-handoff|verify-terminal-safe-state|emergency-safe-off}" >&2
         exit 64
         ;;
 esac

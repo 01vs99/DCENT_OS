@@ -466,19 +466,39 @@ class RunnerTranscriptReceiptContractTests(unittest.TestCase):
             'wc -l < "$BOUNDED_TRANSCRIPT_RECEIPT" | tr -d \' \\t\\r\\n\')" -eq 51',
             source,
         )
+        # f2d3b9bc6 consolidated the per-mode receipt publications into
+        # publish_mode_specific_receipts_after_safeoff(), the SOLE caller of
+        # publish_bounded_work_transcript_receipt. It emits install-custody ->
+        # no-work -> bounded-work -> endurance in order, so the bounded receipt
+        # still follows the no-work receipt. The live-safety contract is
+        # unchanged and now enforced at EVERY invocation of the unified helper:
+        # each is immediately preceded by a checked-SafeOff proof.
         calls = [
             match.start()
             for match in re.finditer(r'publish_bounded_work_transcript_receipt "\$', source)
         ]
-        self.assertEqual(len(calls), 2)
-        for call in calls:
-            prefix = source[:call]
-            checked_safeoff = prefix.rfind("if perform_checked_safeoff; then")
-            pending_transition = prefix.rfind("clear_runtime_obligation_after_safeoff || exit 1")
-            no_work_receipt = prefix.rfind('publish_handoff_no_work_transcript_receipt "$')
-            self.assertLess(checked_safeoff, pending_transition)
-            self.assertLess(pending_transition, no_work_receipt)
-            self.assertLess(no_work_receipt, call)
+        self.assertEqual(len(calls), 1)
+        unified = source.index("publish_mode_specific_receipts_after_safeoff() {")
+        self.assertLess(
+            source.index('publish_handoff_no_work_transcript_receipt "$', unified),
+            source.index('publish_bounded_work_transcript_receipt "$', unified),
+        )
+        invocations = [
+            match.start()
+            for match in re.finditer(
+                r'\n *publish_mode_specific_receipts_after_safeoff "\$', source
+            )
+        ]
+        self.assertTrue(invocations)
+        for call in invocations:
+            preceding_line = source[:call].rsplit("\n", 1)[-1].strip()
+            self.assertIn(
+                preceding_line,
+                {
+                    "clear_runtime_obligation_after_safeoff || exit 1",
+                    "transition_startup_stock_loss_to_pending || exit 1",
+                },
+            )
 
 
 if __name__ == "__main__":

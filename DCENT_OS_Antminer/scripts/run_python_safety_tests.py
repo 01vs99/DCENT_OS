@@ -19,8 +19,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 
 SUITES = (
-    "test_check_cross_compile_matrix_honesty.py",
-    "test_check_work_dispatch_ci_coverage.py",
     "test_check_install_path_go_guard.py",
     "test_dashboard_bench_check.py",
     "test_dashboard_bench_evidence_check.py",

@@ -318,7 +318,7 @@ export function ChipRailMvPill() {
           chip rail
         </span>
         <span>{pctLabel}</span>
-        <InfoDot term="chain_rail_mv_xil25" />
+        <InfoDot term="chain_rail_mv_actual" />
       </div>
       {stale && <StalePill staleForSec={staleForSec} />}
       {caption && (

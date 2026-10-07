@@ -11,6 +11,28 @@ dcent_release_is_truthy() {
     esac
 }
 
+# Canonical image-posture resolution (WS-A4): RELEASE is the default posture;
+# DCENT_DEV_IMAGE=1 is the DEV/LAB opt-out. This library is sourced from many
+# contexts; resolve the helper from the known checkout layout.
+if ! command -v dcent_release_posture_is_release >/dev/null 2>&1; then
+    dcent_release_posture_lib=""
+    if [ -n "${PROJECT_ROOT:-}" ] && [ -f "${PROJECT_ROOT}/scripts/lib/release_posture.sh" ]; then
+        dcent_release_posture_lib="${PROJECT_ROOT}/scripts/lib/release_posture.sh"
+    elif [ -n "${BR2_EXTERNAL_DCENTOS_PATH:-}" ] &&
+         [ -f "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/release_posture.sh" ]; then
+        dcent_release_posture_lib="${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/release_posture.sh"
+    elif [ -f "${0%/*}/lib/release_posture.sh" ]; then
+        dcent_release_posture_lib="${0%/*}/lib/release_posture.sh"
+    elif [ -f "scripts/lib/release_posture.sh" ]; then
+        dcent_release_posture_lib="scripts/lib/release_posture.sh"
+    fi
+    [ -n "$dcent_release_posture_lib" ] || {
+        echo "ERROR: release envelope provenance: cannot locate scripts/lib/release_posture.sh" >&2
+        exit 1
+    }
+    . "$dcent_release_posture_lib"
+fi
+
 dcent_release_is_release_status() {
     case "${1:-release}" in
         release|production|stable) return 0 ;;
@@ -20,7 +42,7 @@ dcent_release_is_release_status() {
 
 dcent_release_provenance_required() {
     dcent_release_is_release_status "${DCENT_PACKAGE_STATUS:-release}" ||
-        dcent_release_is_truthy "${DCENT_RELEASE_IMAGE:-0}" ||
+        dcent_release_posture_is_release ||
         dcent_release_is_truthy "${DCENT_REQUIRE_RELEASE_PROVENANCE:-0}"
 }
 
@@ -33,7 +55,7 @@ dcent_release_require_signed_authority_profile() {
             "release-root signing requires release, production, or stable package status"
         return 1
     fi
-    if ! dcent_release_is_truthy "${DCENT_RELEASE_IMAGE:-0}"; then
+    if ! dcent_release_posture_is_release; then
         dcent_release_error \
             "release-root signing requires DCENT_RELEASE_IMAGE=1 hardening"
         return 1

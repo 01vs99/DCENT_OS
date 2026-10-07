@@ -1,0 +1,8 @@
+{
+ "running": false,
+ "completed": false,
+ "passed": false,
+ "started_unix_ms": 0,
+ "finished_unix_ms": 0,
+ "results": []
+}

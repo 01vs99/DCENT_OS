@@ -113,10 +113,11 @@
 use std::time::{Duration, Instant};
 
 use crate::psu_apw12_smbus::{run_with_power_rollback, Apw12SmbusBackend};
+use crate::psu_apw_uart_tunnel::{ApwUartTunnel, ApwUartTunnelBus};
 use crate::serial::DevmemUart;
 use crate::{HalError, Result};
 
-use super::beaglebone::BeagleBonePlatform;
+use super::beaglebone::{BeagleBoneBoardTarget, BeagleBonePlatform};
 
 // ---------------------------------------------------------------------------
 // Public constants — all pinned to R4 trace §1-5
@@ -672,59 +673,27 @@ fn write_sysfs_gpio_direction(gpio: u32, dir: &str) -> Result<()> {
 // implements the v1 board-side init for `S19J_IO_BOARD_V2_0` from
 //  §3-4:
 //
-//   1. consume the caller's pre-opened gpio59 owner and export/configure only
-//      the ASIC RST gpios {49,60,27,22}
-//   2. use that sole owner to assert gpio59 HIGH → settle (~3 s)
-//   3. APW121215f init on the bit-banged i2c-gpio bus (bus 1) via the
-//      7-byte UART-tunnel framing: probe HW=0x76/FW=0x17, calibration
-//      read `0x06/[0x40,0x20]`, watchdog-disable `0x81/[0x00,0x00]` —
-//      **NO PowerOn opcode** (rail comes up via gpio59)
-//   4. APW set-voltage remains unresolved; chain rail is expected to be
-//      controlled by the hashboard voltage path / board enable, not by this
-//      APW tunnel helper. This step logs if the set-voltage stub is reached.
-//   5. de-assert chain resets {49→60→27} with 10 ms stagger, retry chain1
-//      with the ftrace-captured double pulse, leave gpio22/rst3 asserted
-//      (chain 3 unpopulated), then settle ~1.1 s
-//   6. (hand-off to the BM1362 chip-side init — the caller / Phase-C mode
-//      does the enum / PLL / fast-baud / MiscCtrl / TicketMask / work dispatch via
-//      `dcentrald-asic::bm1362` + the Phase-1 `uart_transport`; this
-//      function returns once the board is powered + reset-released + the
-//      UARTs are ready)
-//   7. when requested in the same run (`apw_drop_to_steady`): APW drop
-//      rail to ~13.8 V steady
-//
-// - NO PIC1704 DC-DC enable (`opts.enable_pic1704_dc_dc=false`) — NoPic board.
-// - NO PIC heartbeat thread (`opts.run_pic_heartbeat=false`) — NoPic board.
-// - MiscCtrl `0x18=0x00C100B0` triple-write is left to the chip-side init
-//   (`opts.run_miscctrl_triple_write=true` is passed through to the BM1362
-//   init, not done in this function).
-//
-// **Riskiest BEST-GUESS assumptions (Phase D resolves each):**
-//   - gpio59 true-cold ON edge (HIGH=ON is consistent with luxminer
-//     `active_low=false`, but not directly observed from AC-cold).
-//     `// XXX: BEST-GUESS — verify on .79`
-//   - the APW set-voltage payload encoding (centivolt vs raw vs DAC) — the
-//     `ApwUartTunnel::set_voltage_mv` is a Phase-D stub, so step 4 here is
-//     a LOG-ONLY placeholder when the stub returns its "not implemented"
-//     error. `// XXX: BEST-GUESS — verify on .79`
-//   - whether there's a PIC at 0x20/0x21/0x22 (assumed NoPic). If Phase D
-//     finds one, this sequence grows a framed heartbeat (cold-boot-sequence.md §3 step 8).
-
-use crate::psu_apw_uart_tunnel::{ApwUartTunnel, ApwUartTunnelBus};
-
-use super::beaglebone::BeagleBoneBoardTarget;
+// The current S19J_IO_BOARD_V2_0 supply path is source-qualified separately
+// from the older GPIO59 label. `beaglebone_psu` pins the exact AM33XX semantic
+// PSU ON/OFF line65 and fixed APW DAC0. The daemon reads exact board identity
+// before ON and binds actual kernel GPIO and adapter ownership. Calibration,
+// watchdog acknowledgment, voltage echo and DAC readback errors are fatal.
+// Hashboard voltage remains the separate fw0x89 dsPIC owner's responsibility.
+// The captured reset retry/timing is a warm software observation; actual cold
+// timing and rails have not been measured by this implementation.
 
 /// Cold-boot options for the `a lab unit`-class `S19J_IO_BOARD_V2_0` unit (Phase B).
 ///
 /// Built from a [`BeagleBoneBoardTarget`] via [`Self::from_board_target`];
 /// `BeagleBonePlatform::run_cold_boot` does that for the daemon. All values
-/// trace to `am3-bb-s19jpro.toml` / the hardcoded `a lab unit` defaults.
+/// timing comes from the retained `a lab unit` defaults. The upstream supply GPIO
+/// and DAC target come from the separate source-qualified immutable recipe.
 #[derive(Debug, Clone)]
 pub struct ColdBootOptsV2 {
-    /// Board/PSU enable GPIO (DTS label `enable`). Default `59`.
+    /// Source-qualified AM33XX supply ON/OFF GPIO. Exactly65; never legacy59.
     pub board_enable_gpio: u32,
     /// `true` → drive `board_enable_gpio` HIGH for "ON" (the default);
-    /// `false` → drive it LOW. **XXX: BEST-GUESS** — Phase D verifies.
+    /// `false` is refused by this exact supply recipe.
     pub board_enable_active_high: bool,
     /// Per-chain ASIC reset GPIOs (rst0/rst1/rst2/rst3). Default
     /// `[49,60,27,22]`. On a 3-chain unit only the first 3 are de-asserted;
@@ -749,26 +718,21 @@ pub struct ColdBootOptsV2 {
     pub asic_rst_retry_assert_ms: u64,
     /// Release duration between retry pulses. Default 100 ms.
     pub asic_rst_retry_release_ms: u64,
-    /// Historical APW12 open-core rail target (mV). This remains a placeholder:
-    /// `S19J_IO_BOARD_V2_0` does not currently set chain rail through the APW
-    /// tunnel helper. Default 15000.
-    /// **XXX: BEST-GUESS** — Phase D verifies whether this belongs anywhere.
+    /// Upstream fixed supply target. Exactly15120mV (source-selected DAC0).
     pub apw12_rail_open_core_mv: u16,
-    /// Historical APW12 steady rail target (mV). Placeholder until APW
-    /// set-voltage payload semantics are RE'd. Default 13800.
-    /// **XXX: BEST-GUESS** — Phase D verifies whether this belongs anywhere.
+    /// Same upstream supply after the separate hashboard ramp. No APW drop.
     pub apw12_rail_steady_mv: u16,
-    /// NoPic board → false. Kept as a knob for a future PIC-bearing IO board.
+    /// PIC1704 is unsupported here; the daemon owns separate fw0x89 dsPICs.
     pub enable_pic1704_dc_dc: bool,
-    /// NoPic board → false (no heartbeat thread). Kept as a knob.
+    /// PIC1704 heartbeat is unsupported here; the daemon owns dsPIC heartbeat.
     pub run_pic_heartbeat: bool,
     /// `0x18=0x00C100B0` ×3 — done by the BM1362 chip-side init, not here.
     /// Passed through so the caller knows whether to ask the chip-side init
     /// for it. Default true (chip-side BM1362 on this carrier).
     pub run_miscctrl_triple_write: bool,
-    /// When `true`, step 7 drops the APW rail to `apw12_rail_steady_mv`
-    /// after open-core. The daemon flips this on once the chip-side init
-    /// signals open-core complete. Default false (caller drives it).
+    /// Legacy field name: when true, verify that the fixed APW supply remains
+    /// unchanged. It never lowers the APW to the separate dsPIC board target.
+    /// The daemon verifies the supply directly after its own dsPIC ramp.
     pub apw_drop_to_steady: bool,
 }
 
@@ -776,8 +740,8 @@ impl ColdBootOptsV2 {
     /// Build from a loaded (or hardcoded-default) board-target config.
     pub fn from_board_target(bt: &BeagleBoneBoardTarget) -> Self {
         Self {
-            board_enable_gpio: bt.gpio.board_enable,
-            board_enable_active_high: bt.board_enable_active_high(),
+            board_enable_gpio: super::beaglebone_psu::PSU_ENABLE_GPIO,
+            board_enable_active_high: true,
             asic_rst_gpios: bt.gpio.asic_rst.clone(),
             chain_count: bt.uart.chain_count,
             gpio59_settle_ms: bt.cold_boot.gpio59_settle_ms,
@@ -787,8 +751,8 @@ impl ColdBootOptsV2 {
             asic_rst_retry_pulses: bt.cold_boot.asic_rst_retry_pulses,
             asic_rst_retry_assert_ms: bt.cold_boot.asic_rst_retry_assert_ms,
             asic_rst_retry_release_ms: bt.cold_boot.asic_rst_retry_release_ms,
-            apw12_rail_open_core_mv: bt.cold_boot.apw12_rail_open_core_mv,
-            apw12_rail_steady_mv: bt.cold_boot.apw12_rail_steady_mv,
+            apw12_rail_open_core_mv: super::beaglebone_psu::PSU_FIXED_MILLIVOLTS,
+            apw12_rail_steady_mv: super::beaglebone_psu::PSU_FIXED_MILLIVOLTS,
             enable_pic1704_dc_dc: bt.cold_boot.enable_pic1704_dc_dc,
             run_pic_heartbeat: bt.cold_boot.run_pic_heartbeat,
             run_miscctrl_triple_write: bt.cold_boot.run_miscctrl_triple_write,
@@ -806,9 +770,9 @@ impl Default for ColdBootOptsV2 {
 /// Caller-owned authority for the sole board-enable ON transition.
 ///
 /// Implementations must acquire and retain the sole ON writer plus independent
-/// physical-LOW cutoff handles before cold boot. The sequence validates that
+/// raw-LOW cutoff handles before cold boot. The sequence validates that
 /// the capability is bound to the same GPIO and polarity as the immutable
-/// board target, then uses it for the ON write without re-exporting or
+/// supply recipe, then uses it for the ON write without re-exporting or
 /// reconfiguring the line. `assert_checked` must be one-shot, must return only
 /// after exact topology/level readback, and must reject assertion after any
 /// terminal cutoff has been published.
@@ -816,6 +780,42 @@ pub trait PreparedBoardEnable {
     fn gpio(&self) -> u32;
     fn board_enable_active_high(&self) -> bool;
     fn assert_checked(&mut self) -> Result<()>;
+    fn cut_checked(&mut self) -> Result<()>;
+}
+
+/// Attempt the retained supply cutoff on every failed cold operation. Both
+/// errors stay typed; a successful command/readback is not a rail measurement.
+fn run_with_prepared_psu_cutoff<G: PreparedBoardEnable, T>(
+    owner: &mut G,
+    body: impl FnOnce(&mut G) -> Result<T>,
+) -> Result<T> {
+    match body(owner) {
+        Ok(value) => Ok(value),
+        Err(primary) => {
+            let rollback = match owner.cut_checked() {
+                Ok(()) => crate::PowerRollbackOutcome::Completed,
+                Err(error) => crate::PowerRollbackOutcome::Failed(Box::new(error)),
+            };
+            Err(HalError::PartialBootRollback {
+                context: "AM33XX APW cold sequence",
+                primary: Box::new(primary),
+                rollback,
+            })
+        }
+    }
+}
+
+fn initialize_exact_apw_supply<B: ApwUartTunnelBus, G: PreparedBoardEnable>(
+    psu: &mut ApwUartTunnel<B>,
+    owner: &mut G,
+    settle: impl FnOnce(),
+) -> Result<()> {
+    psu.probe_identity()?;
+    psu.send_calibration_message()?;
+    psu.send_watchdog_disable_message()?;
+    owner.assert_checked()?;
+    settle();
+    psu.set_voltage_mv(super::beaglebone_psu::PSU_FIXED_MILLIVOLTS)
 }
 
 /// Run the `a lab unit`-class (`S19J_IO_BOARD_V2_0`) cold-boot sequence.
@@ -842,22 +842,18 @@ pub trait PreparedBoardEnable {
 ///
 /// Steps 1-5 + 7 from the module banner above. Step 6 (BM1362 chip-side
 /// init) is the caller's job — this function returns once the board is
-/// powered + reset-released + the UARTs are ready. Step 7 (drop to steady)
-/// only fires when `opts.apw_drop_to_steady` is `true` in the same cold-boot
-/// run. Do not call this full GPIO sequence a second time just to drop the
-/// rail; a higher-level caller should use the PSU interface directly after
-/// chip-side init so ASIC resets are not asserted again.
+/// powered + reset-released + the UARTs are ready. The optional final supply
+/// check never changes the voltage. A higher-level caller verifies the fixed
+/// supply directly after chip-side init and its separate dsPIC ramp; it must
+/// not repeat this GPIO sequence and assert ASIC resets again.
 ///
 /// # Errors
 ///
 /// - `HalError::Platform(...)` for misshapen args (chain count vs uarts vs
 ///   `asic_rst_gpios`).
-/// - Whatever the GPIO sysfs writes / the APW UART-tunnel calls return. The
-///   APW set-voltage call is still a Phase-D stub in `psu_apw_uart_tunnel`; when
-///   it returns its "not implemented" error, this function LOGS the failure and
-///   continues. Calibration read and watchdog-disable are Ghidra-confirmed but
-///   still treated as non-fatal by this `a lab unit` bring-up wrapper. The hard errors
-///   are the GPIO writes and shape checks.
+/// - Every GPIO, transport, identity, calibration, acknowledgment and DAC
+///   readback error is fatal. The retained supply owner attempts cutoff and
+///   both typed outcomes are preserved; readback is not a rail measurement.
 pub fn cold_boot_sequence_s19j_io_v2<B: ApwUartTunnelBus, G: PreparedBoardEnable>(
     _platform: &BeagleBonePlatform,
     psu: &mut ApwUartTunnel<B>,
@@ -910,187 +906,102 @@ pub fn cold_boot_sequence_s19j_io_v2<B: ApwUartTunnelBus, G: PreparedBoardEnable
         )));
     }
 
-    let t0 = Instant::now();
-    tracing::info!(
-        chains = opts.chain_count,
-        board_enable_gpio = opts.board_enable_gpio,
-        board_enable_active_high = opts.board_enable_active_high,
-        rail_open_core_mv = opts.apw12_rail_open_core_mv,
-        rail_steady_mv = opts.apw12_rail_steady_mv,
-        "AM335x BB S19J_IO_V2_0 cold-boot: starting (Phase B v1 — cold-boot-sequence.md §3-4)"
-    );
-
-    // ── Step 1 — export GPIOs + hold all chains in reset ──────────────────
-    // GPIO59 was already configured glitch-free OFF by the retained
-    // `PreparedBoardEnable` owner before cold boot. Configure only the per-chain
-    // ASIC RST gpios here (OUT, active_low=1 — luxminer does
-    // `set_active_low(true)` on the chain-reset pins; the 2026-05-12 ftrace
-    // on `a lab unit` confirms the reset pins are driven *electrically LOW* when
-    // held, so logical-1 = electrical-0 = reset asserted). Order matters:
-    // direction → active_low → value.
-    for &g in opts.asic_rst_gpios.iter().take(4) {
-        export_sysfs_gpio(g)?;
-        write_sysfs_gpio_direction(g, "out")?;
-        write_sysfs_gpio_active_low(g, true)?; // active-LOW reset (luxminer set_active_low(true))
-                                               // Hold reset asserted before powering the rail: logical-1 → electrical-0.
-                                               // (The de-assert in step 5 writes logical-0 → electrical-1 = running.)
-        write_sysfs_gpio_value(g, true)?;
+    // The legacy GPIO59 tuple is retained as metadata only. Its old LOW
+    // receipt was not independent cutoff evidence: the held unit hashed
+    // while59 was LOW. Only the exact source-qualified supply owner may ON.
+    if opts.board_enable_gpio != super::beaglebone_psu::PSU_ENABLE_GPIO
+        || !opts.board_enable_active_high
+        || opts.apw12_rail_open_core_mv != super::beaglebone_psu::PSU_FIXED_MILLIVOLTS
+        || opts.apw12_rail_steady_mv != super::beaglebone_psu::PSU_FIXED_MILLIVOLTS
+    {
+        return Err(HalError::Platform(
+            "BB cold boot requires exact PSU65/fixed DAC0 recipe".into(),
+        ));
     }
-    tracing::info!("AM335x BB S19J_IO_V2_0 cold-boot step 1 done — retained board-enable owner present + all chains held in reset (active-low, ftrace-confirmed)");
-
-    // ── Step 2 — assert board enable, settle ──────────────────────────────
-    // gpio59 polarity: active-HIGH (1 = ON). The 2026-05-12 ftrace on `a lab unit`
-    // shows luxminer never touches gpio59 on a warm restart — consistent with
-    // "already enabled, active-HIGH, leave it alone"; analysis/C §3.3 +
-    // S70cgminer also use direct-level (active_low=0). A true-cold trace would
-    // show the 0→1 here; until then this is "consistent-with-confirmed", not
-    // byte-confirmed. The experimental daemon currently refuses a non-active-
-    // HIGH topology before any GPIO mutation. If a true-cold trace contradicts
-    // this polarity, implement and validate a separately safe inverse path;
-    // changing board-target TOML alone must not bypass that refusal.
-    board_enable.assert_checked()?;
-    tracing::info!(
-        gpio = opts.board_enable_gpio,
-        level = if opts.board_enable_active_high { 1 } else { 0 },
-        settle_ms = opts.gpio59_settle_ms,
-        "AM335x BB S19J_IO_V2_0 cold-boot step 2 — board enable asserted (active-HIGH; warm-restart ftrace consistent)"
-    );
-    std::thread::sleep(Duration::from_millis(opts.gpio59_settle_ms));
-
-    // ── Step 3 — APW121215f init on i2c bus 1 (UART-tunnel framing) ───────
-    // The framed protocol (`[0x11,0x55,0xAA,LEN,OPCODE,params..,add-cksum,0x00]`,
-    // a SEPARATE ≥~400 ms-delayed read, 0xF5-padded replies) is LIVE-CONFIRMED
-    // from the 2026-05-12 `a lab unit` ftrace — see luxos-wire-capture.md §R7-1 and
-    // [`crate::psu_apw_uart_tunnel`]. NO PowerOn opcode — the rail comes up via
-    // gpio59 (step 2). Ghidra later confirmed the calibration read
-    // (`0x06/[0x40,0x20]`) and watchdog-disable (`0x81/[0x00,0x00]`) opcodes;
-    // those steps stay best-effort at this call site. (cold-boot-sequence.md §3 step 3.)
-    //   (a) probe HW=0x76 / FW=0x17 — now expected to actually answer (framing
-    //   confirmed). Still best-effort: the rail is typically already up from the
-    //   prior firmware, so a failed identity probe must NOT abort the cold-boot —
-    //   log a warning and continue to the ASIC reset + BM1362 chip-side init.
-    match psu.probe_identity() {
-        Ok(()) => tracing::info!(
-            "AM335x BB S19J_IO_V2_0 cold-boot step 3a — APW121215f identity probe OK"
-        ),
-        Err(e) => tracing::warn!(
-            error = %e,
-            "AM335x BB S19J_IO_V2_0 cold-boot step 3a — APW121215f identity probe FAILED. \
-             The frame format is live-confirmed (luxos-wire-capture.md §R7-1) so this is \
-             unexpected — but continuing: the rail is typically already up from the prior \
-             firmware; the ASIC reset + BM1362 chip-side init still run."
-        ),
-    }
-    //   (b) calibration message — best-effort: routes to the Ghidra-confirmed
-    //   cal-block read (opcode 0x06, params [0x40,0x20]).
-    if let Err(e) = psu.send_calibration_message() {
-        tracing::warn!(
-            error = %e,
-            "AM335x BB S19J_IO_V2_0 cold-boot step 3b — calibration message"
+    run_with_prepared_psu_cutoff(board_enable, |board_enable| {
+        let t0 = Instant::now();
+        tracing::info!(
+            chains = opts.chain_count,
+            board_enable_gpio = opts.board_enable_gpio,
+            board_enable_active_high = opts.board_enable_active_high,
+            rail_open_core_mv = opts.apw12_rail_open_core_mv,
+            rail_steady_mv = opts.apw12_rail_steady_mv,
+            "AM335x BB S19J_IO_V2_0 cold-boot: starting (Phase B v1 — cold-boot-sequence.md §3-4)"
         );
-    }
-    //   (c) watchdog-disable message — best-effort at this call site, but no
-    //   longer a guess: Ghidra confirmed opcode 0x81 with params [0x00,0x00]
-    //   from luxminer `FUN_0061cd48`.
-    if let Err(e) = psu.send_watchdog_disable_message() {
-        tracing::warn!(
-            error = %e,
-            "AM335x BB S19J_IO_V2_0 cold-boot step 3c — watchdog-disable message"
-        );
-    }
-    tracing::info!(
-        total_ms = t0.elapsed().as_millis() as u64,
-        "AM335x BB S19J_IO_V2_0 cold-boot step 3 done — APW framed protocol, \
-         calibration read, and watchdog-disable are confirmed (best-effort call-site)"
-    );
 
-    // ── Step 4 — APW set chain rail to open-core voltage ──────────────────
-    // XXX: BEST-GUESS — verify on .79: the open-core rail voltage (~15.0 V)
-    // AND who sets it. `ApwUartTunnel::set_voltage_mv` now returns
-    // `PsuUnsupported` deliberately — on `S19J_IO_BOARD_V2_0` the APW
-    // `write voltage` opcode is un-RE'd ("Loki bypass" only), and the live
-    // hypothesis is the chain rail is driven by the hashboard voltage
-    // controller, not the APW. So this step logs + continues — the GPIO +
-    // reset parts of the sequence must still run, and the daemon runs with
-    // whatever rail the PSU came up at via gpio59 / the prior firmware.
-    // (cold-boot-sequence.md §3 step 4.)
-    if let Err(e) = psu.set_voltage_mv(opts.apw12_rail_open_core_mv) {
-        tracing::warn!(
-            target_mv = opts.apw12_rail_open_core_mv,
-            error = %e,
-            "AM335x BB S19J_IO_V2_0 cold-boot step 4 — set chain rail to open-core voltage is a \
-             Phase-D stub (payload encoding unknown). Continuing with the gpio59-default rail. \
-             XXX: BEST-GUESS."
-        );
-    } else {
-        // If/when set_voltage works, verify the readback (also a Phase-D
-        // stub today).
-        match psu.read_voltage_mv() {
-            Ok(v) => tracing::info!(
-                target_mv = opts.apw12_rail_open_core_mv,
-                readback_mv = v,
-                "AM335x BB S19J_IO_V2_0 cold-boot step 4 — rail set + readback"
-            ),
-            Err(e) => tracing::warn!(error = %e, "step 4 readback is a Phase-D stub"),
+        // ── Step 1 — export GPIOs + hold all chains in reset ──────────────────
+        // PSU GPIO65 was already configured glitch-free OFF by the retained
+        // `PreparedBoardEnable` owner before cold boot. Configure only the per-chain
+        // ASIC RST gpios here (OUT, active_low=1 — luxminer does
+        // `set_active_low(true)` on the chain-reset pins; the 2026-05-12 ftrace
+        // on `a lab unit` confirms the reset pins are driven *electrically LOW* when
+        // held, so logical-1 = electrical-0 = reset asserted). Order matters:
+        // direction → active_low → value.
+        for &g in opts.asic_rst_gpios.iter().take(4) {
+            export_sysfs_gpio(g)?;
+            write_sysfs_gpio_direction(g, "out")?;
+            write_sysfs_gpio_active_low(g, true)?; // active-LOW reset (luxminer set_active_low(true))
+                                                   // Hold reset asserted before powering the rail: logical-1 → electrical-0.
+                                                   // (The de-assert in step 5 writes logical-0 → electrical-1 = running.)
+            write_sysfs_gpio_value(g, true)?;
         }
-    }
-    tracing::info!(
-        total_ms = t0.elapsed().as_millis() as u64,
-        "AM335x BB S19J_IO_V2_0 cold-boot step 4 done — open-core rail (best-effort; Phase-D stub)"
-    );
+        tracing::info!("AM335x BB S19J_IO_V2_0 cold-boot step 1 done — retained board-enable owner present + all chains held in reset (active-low, ftrace-confirmed)");
 
-    // ── Step 5 — de-assert chain resets with stagger, settle ──────────────
-    // XXX: BEST-GUESS — verify on .79: the 10 ms inter-chain stagger
-    // (analysis/O §29 found simultaneous power-on causes APW droop →
-    // ticket-mask retry loop on board_id=1; Phase D may widen this to
-    // 200-500 ms if a chain flakes). active_low=true → write "0" = release.
-    // gpio22/rst3 stays asserted (chain 3 unpopulated on the 3-chain unit).
-    let stagger = Duration::from_millis(opts.asic_rst_stagger_ms);
-    for i in 0..n {
-        let g = opts.asic_rst_gpios[i];
-        write_sysfs_gpio_value(g, false)?; // active_low → "0" = release
-        tracing::debug!(
-            chain = i as u8,
-            gpio = g,
-            "AM335x BB S19J_IO_V2_0 cold-boot step 5: ASIC reset de-asserted"
-        );
-        if i + 1 < n {
-            std::thread::sleep(stagger);
+        // Exact APW supply initialization follows validated controller ownership.
+        // Validate the actual PSU while the retained supply gate remains OFF.
+        // Every transport, checksum, identity and acknowledgment failure is fatal.
+        initialize_exact_apw_supply(psu, board_enable, || {
+            std::thread::sleep(Duration::from_millis(opts.gpio59_settle_ms));
+        })?;
+
+        // Chain reset timing remains the held warm-trace sequence; no cold
+        // physical timing measurement is inferred from this software replay.
+        let stagger = Duration::from_millis(opts.asic_rst_stagger_ms);
+        for i in 0..n {
+            let g = opts.asic_rst_gpios[i];
+            write_sysfs_gpio_value(g, false)?; // active_low → "0" = release
+            tracing::debug!(
+                chain = i as u8,
+                gpio = g,
+                "AM335x BB S19J_IO_V2_0 cold-boot step 5: ASIC reset de-asserted"
+            );
+            if i + 1 < n {
+                std::thread::sleep(stagger);
+            }
         }
-    }
-    if let Some(retry_chain) = opts.asic_rst_retry_chain {
-        let retry_idx = retry_chain as usize;
-        if retry_idx >= n {
-            tracing::warn!(
+        if let Some(retry_chain) = opts.asic_rst_retry_chain {
+            let retry_idx = retry_chain as usize;
+            if retry_idx >= n {
+                tracing::warn!(
                 retry_chain,
                 chains = n,
                 "AM335x BB S19J_IO_V2_0 cold-boot step 5: reset retry chain is outside active chain_count; skipping"
             );
-        } else if opts.asic_rst_retry_pulses > 0 {
-            let g = opts.asic_rst_gpios[retry_idx];
-            for pulse in 0..opts.asic_rst_retry_pulses {
-                write_sysfs_gpio_value(g, true)?; // active_low -> "1" = assert reset
-                tracing::debug!(
-                    chain = retry_chain,
-                    gpio = g,
-                    pulse = pulse + 1,
-                    pulses = opts.asic_rst_retry_pulses,
-                    assert_ms = opts.asic_rst_retry_assert_ms,
-                    "AM335x BB S19J_IO_V2_0 cold-boot step 5: ASIC reset retry asserted"
-                );
-                std::thread::sleep(Duration::from_millis(opts.asic_rst_retry_assert_ms));
-                write_sysfs_gpio_value(g, false)?; // active_low -> "0" = release
-                tracing::debug!(
-                    chain = retry_chain,
-                    gpio = g,
-                    pulse = pulse + 1,
-                    pulses = opts.asic_rst_retry_pulses,
-                    release_ms = opts.asic_rst_retry_release_ms,
-                    "AM335x BB S19J_IO_V2_0 cold-boot step 5: ASIC reset retry released"
-                );
-                std::thread::sleep(Duration::from_millis(opts.asic_rst_retry_release_ms));
-            }
-            tracing::info!(
+            } else if opts.asic_rst_retry_pulses > 0 {
+                let g = opts.asic_rst_gpios[retry_idx];
+                for pulse in 0..opts.asic_rst_retry_pulses {
+                    write_sysfs_gpio_value(g, true)?; // active_low -> "1" = assert reset
+                    tracing::debug!(
+                        chain = retry_chain,
+                        gpio = g,
+                        pulse = pulse + 1,
+                        pulses = opts.asic_rst_retry_pulses,
+                        assert_ms = opts.asic_rst_retry_assert_ms,
+                        "AM335x BB S19J_IO_V2_0 cold-boot step 5: ASIC reset retry asserted"
+                    );
+                    std::thread::sleep(Duration::from_millis(opts.asic_rst_retry_assert_ms));
+                    write_sysfs_gpio_value(g, false)?; // active_low -> "0" = release
+                    tracing::debug!(
+                        chain = retry_chain,
+                        gpio = g,
+                        pulse = pulse + 1,
+                        pulses = opts.asic_rst_retry_pulses,
+                        release_ms = opts.asic_rst_retry_release_ms,
+                        "AM335x BB S19J_IO_V2_0 cold-boot step 5: ASIC reset retry released"
+                    );
+                    std::thread::sleep(Duration::from_millis(opts.asic_rst_retry_release_ms));
+                }
+                tracing::info!(
                 chain = retry_chain,
                 gpio = g,
                 pulses = opts.asic_rst_retry_pulses,
@@ -1098,63 +1009,51 @@ pub fn cold_boot_sequence_s19j_io_v2<B: ApwUartTunnelBus, G: PreparedBoardEnable
                 release_ms = opts.asic_rst_retry_release_ms,
                 "AM335x BB S19J_IO_V2_0 cold-boot step 5: chain reset retry complete (LuxOS ftrace parity)"
             );
+            }
         }
-    }
-    std::thread::sleep(Duration::from_millis(opts.asic_rst_settle_ms));
-    tracing::info!(
-        total_ms = t0.elapsed().as_millis() as u64,
-        chains = n,
-        stagger_ms = opts.asic_rst_stagger_ms,
-        settle_ms = opts.asic_rst_settle_ms,
-        reset_retry_chain = ?opts.asic_rst_retry_chain,
-        reset_retry_pulses = opts.asic_rst_retry_pulses,
-        "AM335x BB S19J_IO_V2_0 cold-boot step 5 done — chain resets released"
-    );
+        std::thread::sleep(Duration::from_millis(opts.asic_rst_settle_ms));
+        tracing::info!(
+            total_ms = t0.elapsed().as_millis() as u64,
+            chains = n,
+            stagger_ms = opts.asic_rst_stagger_ms,
+            settle_ms = opts.asic_rst_settle_ms,
+            reset_retry_chain = ?opts.asic_rst_retry_chain,
+            reset_retry_pulses = opts.asic_rst_retry_pulses,
+            "AM335x BB S19J_IO_V2_0 cold-boot step 5 done — chain resets released"
+        );
 
-    // ── Step 6 — hand off to the BM1362 chip-side init ────────────────────
-    // The caller (Phase-C `--am3-bb-mining` mode) runs the BM1362 chip-side
-    // init from cold-boot-sequence.md §2 per chain: 115200 GetAddress enum →
-    // assign addrs → PLL ~400 MHz → fast-baud `0x28=0x00003011` → host UART
-    // → MiscCtrl `0x18=0x00C100B0` triple-write 3×/5ms
-    // (`opts.run_miscctrl_triple_write` — XXX differs from the W4-BBCtrl
-    //  decision; A/B disable in
-    // Phase D if it causes a problem) → TicketMask → BM1362 serial work
-    // dispatch — via the Phase-1 clean-room `bm1362::uart_transport`
-    // on the `uarts` passed in. We do NOT do that here — `dcentrald-hal`
-    // doesn't depend on `dcentrald-asic`. This function returns once the
-    // board is powered + reset-released + the UARTs are ready.
-    tracing::info!(
+        // ── Step 6 — hand off to the BM1362 chip-side init ────────────────────
+        // The caller (Phase-C `--am3-bb-mining` mode) runs the BM1362 chip-side
+        // init from cold-boot-sequence.md §2 per chain: 115200 GetAddress enum →
+        // assign addrs → PLL ~400 MHz → fast-baud `0x28=0x00003011` → host UART
+        // → MiscCtrl `0x18=0x00C100B0` triple-write 3×/5ms
+        // (`opts.run_miscctrl_triple_write` — XXX differs from the W4-BBCtrl
+        //  decision; A/B disable in
+        // Phase D if it causes a problem) → TicketMask → BM1362 serial work
+        // dispatch — via the Phase-1 clean-room `bm1362::uart_transport`
+        // on the `uarts` passed in. We do NOT do that here — `dcentrald-hal`
+        // doesn't depend on `dcentrald-asic`. This function returns once the
+        // board is powered + reset-released + the UARTs are ready.
+        tracing::info!(
         total_ms = t0.elapsed().as_millis() as u64,
         run_miscctrl_triple_write = opts.run_miscctrl_triple_write,
         uarts = uarts.len(),
         "AM335x BB S19J_IO_V2_0 cold-boot step 6 — board ready; hand off to BM1362 chip-side init"
     );
 
-    // ── Step 7 — drop APW rail to steady (only when caller signals) ───────
-    // XXX: BEST-GUESS — verify on .79: the steady rail voltage (~13.8 V),
-    // same set-voltage Phase-D stub caveat as step 4.
-    if opts.apw_drop_to_steady {
-        if let Err(e) = psu.set_voltage_mv(opts.apw12_rail_steady_mv) {
-            tracing::warn!(
-                target_mv = opts.apw12_rail_steady_mv,
-                error = %e,
-                "AM335x BB S19J_IO_V2_0 cold-boot step 7 — drop rail to steady is a Phase-D \
-                 stub (payload encoding unknown). Continuing. XXX: BEST-GUESS."
-            );
-        } else {
-            tracing::info!(
-                target_mv = opts.apw12_rail_steady_mv,
-                "AM335x BB S19J_IO_V2_0 cold-boot step 7 — rail dropped to steady"
-            );
+        // The upstream APW stays at its fixed source-selected supply. The
+        // separate dsPIC owner applies the hashboard's open/steady profile.
+        if opts.apw_drop_to_steady {
+            psu.require_fixed_supply()?;
         }
-    }
 
-    tracing::info!(
+        tracing::info!(
         total_ms = t0.elapsed().as_millis() as u64,
         chains = n,
         "AM335x BB S19J_IO_V2_0 cold-boot: complete (board-side; chip-side is the caller's job)"
     );
-    Ok(())
+        Ok(())
+    })
 }
 
 // ===========================================================================
@@ -1205,6 +1104,9 @@ mod tests {
 
         fn assert_checked(&mut self) -> Result<()> {
             self.assertions += 1;
+            Ok(())
+        }
+        fn cut_checked(&mut self) -> Result<()> {
             Ok(())
         }
     }
@@ -1569,10 +1471,10 @@ mod tests {
     #[test]
     fn cold_boot_opts_v2_default_matches_dot79_config() {
         let o = ColdBootOptsV2::default();
-        assert_eq!(o.board_enable_gpio, 59);
+        assert_eq!(o.board_enable_gpio, 65);
         assert!(
             o.board_enable_active_high,
-            "default board_enable_active = high (BEST-GUESS)"
+            "source-qualified AM33XX PSU ON is raw HIGH"
         );
         assert_eq!(o.asic_rst_gpios, vec![49, 60, 27, 22]);
         assert_eq!(o.chain_count, 3);
@@ -1583,8 +1485,8 @@ mod tests {
         assert_eq!(o.asic_rst_retry_pulses, 2);
         assert_eq!(o.asic_rst_retry_assert_ms, 200);
         assert_eq!(o.asic_rst_retry_release_ms, 100);
-        assert_eq!(o.apw12_rail_open_core_mv, 15000);
-        assert_eq!(o.apw12_rail_steady_mv, 13800);
+        assert_eq!(o.apw12_rail_open_core_mv, 15120);
+        assert_eq!(o.apw12_rail_steady_mv, 15120);
         assert!(!o.enable_pic1704_dc_dc, "NoPic board — no PIC1704 DC-DC");
         assert!(!o.run_pic_heartbeat, "NoPic board — no heartbeat thread");
         assert!(
@@ -1598,13 +1500,13 @@ mod tests {
     /// mismatch remains observable. The experimental daemon separately
     /// refuses that unsupported topology before any GPIO mutation.
     #[test]
-    fn cold_boot_opts_v2_honors_active_low_polarity() {
+    fn historical_board59_polarity_cannot_select_the_supply65_recipe() {
         use super::super::beaglebone::parse_board_target_toml; // platform::beaglebone
         let bt = parse_board_target_toml("[gpio]\nboard_enable_active = \"low\"\n").unwrap();
         let o = ColdBootOptsV2::from_board_target(&bt);
         assert!(
-            !o.board_enable_active_high,
-            "active-LOW polarity from the board-target TOML must reach the cold-boot opts"
+            o.board_enable_active_high,
+            "legacy board59 metadata cannot invert the exact PSU65 recipe"
         );
     }
 
@@ -1654,7 +1556,7 @@ mod tests {
         let platform = BeagleBonePlatform::with_config(PlatformConfig::s19j_beaglebone());
         let opts = ColdBootOptsV2::default();
 
-        for (gpio, active_high) in [(58, true), (59, false)] {
+        for (gpio, active_high) in [(59, true), (65, false)] {
             let mut psu = ApwUartTunnel::new(NoIoApwBus);
             let mut board_enable = MockPreparedBoardEnable {
                 gpio,
@@ -1680,32 +1582,148 @@ mod tests {
         }
     }
 
-    /// The new entry point's BEST-GUESS markers must stay in source for the
-    /// remaining unresolved surfaces (gpio59 true-cold polarity, set-voltage
-    /// payload, reset stagger). Mirrors the W12.5 cvitek INFERRED-markers
-    /// regex-pin pattern.
+    struct SupplyFixture {
+        events: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        replies: std::collections::VecDeque<Vec<u8>>,
+        fail_at: Option<usize>,
+        writes: usize,
+    }
+
+    impl ApwUartTunnelBus for SupplyFixture {
+        fn authorize_voltage_control(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn write_frame(&mut self, _: u8, frame: &[u8]) -> Result<()> {
+            self.events
+                .borrow_mut()
+                .push(format!("request:{:02x}", frame[4]));
+            self.writes += 1;
+            if self.fail_at == Some(self.writes) {
+                return Err(HalError::PsuProtocolOwned("injected write failure".into()));
+            }
+            Ok(())
+        }
+        fn read_reply(&mut self, _: u8, _: usize) -> Result<Vec<u8>> {
+            Ok(self.replies.pop_front().expect("only expected exchanges"))
+        }
+        fn delay(&mut self, _: Duration) {}
+    }
+
+    struct SupplyOwner {
+        events: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        fail_on: bool,
+        fail_cut: bool,
+    }
+
+    impl PreparedBoardEnable for SupplyOwner {
+        fn gpio(&self) -> u32 {
+            65
+        }
+        fn board_enable_active_high(&self) -> bool {
+            true
+        }
+        fn assert_checked(&mut self) -> Result<()> {
+            self.events.borrow_mut().push("ON65".into());
+            if self.fail_on {
+                Err(HalError::Gpio("ON readback failed".into()))
+            } else {
+                Ok(())
+            }
+        }
+        fn cut_checked(&mut self) -> Result<()> {
+            self.events.borrow_mut().push("OFF65".into());
+            if self.fail_cut {
+                Err(HalError::Gpio("OFF readback failed".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn supply_reply(opcode: u8, data: &[u8]) -> Vec<u8> {
+        let len = 4 + data.len() as u8;
+        let mut out = vec![0x55, 0xaa, len, opcode];
+        out.extend_from_slice(data);
+        out.extend_from_slice(
+            &crate::psu_apw_uart_tunnel::checksum(len, opcode, data).to_le_bytes(),
+        );
+        out
+    }
+
     #[test]
-    fn xxx_best_guess_markers_present() {
-        let src = include_str!("beaglebone_cold_boot.rs");
-        let test_mod_start = src.find("#[cfg(test)]").expect("test module start");
-        let content_only = &src[..test_mod_start];
-        let count = content_only.matches("XXX: BEST-GUESS").count();
-        assert!(
-            count >= 6,
-            "expected ≥ 6 `XXX: BEST-GUESS` markers in the S19J_IO_BOARD_V2_0 cold-boot \
-             section (gpio59 true-cold polarity, set-voltage payload semantics, reset \
-             stagger, ...), found {}. Keep the markers until the live \
-             `a lab unit` Phase-D bring-up confirms each.",
-            count
-        );
-        // The Phase-D / cold-boot-sequence.md citations must stay too.
-        assert!(
-            content_only.contains("cold-boot-sequence.md"),
-            "the S19J_IO_BOARD_V2_0 cold-boot section must cite cold-boot-sequence.md"
-        );
-        assert!(
-            content_only.contains("NoPic-board entry point"),
-            "the entry point must be documented as the NoPic-board path"
-        );
+    fn actual_supply_initializer_is_ordered_and_each_failure_cuts_before_release() {
+        // Same initializer and rollback owner called by the production cold
+        // sequence; synthetic I/O observations, no cold hardware claim.
+        for failure in 0..=10 {
+            for cut_fails in [false, true] {
+                let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                let mut cal = vec![0x40];
+                cal.extend([0xff; 32]);
+                let mut replies = vec![
+                    supply_reply(2, &[0x76, 0]),
+                    supply_reply(1, &[0x17, 0]),
+                    supply_reply(6, &cal),
+                    supply_reply(0x81, &[0, 0]),
+                    supply_reply(2, &[0x76, 0]),
+                    supply_reply(1, &[0x17, 0]),
+                    supply_reply(0x83, &[0, 0]),
+                    supply_reply(3, &[0, 0]),
+                ];
+                if failure == 10 {
+                    replies[7] = supply_reply(3, &[1, 0]);
+                }
+                let mut psu = ApwUartTunnel::new(SupplyFixture {
+                    events: events.clone(),
+                    replies: replies.into(),
+                    fail_at: (1..=8).contains(&failure).then_some(failure),
+                    writes: 0,
+                });
+                let mut owner = SupplyOwner {
+                    events: events.clone(),
+                    fail_on: failure == 9,
+                    fail_cut: cut_fails,
+                };
+                let result = run_with_prepared_psu_cutoff(&mut owner, |owner| {
+                    initialize_exact_apw_supply(&mut psu, owner, || {
+                        events.borrow_mut().push("settle".into())
+                    })?;
+                    events.borrow_mut().push("reset-release-boundary".into());
+                    Ok(())
+                });
+                let events = events.borrow();
+                if failure == 0 {
+                    assert!(result.is_ok());
+                    assert_eq!(
+                        *events,
+                        [
+                            "request:02",
+                            "request:01",
+                            "request:06",
+                            "request:81",
+                            "ON65",
+                            "settle",
+                            "request:02",
+                            "request:01",
+                            "request:83",
+                            "request:03",
+                            "reset-release-boundary"
+                        ]
+                    );
+                } else {
+                    assert_eq!(events.last().unwrap(), "OFF65");
+                    assert!(!events.iter().any(|event| event == "reset-release-boundary"));
+                    if failure <= 4 {
+                        assert!(!events.iter().any(|event| event == "ON65"));
+                    }
+                    match result.unwrap_err() {
+                        HalError::PartialBootRollback { rollback, .. } => assert_eq!(
+                            matches!(rollback, crate::PowerRollbackOutcome::Failed(_)),
+                            cut_fails
+                        ),
+                        other => panic!("lost typed cutoff outcome: {other}"),
+                    }
+                }
+            }
+        }
     }
 }

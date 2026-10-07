@@ -431,8 +431,9 @@ fn default_board_enable_active() -> String {
 pub struct BoardTargetGpioSection {
     #[serde(default = "default_board_enable_gpio_v2")]
     pub board_enable: u32,
-    /// `"high"` or `"low"` — the electrical level written to `board_enable`
-    /// for "ON". BEST-GUESS `"high"`; Phase D may flip it.
+    /// Historical GPIO59 label and guessed polarity, retained for metadata
+    /// compatibility. This field does not authorize the current supply gate;
+    /// `beaglebone_psu::BbPsuControllerBinding` owns the qualified GPIO65 path.
     #[serde(default = "default_board_enable_active")]
     pub board_enable_active: String,
     #[serde(default = "default_asic_rst_v2")]
@@ -638,10 +639,11 @@ pub struct BoardTargetColdBootSection {
     /// Passed through to the BM1362 chip-side init by the caller.
     #[serde(default = "default_true")]
     pub run_miscctrl_triple_write: bool,
-    /// ~15.0 V chain rail during open-core. BEST-GUESS.
+    /// Historical guessed board-rail metadata; never an APW supply target.
+    /// The current supply recipe uses its source-selected fixed DAC0.
     #[serde(default = "default_apw12_open_core_mv")]
     pub apw12_rail_open_core_mv: u16,
-    /// ~13.8 V chain rail steady. BEST-GUESS.
+    /// Historical guessed steady-rail metadata; never an APW supply target.
     #[serde(default = "default_apw12_steady_mv")]
     pub apw12_rail_steady_mv: u16,
     #[serde(default = "default_gpio59_settle_ms")]
@@ -1176,8 +1178,10 @@ impl BeagleBonePlatform {
         GPIO_BOARD_RESET
     }
 
-    /// W4 BBCtrl PSU-enable GPIO (`65`). `a lab unit` uses the `enable` GPIO
-    /// (`59` — [`Self::board_enable_gpio_v2_0`]).
+    /// W4 BBCtrl PSU-enable GPIO (`65`). The exact S19J_IO_BOARD_V2_0 supply
+    /// also uses65, independently joined in `beaglebone_psu`; that owner must
+    /// observe the running kernel before output. This constant alone grants
+    /// no access. GPIO59's historical role label is not cutoff evidence.
     pub const fn psu_enable_gpio() -> u32 {
         GPIO_PSU_ENABLE
     }
@@ -1203,8 +1207,8 @@ impl BeagleBonePlatform {
 
     // ── `a lab unit` S19J_IO_BOARD_V2_0 accessors (Phase B) ──
 
-    /// `a lab unit` board/PSU enable GPIO (DTS label `enable`) — from the loaded
-    /// board-target config, default `59`.
+    /// Historical `a lab unit` DTS `enable` label, default59. Read-only metadata;
+    /// not the qualified supply gate and never an energization capability.
     pub fn board_enable_gpio_v2_0(&self) -> u32 {
         self.board_target.gpio.board_enable
     }
@@ -1548,7 +1552,10 @@ impl BeagleBoneFan {
     /// Operator override: `DCENT_AM3_BB_ACCEPT_DEGRADED_TACH=1`.
     #[allow(dead_code)]
     pub fn check_fan_mode_allowed(mode: FanMode) -> Result<()> {
-        Self::check_fan_mode_allowed_with_env(mode, std::env::var(BB_TACH_ACCEPT_DEGRADED_ENV).ok())
+        Self::check_fan_mode_allowed_with_env(
+            mode,
+            dcentrald_common::lab_env::var(BB_TACH_ACCEPT_DEGRADED_ENV).ok(),
+        )
     }
 
     /// Test-friendly version of [`check_fan_mode_allowed`].
@@ -3234,3 +3241,10 @@ voltage_controller = "dspic33ep-fw89"
         );
     }
 }
+
+#[path = "beaglebone_owned_factory.rs"]
+mod owned_factory;
+pub use owned_factory::{BbFactoryObservation, BbHardwareFactory, BbOpenedHardware};
+
+#[cfg(feature = "sim-hal")]
+pub use owned_factory::BbSimFactoryServices;

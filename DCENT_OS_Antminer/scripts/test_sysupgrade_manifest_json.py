@@ -17,6 +17,7 @@ from sysupgrade_manifest_json import (  # noqa: E402
     admit_manifest,
     compare_versions,
     read_version_file,
+    require_install_mode_contract,
     require_package_authority,
     require_payload_binding,
 )
@@ -199,6 +200,79 @@ class ManifestAdmissionTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(AdmissionError, "not admitted"):
             require_package_authority(manifest, "am3-s21")
+
+    def test_first_install_only_contract_is_explicit_and_non_updating(self) -> None:
+        # AM1-A Drop-1 route scoping (owner adjudication
+        # AM1_S9_ROOTFS_WINDOW_ADJUDICATION Option A, ratified 2026-09-15):
+        # an installable first-install-only package carries the typed
+        # self-update denial — update_command must be JSON null and the
+        # install_command stays the target-bound dcent install rail.
+        toolbox = {
+            "install_command": "dcent install <ip> -f dcentos-unit.tar",
+            "update_command": None,
+            "upload_endpoint": None,
+            "board_target_header": None,
+            "requires_inactive_slot": False,
+            "install_mode": "first_install_only",
+            "target_side_sysupgrade": False,
+        }
+        manifest = {
+            "board": "am1-s9",
+            "board_target": "am1-s9",
+            "installable": True,
+            "toolbox": toolbox,
+        }
+        require_package_authority(manifest, "am1-s9")
+        self.assertEqual(
+            require_install_mode_contract(manifest), "first_install_only"
+        )
+
+        for field, bad_value in (
+            (
+                "update_command",
+                "dcent install <ip> -f dcentos-unit.tar",
+            ),
+            (
+                "update_command",
+                "dcent ota update-fleet <ip> -f dcentos-unit.tar",
+            ),
+            ("install_command", "dcent flash <ip> -f dcentos-unit.tar"),
+            ("install_mode", "weird_route"),
+            ("install_mode", ""),
+        ):
+            with self.subTest(field=field, bad_value=bad_value):
+                tampered = {**manifest, "toolbox": {**toolbox, field: bad_value}}
+                with self.assertRaises(AdmissionError):
+                    require_package_authority(tampered, "am1-s9")
+
+    def test_install_mode_query_admits_known_values_and_absence(self) -> None:
+        base = {"board": "am1-s9", "board_target": "am1-s9", "installable": True}
+        # No toolbox block at all: legacy manifests stay inspectable and
+        # resolve to None (printed as "absent" by query-install-mode).
+        self.assertIsNone(require_install_mode_contract(dict(base)))
+        mode_toolboxes = {
+            "target_sysupgrade": {},
+            "host_driven_rootfs_window_lab": {},
+            "first_install_only": {
+                "install_command": "dcent install <ip> -f dcentos-unit.tar",
+                "update_command": None,
+            },
+        }
+        for mode, extra in mode_toolboxes.items():
+            manifest = {**base, "toolbox": {"install_mode": mode, **extra}}
+            self.assertEqual(require_install_mode_contract(manifest), mode)
+        # package_only_denied on an installable manifest stays a contradiction.
+        with self.assertRaisesRegex(AdmissionError, "contradicts"):
+            require_package_authority(
+                {
+                    **base,
+                    "toolbox": {
+                        "install_command": "dcent install <ip> -f x.tar",
+                        "install_mode": "package_only_denied",
+                    },
+                },
+                "am1-s9",
+            )
 
 
 class VersionAdmissionTests(unittest.TestCase):

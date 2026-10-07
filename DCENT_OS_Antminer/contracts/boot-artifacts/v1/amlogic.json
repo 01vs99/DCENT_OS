@@ -18,8 +18,8 @@
       "kind": "script_text",
       "declared_boot_phase": "early_userspace",
       "integrity": {
-        "size": 22494,
-        "sha256": "ceb209174f6552f01403dfc59d2409259bba0a1e2b1bd2ee446b955b9fe33957"
+        "size": 24604,
+        "sha256": "534bb7cc3a46517c7aef4bc14b156cffa5e2a639d12d8643ac041afb1b19c237"
       },
       "declared_context": {
         "product_declaration": null,

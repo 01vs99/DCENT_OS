@@ -360,7 +360,7 @@ mod tests {
             board.runtime_status,
             RuntimeStatus::ManagementOnlyByPolicy { .. }
         ));
-        assert!(!board.public_beta_install);
+        assert!(!board.public_beta_install());
         assert!(!board.mining_default_enabled);
 
         let producer =

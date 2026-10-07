@@ -741,7 +741,8 @@ where
         // Live S19-family evidence pins dsPIC board endpoints to 0x20-0x22;
         // the 0x20 anchor probe establishes family presence on this bus.
         VoltageControllerKind::Dspic33Ep => (0x20..=0x22).contains(&address),
-        VoltageControllerKind::Pic16f1704 | VoltageControllerKind::NoPic => false,
+        VoltageControllerKind::ClassicAmlFw89
+        | VoltageControllerKind::Pic16f1704 | VoltageControllerKind::NoPic => false,
     };
     if !address_is_valid {
         return Err(VoltageControllerEndpointError::AddressOutsideTopology { kind, address });

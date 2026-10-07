@@ -1,0 +1,5 @@
+__pycache__/
+qemu/scratch/
+corpus/raw/
+workspace/
+.pytest_cache/

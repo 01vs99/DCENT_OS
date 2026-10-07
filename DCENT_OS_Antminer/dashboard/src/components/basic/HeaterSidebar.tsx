@@ -1,3 +1,4 @@
+import { DCENT_DOCS_URL } from '../../utils/links';
 import React from 'react';
 import { useMinerStore } from '../../store/miner';
 import { DcentOsIcon } from '../common/DcentOsLogo';
@@ -102,6 +103,11 @@ export function HeaterSidebar() {
             </button>
           );
         })}
+        <a className="basic-sidebar-item" href={DCENT_DOCS_URL} target="_blank"
+          rel="noopener noreferrer" aria-label="Help and installation guide">
+          <span className="basic-sidebar-icon" aria-hidden="true">?</span>
+          <span className="basic-sidebar-label">Help</span>
+        </a>
       </nav>
 
       <div className="basic-sidebar-spacer" />

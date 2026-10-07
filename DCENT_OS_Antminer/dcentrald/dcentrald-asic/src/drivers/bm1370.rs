@@ -335,7 +335,7 @@ const DEFAULT_TICKET_DIFFICULTY: u32 = 256;
 /// EspMinerFull ranking). Optional Bitmain-jig VCO clamp is **EXPERIMENTAL**
 /// and env-gated default-OFF via [`JIG_VCO_CLAMP_ENV`].
 fn compute_pll_params(target_mhz: f64) -> (u8, u8, u8, u8, u8) {
-    let clamp = std::env::var(JIG_VCO_CLAMP_ENV).as_deref() == Ok("1");
+    let clamp = dcentrald_common::lab_env::var(JIG_VCO_CLAMP_ENV).as_deref() == Ok("1");
     compute_pll_params_inner(target_mhz, clamp)
 }
 
@@ -698,6 +698,16 @@ impl Bm1370Driver {
         std::thread::sleep(Duration::from_millis(10));
         tracing::debug!("Final version mask set");
 
+        let (vco, feedback, reference, post1, post2) = compute_pll_params(target);
+        if let Ok(assessment) = dcentrald_common::bm1370_work_geometry::assess_bm1370_window(
+            encode_pll_reg(vco, feedback, reference, post1, post2),
+            u16::from(chip_count),
+            HASH_COUNTING_VALUE,
+        ) {
+            tracing::info!(?assessment,
+                "BM1370 work-window research: current HCN retained; physical chip attribution unverified");
+        }
+
         Ok(())
     }
 
@@ -839,12 +849,20 @@ impl ChipDriver for Bm1370Driver {
     ) -> Result<Option<u16>> {
         let target_addr = if chip_addr == 0xFF { 0x00 } else { chip_addr };
         let mut last_read = None;
+        let expectation = crate::register_transaction::RegisterReadbackExpectation::for_write(
+            0x1370,
+            regs::PLL0,
+            self.pll_params(expected_mhz).reg_value,
+        )
+        .ok_or_else(|| {
+            crate::AsicError::InvalidParameter("BM1370 PLL0 readback contract unavailable".into())
+        })?;
 
         for _ in 0..3 {
             if let Some(raw) = Self::read_pll_register(chain, target_addr)? {
                 last_read = Some(raw);
                 if let Some(actual_mhz) = Self::pll_register_to_freq(raw) {
-                    if actual_mhz == expected_mhz {
+                    if actual_mhz == expected_mhz && expectation.matches(raw) {
                         return Ok(Some(actual_mhz));
                     }
                 }
@@ -853,6 +871,9 @@ impl ChipDriver for Bm1370Driver {
         }
 
         match last_read {
+            Some(raw) if !expectation.matches(raw) => Err(crate::AsicError::InvalidParameter(
+                format!("BM1370 PLL0 readback {raw:#010x} does not match the requested locked PLL"),
+            )),
             Some(raw) => Self::pll_register_to_freq(raw).map(Some).ok_or_else(|| {
                 crate::AsicError::InvalidParameter(format!(
                     "BM1370 PLL0 readback 0x{:08X} did not map to a known frequency",
@@ -989,10 +1010,9 @@ impl ChipDriver for Bm1370Driver {
         //   Byte 10:   flags: bit 7 = is_job (1=nonce, 0=register read)
         //              bits 4:0 = CRC-5
         //
-        // Nonce field encoding (same as BM1368):
-        //   bits[31:25] = core_id (7 bits, 80 core domains)
-        //   bits[24:17] = asic_address (8 bits)
-        //   bits[16:0]  = nonce value (17 bits)
+        // Wire-field interpretation (distinct from this platform's raw FIFO
+        // ABI): bits 31:25 core ID, bits 24:0 sweep counter. No fixed chip
+        // address. Nominal 128x16 geometry is separate from 2040 effective cores.
         //
         // FPGA packs into word1 similarly to BM1387 but with different field positions.
         let nonce = raw[0];
@@ -1006,9 +1026,11 @@ impl ChipDriver for Bm1370Driver {
         // key and makes every nonce miss the global work table.
         let work_id = hw_work_id;
 
-        // Chip index from nonce bits [24:17] (8-bit address / interval).
-        // The caller needs to divide by address_interval to get chip index.
-        let chip_addr = ((nonce >> 17) & 0xFF) as u8;
+        // BM1370's low 25 bits are a sweep counter, not a fixed chip
+        // address. The current FPGA route has no admitted nonce-offset/range
+        // witness, so preserve the share with explicitly unknown attribution.
+        let chip_addr =
+            dcentrald_common::bm1370_work_geometry::bm1370_physical_chip_index().unwrap_or(u8::MAX);
 
         Ok(NonceResult {
             nonce,
@@ -1348,5 +1370,10 @@ mod tests {
         let decoded = driver.decode_nonce(&raw).unwrap();
         assert_eq!(decoded.work_id, 0x5A);
         assert_eq!(decoded.solution_id, 0x11);
+        assert_eq!(
+            decoded.chip_index,
+            u8::MAX,
+            "BM1370 counter bits do not prove a chip address"
+        );
     }
 }

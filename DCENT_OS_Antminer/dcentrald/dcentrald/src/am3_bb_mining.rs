@@ -6,7 +6,7 @@
 //! the BM1362 chip-side init, and a Stratum mining loop.
 //!
 //! Historical bench target: `a lab unit` (LuxOS). An earlier binary produced accepted
-//! shares there. The current retained-GPIO59/watchdog lifecycle is EXPERIMENTAL
+//! shares there. The current retained-PSU GPIO65/watchdog lifecycle is EXPERIMENTAL
 //! and host-validated only; an authorized current-binary bench rerun is still
 //! required. Remaining inferred cold-boot surfaces are catalogued in
 //! .
@@ -84,12 +84,12 @@
 //! `0x14` TicketMask=0xFF + `0x10` HashCountingNumber, a 400 MHz -> target PLL
 //! ramp, `0x28` FastUART + MiscCtrl x3, host baud switch, a fast-baud GetAddress
 //! probe, then the per-chip post-baud `0xA8`/MiscCtrl x3/`0x3C` x3 loop. The
-//! remaining BB blocker is the APW set-voltage/watchdog write opcodes that are
-//! still deliberately best-effort stubs.
+//! APW supply is independently bound to its exact GPIO65/adapter owner, with
+//! complete acknowledgment and DAC readback required before reset release.
 //!
 //! The cold-boot command sequence retains its historical evidence, but its
 //! authority boundary is stronger: `cold_boot_sequence_s19j_io_v2` now consumes
-//! the caller's sole pre-opened ON owner and never exports/configures GPIO59.
+//! the caller's sole pre-opened ON owner and never exports/configures PSU GPIO65.
 //! Set `DCENT_AM3_BB_STUB_LOOP=1` to fall back to the old logging-only
 //! stub ([`run_mining_loop_stub`]) for a cold-boot/enum-only diagnostic run.
 //!
@@ -143,6 +143,7 @@ use dcentrald_hal::i2c::{
 use dcentrald_hal::platform::beaglebone::{
     authorize_am3_bb_identity, read_active_board_target_name, BeagleBonePlatform,
 };
+use dcentrald_hal::platform::beaglebone_psu::BbPsuControllerBinding;
 use dcentrald_hal::platform::{
     FanAccess, FanCommandReceipt, HardwareMutationBarrierReceipt,
     HardwareMutationCommitFenceTryWait, HardwareMutationGate, HardwareMutationGateOwner, Platform,
@@ -597,16 +598,19 @@ fn am3_bb_expected_safety_liveness_interval(pid_interval_s: f32) -> Duration {
     am3_bb_thermal_poll_interval(pid_interval_s).saturating_add(Duration::from_secs(2))
 }
 
+#[cfg(test)]
 const AM3_BB_DSPIC_RESET_FRAME: &[u8] = &[0x55, 0xAA, 0x04, 0x07, 0x00, 0x0B];
+#[cfg(test)]
 const AM3_BB_DSPIC_JUMP_FRAME: &[u8] = &[0x55, 0xAA, 0x04, 0x06, 0x00, 0x0A];
 const AM3_BB_DSPIC_GET_VERSION_FRAME: &[u8] = &[0x55, 0xAA, 0x04, 0x17, 0x00, 0x1B];
 #[cfg(test)]
 const AM3_BB_DSPIC_DISABLE_FRAME: &[u8] = &[0x55, 0xAA, 0x05, 0x15, 0x00, 0x00, 0x1A];
 const AM3_BB_DSPIC_ENABLE_FRAME: &[u8] = &[0x55, 0xAA, 0x05, 0x15, 0x01, 0x00, 0x1B];
-const AM3_BB_DSPIC_HEARTBEAT_FRAME: &[u8] = &[0x55, 0xAA, 0x04, 0x16, 0x00, 0x1A];
+const AM3_BB_DSPIC_HEARTBEAT_FRAME: &[u8] = &dcentrald_hal::bb_pic_heartbeat::REQUEST;
 const AM3_BB_DSPIC_HEARTBEAT_REPLY_PAYLOAD: &[u8] = &[0x01, 0x00, 0x00];
 const AM3_BB_DSPIC_PROBE_3B_48_FRAME: &[u8] = &[0x55, 0xAA, 0x06, 0x3B, 0x48, 0x00, 0x00, 0x89];
-const AM3_BB_DSPIC_READ_VOLTAGE_FRAME: &[u8] = &[0x55, 0xAA, 0x04, 0x3A, 0x00, 0x3E];
+#[cfg(test)]
+const AM3_BB_DSPIC_READ_VOLTAGE_FRAME: &[u8] = &dcentrald_hal::bb_pic_rail::READ_REQUEST;
 
 // ===========================================================================
 //  ChainUart adapter — DevmemUart -> Am335xUartTransport
@@ -773,15 +777,42 @@ impl ChainUart for Am3BbChainUart {
 /// nothing else touches the PSU bus, so a dedicated fd is fine for now.
 struct DirectI2cApwBus {
     bus: dcentrald_hal::i2c::I2cBus,
+    binding: BbPsuControllerBinding,
+    terminal: Arc<AtomicBool>,
+    on_writer_thread: Arc<AtomicUsize>,
 }
 
 impl ApwUartTunnelBus for DirectI2cApwBus {
+    fn authorize_voltage_control(&mut self) -> dcentrald_hal::Result<()> {
+        if self.bus.bus() != self.binding.bus() || self.terminal.load(Ordering::SeqCst) {
+            return Err(dcentrald_hal::HalError::PsuUnsupported(
+                "BB APW voltage owner is foreign or terminal".into(),
+            ));
+        }
+        self.binding.revalidate()
+    }
     // Two SEPARATE I²C transactions with the trait's default `delay()` sleep
     // in between — the APW needs ≥ ~400 ms to produce a reply, so a combined
     // repeated-START write-read reads all-`0xF5` (the original bring-up bug).
     fn write_frame(&mut self, addr: u8, frame: &[u8]) -> dcentrald_hal::Result<()> {
+        if addr != dcentrald_hal::psu_apw_uart_tunnel::APW_UART_TUNNEL_I2C_ADDR {
+            return Err(dcentrald_hal::HalError::PsuUnsupported(
+                "BB APW foreign address".into(),
+            ));
+        }
+        self.authorize_voltage_control()?;
+        // The same publication serializes both GPIO ON and APW writes with
+        // terminal cutoff. A cutoff racing this syscall re-cuts after it
+        // retires; no protocol writer can later raise the upstream supply.
+        let _publication = am3_bb_publish_psu_write(&self.terminal, &self.on_writer_thread)
+            .map_err(|error| dcentrald_hal::HalError::PsuProtocolOwned(error.to_string()))?;
         self.bus.set_slave(addr)?;
         self.bus.write(frame)?;
+        if self.terminal.load(Ordering::SeqCst) {
+            return Err(dcentrald_hal::HalError::PsuUnsupported(
+                "BB APW write raced terminal cutoff".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -790,6 +821,148 @@ impl ApwUartTunnelBus for DirectI2cApwBus {
         let mut buf = vec![0u8; read_len];
         self.bus.read(&mut buf)?;
         Ok(buf)
+    }
+}
+
+fn am3_bb_publish_psu_write(
+    terminal: &AtomicBool,
+    writer: &Arc<AtomicUsize>,
+) -> Result<Am3BbOnWriterPublication> {
+    anyhow::ensure!(!terminal.load(Ordering::SeqCst), "BB PSU owner is terminal");
+    writer
+        .compare_exchange(
+            0,
+            am3_bb_current_thread_token(),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .map_err(|_| anyhow::anyhow!("BB PSU writer already published"))?;
+    let publication = Am3BbOnWriterPublication {
+        writer_thread: Arc::clone(writer),
+    };
+    anyhow::ensure!(
+        !terminal.load(Ordering::SeqCst),
+        "BB PSU cutoff preceded protocol write"
+    );
+    Ok(publication)
+}
+
+/// The generic gate permits empty slots and more than one ASIC family. This
+/// fixed BM1362 route energizes every configured chain. The collector below
+/// retains each decoded standard 126-chip SKU; these four catalog aliases may
+/// coexist because they share this route's geometry and controller recipe.
+fn require_am3_bb_eeprom_family(
+    probes: &[dcentrald_silicon_profiles::energize_gate::ChainProbe],
+    chain_count: usize,
+) -> Result<()> {
+    use dcentrald_silicon_profiles::energize_gate::ChainProbe;
+    use dcentrald_silicon_profiles::hashboards::Hashboard;
+
+    anyhow::ensure!(
+        (1..=3).contains(&chain_count) && probes.len() == chain_count,
+        "BB fixed route requires one EEPROM observation per configured chain"
+    );
+    for (slot, probe) in probes.iter().enumerate() {
+        anyhow::ensure!(
+            matches!(probe, ChainProbe::Classified {
+                chain_id,
+                preamble: [0x04, 0x11],
+                sku: Hashboard::Bhb42601 | Hashboard::Bhb42603
+                    | Hashboard::Bhb42621 | Hashboard::Bhb42641,
+            } if usize::from(*chain_id) == slot),
+            "BB chain {slot} lacks the required BM1362 BHB42-family observation: {probe:?}"
+        );
+    }
+    Ok(())
+}
+
+fn collect_am3_bb_eeprom_probes(
+    bus: u8,
+    chain_count: usize,
+    expected_chips: usize,
+    mut read: impl FnMut(usize) -> Result<Vec<u8>>,
+) -> Result<Vec<dcentrald_silicon_profiles::energize_gate::ChainProbe>> {
+    use dcentrald_api_types::deployed_eeprom::{
+        decode_deployed_eeprom, DeployedIdentityProvenance,
+    };
+    use dcentrald_api_types::hashboard_eeprom::{corroborate_marking, MarkingCorroboration};
+    use dcentrald_api_types::zhiju_eeprom::Crc5Check;
+    use dcentrald_silicon_profiles::energize_gate::ChainProbe;
+    use dcentrald_silicon_profiles::hashboards::Hashboard;
+    anyhow::ensure!(
+        bus == AM3_BB_DSPIC_I2C_BUS && (1..=3).contains(&chain_count),
+        "BB identity requires the retained bus-0 hashboard service and 1..=3 chains"
+    );
+    let mut probes = Vec::with_capacity(chain_count);
+    for slot in 0..chain_count {
+        let bytes =
+            read(slot).with_context(|| format!("BB bus-0 chain {slot} EEPROM read failed"))?;
+        let identity = decode_deployed_eeprom(&bytes)
+            .with_context(|| format!("BB chain {slot} factory identity decode failed"))?;
+        anyhow::ensure!(
+            identity.board_class == 4
+                && identity.key_index == 1
+                && identity.provenance == DeployedIdentityProvenance::DecryptedXxtea
+                && identity.region_1_crc5 == Crc5Check::Match
+                && identity.region_2_crc5 == Crc5Check::Match,
+            "BB chain {slot} factory format or CRC mismatch"
+        );
+        let sku = match identity.board_name.as_str() {
+            "BHB42601" => Hashboard::Bhb42601,
+            "BHB42603" => Hashboard::Bhb42603,
+            "BHB42621" => Hashboard::Bhb42621,
+            "BHB42641" => Hashboard::Bhb42641,
+            name => anyhow::bail!(
+                "BB chain {slot} factory SKU {name} does not match this S19j Pro recipe"
+            ),
+        };
+        anyhow::ensure!(
+            usize::from(sku.catalog().chips_per_chain) == expected_chips,
+            "BB chain {slot} factory geometry disagrees with configured chip count"
+        );
+        anyhow::ensure!(
+            matches!(
+                corroborate_marking(
+                    dcentrald_common::AsicProtocolIdentity::Bm1362,
+                    identity.chip_marking_family_letter(),
+                ),
+                MarkingCorroboration::Agrees
+            ),
+            "BB chain {slot} factory lot marking disagrees with BM1362"
+        );
+        probes.push(ChainProbe::Classified {
+            chain_id: slot as u8,
+            preamble: [4, 0x11],
+            sku,
+        });
+    }
+    require_am3_bb_eeprom_family(&probes, chain_count)?;
+    Ok(probes)
+}
+
+fn read_am3_bb_eeprom_page(
+    service: &I2cServiceHandle,
+    slot: usize,
+    deadline: Instant,
+) -> Result<Vec<u8>> {
+    anyhow::ensure!(
+        service.bus() == AM3_BB_DSPIC_I2C_BUS && slot < 3,
+        "BB EEPROM adapter/slot mismatch"
+    );
+    loop {
+        match service.read_hashboard_eeprom_page_at(0x50 + slot as u8, deadline) {
+            Ok(bytes) => return Ok(bytes),
+            Err(dcentrald_hal::HalError::I2cEndpointNotReady { .. })
+                if Instant::now() < deadline =>
+            {
+                std::thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(50)),
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
 }
 
@@ -966,7 +1139,7 @@ impl Am3BbRouteReceipt {
         info!(
             startup_identity_source = identity.board_target_source(),
             topology_identity_source = platform.identity_evidence().receipt_label(),
-            "AM3_BB_TOPOLOGY_CAPTURE_RECEIPT schema=v2 run_pid={} board_target=am3-bb-s19jpro soc=am335x carrier=S19J_IO_BOARD_V2_0 asic=BM1362 asic_evidence=declared_runtime_composition topology_profile=s19j_io_board_v2_0_exact_v1 gpio_profile=enable59-rst49_60_27_22-plug51_48_47_46-fantach7_20_110_112-led23_45 uart_profile=ttyS1_48022000-ttyS2_48024000-ttyS4_481a8000-3000000 i2c_profile=eeprom0_50_51_52-deny-psu1_10 cold_boot_profile=15000_13800-reset10_1100_retry1x2_200_100-fan10_30 identity_evidence={}",
+            "AM3_BB_TOPOLOGY_CAPTURE_RECEIPT schema=v3 run_pid={} board_target=am3-bb-s19jpro soc=am335x carrier=S19J_IO_BOARD_V2_0 asic=BM1362 asic_evidence=declared_runtime_composition topology_profile=s19j_io_board_v2_0_exact_v1 gpio_profile=legacy59_metadata-psu65_high-rst49_60_27_22-plug51_48_47_46-fantach7_20_110_112-led23_45 uart_profile=ttyS1_48022000-ttyS2_48024000-ttyS4_481a8000-3000000 i2c_profile=eeprom0_50_51_52-deny-psu1_10 cold_boot_profile=fixed_apw15120_runtime_owner_required-reset10_1100_retry1x2_200_100-fan10_30 identity_evidence={}",
             std::process::id(),
             platform.identity_evidence().receipt_label(),
         );
@@ -999,7 +1172,7 @@ impl Am3BbRouteReceipt {
     fn publish_admission_receipt(&self) {
         info!(
             topology_identity_source = self.platform.identity_evidence().receipt_label(),
-            "AM3_BB_ROUTE_ADMISSION_RECEIPT schema=v2 run_pid={} board_target=am3-bb-s19jpro soc=am335x carrier=S19J_IO_BOARD_V2_0 asic=BM1362 asic_evidence=declared_runtime_composition topology_profile=s19j_io_board_v2_0_exact_v1 gpio_profile=enable59-rst49_60_27_22-plug51_48_47_46-fantach7_20_110_112-led23_45 uart_profile=ttyS1_48022000-ttyS2_48024000-ttyS4_481a8000-3000000 i2c_profile=eeprom0_50_51_52-deny-psu1_10 cold_boot_profile=15000_13800-reset10_1100_retry1x2_200_100-fan10_30 identity_evidence={}",
+            "AM3_BB_ROUTE_ADMISSION_RECEIPT schema=v3 run_pid={} board_target=am3-bb-s19jpro soc=am335x carrier=S19J_IO_BOARD_V2_0 asic=BM1362 asic_evidence=declared_runtime_composition topology_profile=s19j_io_board_v2_0_exact_v1 gpio_profile=legacy59_metadata-psu65_high-rst49_60_27_22-plug51_48_47_46-fantach7_20_110_112-led23_45 uart_profile=ttyS1_48022000-ttyS2_48024000-ttyS4_481a8000-3000000 i2c_profile=eeprom0_50_51_52-deny-psu1_10 cold_boot_profile=fixed_apw15120_runtime_owner_required-reset10_1100_retry1x2_200_100-fan10_30 identity_evidence={}",
             std::process::id(),
             self.platform.identity_evidence().receipt_label(),
         );
@@ -1236,7 +1409,9 @@ pub async fn run_am3_bb_mining(
 ) -> std::result::Result<(), Am3BbLifecycleError> {
     info!("Entering AM335x BB mining mode (--am3-bb-mining) — S19J_IO_BOARD_V2_0 / .79-class");
 
-    if !config.mining_start_enabled() && std::env::var_os("DCENT_AM3_BB_STUB_LOOP").is_none() {
+    if !config.mining_start_enabled()
+        && dcentrald_common::lab_env::var_os("DCENT_AM3_BB_STUB_LOOP").is_none()
+    {
         return match safety_admission.disarm_never_energized().await {
             Ok(closeout) => Err(Am3BbLifecycleError::never_energized_closed(
                 anyhow::anyhow!(
@@ -1353,6 +1528,10 @@ fn run_am3_bb_blocking(
         };
     }
     let platform = route_receipt.platform;
+    let software_closeout_run =
+        dcentrald_common::mutation_disposition::capture_software_closeout_run(
+            platform.board_target_name(),
+        );
     // Validate every operator assertion and resolve catalog-backed geometry
     // before the admitted platform can open any hardware owner.
     let expected_chips_per_chain = pre_energize_try!(resolve_am3_bb_chips_per_chain(
@@ -1361,11 +1540,11 @@ fn run_am3_bb_blocking(
         config.mining.serial_chip_count,
     ));
 
-    // Step 1 uses the exact platform topology captured during route admission.
-    // Do not reread board-target, device-tree, GPIO, UART, or I2C route files.
+    // Use the immutable platform topology from route admission. The separate
+    // supply binding observes the actual kernel owner before any GPIO output.
     let bt = platform.board_target();
     let chain_specs = chain_uart_specs(&platform);
-    let stub_loop = std::env::var_os("DCENT_AM3_BB_STUB_LOOP").is_some();
+    let stub_loop = dcentrald_common::lab_env::var_os("DCENT_AM3_BB_STUB_LOOP").is_some();
     if !stub_loop {
         for forbidden_override in [
             ENV_AM3_BB_SKIP_DSPIC_INIT,
@@ -1378,7 +1557,7 @@ fn run_am3_bb_blocking(
             ENV_AM3_BB_ALLOW_NO_RX_MINING,
             ENV_AM2_ACCEPT_DEGRADED_HARDWARE,
         ] {
-            if env_flag_set(forbidden_override) {
+            if forbidden_override_is_present(forbidden_override) {
                 pre_energize_try!(Err(anyhow::anyhow!(
                     "am3-bb: watched Mining admission forbids safety override {forbidden_override}"
                 )));
@@ -1389,7 +1568,7 @@ fn run_am3_bb_blocking(
         board_target = %platform.board_target_name(),
         chain_count = bt.uart.chain_count,
         chains = ?chain_specs,
-        board_enable_gpio = platform.board_enable_gpio_v2_0(),
+        psu_enable_gpio = dcentrald_hal::platform::beaglebone_psu::PSU_ENABLE_GPIO,
         asic_reset_gpios = ?platform.chain_reset_gpios_v2_0(),
         plug_detect_gpios = ?platform.chain_plug_gpios_v2_0(),
         eeprom_bus = platform.eeprom_i2c_bus(),
@@ -1508,51 +1687,117 @@ fn run_am3_bb_blocking(
         // ── 3. Build the APW121215f UART-tunnel PSU controller (bus 1 @ 0x10). ──
     }
 
+    // The same protected bus-0 service owns identity admission and subsequent
+    // dsPIC traffic. Never use the legacy sysfs probe's bus-1 fallback here:
+    // that is the separate PSU adapter, not hashboard identity authority.
+    let hashboard_i2c = pre_energize_try!(spawn_i2c_service_no_register_touch_with_denylist(
+        AM3_BB_DSPIC_I2C_BUS,
+        AM3_BB_HASHBOARD_EEPROM_DENYLIST.to_vec(),
+    )
+    .context("am3-bb: open protected bus-0 identity/dsPIC service"));
+
     let psu_bus_num = platform.psu_i2c_bus();
     let psu_addr = platform.psu_i2c_addr();
     let psu_i2c = pre_energize_try!(platform
         .open_i2c(psu_bus_num)
         .with_context(|| format!("am3-bb: open /dev/i2c-{} (PSU bus) failed", psu_bus_num)));
-    let mut psu = ApwUartTunnel::new_at(DirectI2cApwBus { bus: psu_i2c }, psu_addr);
+    let supply_owner = pre_energize_try!(_run_safety_guard
+        .as_ref()
+        .context("am3-bb: retained supply owner absent before APW construction"));
+    let binding = pre_energize_try!(supply_owner
+        .board_enable
+        .psu_binding
+        .as_ref()
+        .context("am3-bb: exact supply controller was not observed"))
+    .clone();
+    let mut psu = ApwUartTunnel::new_at(
+        DirectI2cApwBus {
+            bus: psu_i2c,
+            binding,
+            terminal: Arc::clone(&supply_owner.board_enable.io.terminal),
+            on_writer_thread: Arc::clone(&supply_owner.board_enable.io.on_writer_thread),
+        },
+        psu_addr,
+    );
     info!(
         psu_bus = psu_bus_num,
         psu_addr = format_args!("0x{:02X}", psu_addr),
         "am3-bb: APW UART-tunnel PSU controller constructed"
     );
 
-    // Wave J Lane A: 120V "Loki bypass". am3-bb cold-boot asserts the board-enable
-    // GPIO (gpio59, board_enable_gpio_v2_0) and the APW UART-tunnel set-voltage /
-    // watchdog calls are already Phase-D non-fatal stubs (log + continue), so a
-    // non-smart PSU does not block here today. When [power.psu_override] is set we
-    // honor it for telemetry (record the declared model + efficiency) and log the
-    // disposition so it is never silently ignored. The gpio59 enable + cold-boot
-    // below are unchanged; the chip rail is untouched.
-    if crate::s19j_hybrid_mining::psu_override_active(config.power.psu_override.as_ref()) {
-        let ovr = config
-            .power
-            .psu_override
-            .as_ref()
-            .expect("psu_override_active implies Some");
-        info!(
-            model = %ovr.model,
-            rail_v = ovr.voltage_v,
-            efficiency =
-                ?crate::runtime::efficiency::psu_efficiency_for_model_name(&ovr.model),
-            "am3-bb: PSU OVERRIDE honored as INFORMATIONAL — board-enable is gpio59 + APW \
-             writes are non-fatal stubs, so there is no blocking smart-PSU probe to bypass; \
-             declared model + efficiency recorded for telemetry"
-        );
-    }
+    // Exact smart-PSU control is required on this route. A telemetry PSU
+    // override cannot bypass identity, controller ownership or acknowledgments.
+    // Cold boot holds resets, validates APW0x76/FW0x17, asserts retained PSU65,
+    // checks the source-selected fixed DAC0 and only then releases reset.
+    // Observed hashboard-family admission precedes the new supply ON boundary.
+    pre_energize_try!((|| -> Result<()> {
+        {
+            use crate::runtime::hardware_info::DEFAULT_EEPROM_READINESS_BUDGET_MS;
+            use dcentrald_silicon_profiles::energize_gate::{
+                accept_degraded_hardware_enabled, gate_chains_for_energize_with_opts,
+                strict_sku_refuse_enabled,
+            };
 
-    // ── 4. Cold-boot: gpio59 enable → settle → APW identity probe → set
-    //       open-core rail → de-assert ASIC resets → settle.
-    //
-    //       `run_cold_boot` builds `ColdBootOptsV2::from_board_target(...)`
-    //       and calls `cold_boot_sequence_s19j_io_v2`. Several APW steps are
-    //       Phase-D stubs that log + continue (the `psu_apw_uart_tunnel`
-    //       set_voltage_mv etc. return their "not implemented" sentinel,
-    //       which the cold-boot fn treats as non-fatal). The gpio enable +
-    //       reset de-assert + settles are real. ──
+            let strict = strict_sku_refuse_enabled();
+            let accept_degraded = accept_degraded_hardware_enabled();
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_millis(DEFAULT_EEPROM_READINESS_BUDGET_MS);
+            let chain_count = chain_specs.len();
+            let probes = collect_am3_bb_eeprom_probes(
+                hashboard_i2c.bus(),
+                chain_count,
+                expected_chips_per_chain,
+                |slot| read_am3_bb_eeprom_page(&hashboard_i2c, slot, deadline),
+            )?;
+            info!(
+                strict,
+                accept_degraded,
+                probes = ?probes,
+                "am3-bb: Phase 4b hashboard-SKU energize-gate probes"
+            );
+            // The held LuxOS startup reads identity before the supply initializer.
+            // An absent identity may not become energization authority. The former
+            // timeout skip also ran after cold boot and never proved this boundary.
+            match gate_chains_for_energize_with_opts(&probes, strict, false) {
+                Ok((bindings, telemetry)) => {
+                    info!(
+                        chains = bindings.len(),
+                        bindings = ?bindings,
+                        "am3-bb: Phase 4b energize gate ACCEPTED"
+                    );
+                    if !telemetry.is_empty() {
+                        warn!(
+                            reasons = %telemetry.summary(),
+                            "am3-bb: [ENERGIZE-REFUSED telemetry-only — would refuse if DCENT_AM2_STRICT_SKU_REFUSE=1] {}",
+                            telemetry.summary()
+                        );
+                    }
+                }
+                Err(refusal) => {
+                    if accept_degraded {
+                        warn!(
+                            reasons = %refusal.summary(),
+                            "am3-bb: [ENERGIZE-REFUSED but proceeding — DCENT_AM2_ACCEPT_DEGRADED_HARDWARE=1 lab override] {}",
+                            refusal.summary()
+                        );
+                    } else {
+                        tracing::error!(
+                            reasons = %refusal.summary(),
+                            "am3-bb: [ENERGIZE-REFUSED] {}",
+                            refusal.summary()
+                        );
+                        return Err(anyhow::anyhow!(
+                            "am3-bb hashboard-SKU energize gate refused: {}",
+                            refusal.summary()
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    })());
+
     info!("am3-bb: starting cold-boot sequence (ColdBootOptsV2 from board-target)");
     let board_enable = pre_energize_try!(_run_safety_guard
         .as_mut()
@@ -1582,98 +1827,6 @@ fn run_am3_bb_blocking(
         .into());
     }
 
-    // ── 4b. Hashboard-SKU energize-refusal gate ( B2, 2026-05-22). ──
-    //
-    // Drive-half of matrix §7 #15. Classify each chain's EEPROM preamble
-    // BEFORE the dsPIC + APW are driven; refuse if any chain reports a
-    // malformed/timed-out/mixed-SKU/unbindable preamble. AM3 BB chains
-    // expose their EEPROM at `/sys/bus/i2c/devices/<bus>-005<slot>/eeprom`
-    // exactly like AM2; the helper used here is platform-agnostic. The
-    // env gating (`DCENT_AM2_STRICT_SKU_REFUSE` default OFF) is shared
-    // with AM2 so first-deploy telemetry is consistent across both paths
-    // — the `AM2_` prefix is historical; the gate is platform-generic.
-    {
-        use crate::runtime::hardware_info::{
-            read_hashboard_eeprom_for_energize_gate, EepromReadinessError,
-            DEFAULT_EEPROM_READINESS_BUDGET_MS,
-        };
-        use dcentrald_silicon_profiles::energize_gate::{
-            accept_degraded_hardware_enabled, classify_chain, gate_chains_for_energize_with_opts,
-            strict_sku_refuse_enabled, ChainProbe,
-        };
-
-        let strict = strict_sku_refuse_enabled();
-        let accept_degraded = accept_degraded_hardware_enabled();
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_millis(DEFAULT_EEPROM_READINESS_BUDGET_MS);
-        let chain_count = chain_specs.len();
-        let mut probes: Vec<ChainProbe> = Vec::with_capacity(chain_count);
-        for slot in 0..chain_count.min(8) {
-            let slot_u8 = u8::try_from(slot).unwrap_or(0);
-            match read_hashboard_eeprom_for_energize_gate(slot, deadline) {
-                Ok(bytes) => probes.push(classify_chain(slot_u8, Some(&bytes))),
-                Err(EepromReadinessError::Timeout { .. }) => {
-                    probes.push(ChainProbe::Timeout { chain_id: slot_u8 });
-                }
-                Err(EepromReadinessError::InvalidSlot { .. }) => {
-                    probes.push(ChainProbe::ReadError { chain_id: slot_u8 });
-                }
-            }
-        }
-        info!(
-            strict,
-            accept_degraded,
-            probes = ?probes,
-            "am3-bb: Phase 4b hashboard-SKU energize-gate probes"
-        );
-        // am3-bb: timeout_is_skip=true. The hashboard EEPROM (bus 0 @
-        // 0x50-0x52) is unpowered until the chain rail is enabled, but this
-        // gate runs pre-energize by design → a pre-energize EEPROM read
-        // ALWAYS times out (live-proven on .79 2026-05-22: the same bus-0
-        // dsPICs only answered after rail-enable). Treating that timeout as
-        // refuse-eligible would FALSE-REFUSE every healthy am3-bb chain under
-        // strict mode. am3-bb identity protection comes from plug-detect
-        // GPIO + dsPIC fw=0x86 refusal + chain-enum liveness instead. Only
-        // affects strict mode; default-OFF telemetry path is unchanged.
-        //
-        match gate_chains_for_energize_with_opts(&probes, strict, true) {
-            Ok((bindings, telemetry)) => {
-                info!(
-                    chains = bindings.len(),
-                    bindings = ?bindings,
-                    "am3-bb: Phase 4b energize gate ACCEPTED"
-                );
-                if !telemetry.is_empty() {
-                    warn!(
-                        reasons = %telemetry.summary(),
-                        "am3-bb: [ENERGIZE-REFUSED telemetry-only — would refuse if DCENT_AM2_STRICT_SKU_REFUSE=1] {}",
-                        telemetry.summary()
-                    );
-                }
-            }
-            Err(refusal) => {
-                if accept_degraded {
-                    warn!(
-                        reasons = %refusal.summary(),
-                        "am3-bb: [ENERGIZE-REFUSED but proceeding — DCENT_AM2_ACCEPT_DEGRADED_HARDWARE=1 lab override] {}",
-                        refusal.summary()
-                    );
-                } else {
-                    tracing::error!(
-                        reasons = %refusal.summary(),
-                        "am3-bb: [ENERGIZE-REFUSED] {}",
-                        refusal.summary()
-                    );
-                    return Err(anyhow::anyhow!(
-                        "am3-bb hashboard-SKU energize gate refused: {}",
-                        refusal.summary()
-                    )
-                    .into());
-                }
-            }
-        }
-    }
-
     // ── 5. Hashboard dsPIC init + heartbeat on I2C bus 0. ──
     //
     // The 2026-05-13 LuxOS ftrace disproved the earlier NoPic assumption for
@@ -1691,13 +1844,7 @@ fn run_am3_bb_blocking(
             "am3-bb: lab override active — skipping hashboard dsPIC init/heartbeat"
         );
     } else {
-        let dspic_i2c = spawn_i2c_service_no_register_touch_with_denylist(
-            AM3_BB_DSPIC_I2C_BUS,
-            AM3_BB_HASHBOARD_EEPROM_DENYLIST.to_vec(),
-        )
-        .context(
-            "am3-bb: spawn I2C service for hashboard dsPIC bus 0 with EEPROM denylist failed",
-        )?;
+        let dspic_i2c = hashboard_i2c.clone();
         info!(
             bus = AM3_BB_DSPIC_I2C_BUS,
             denylist = format_args!("{:02X?}", AM3_BB_HASHBOARD_EEPROM_DENYLIST),
@@ -2078,38 +2225,16 @@ fn run_am3_bb_blocking(
         "am3-bb: Am335xUartTransport ready"
     );
 
-    // ── 7. Drop the APW rail to steady (~13.8 V) now that chip-side init is done.
-    //
-    //       Do not call the full cold-boot sequence a second time here: that
-    //       sequence owns GPIO reset assertion/release and would reset the
-    //       chips after the post-baud init. The APW set-voltage payload is still
-    //       a Phase-D stub, so this direct call logs the intent without touching
-    //       ASIC resets. ──
+    // Verify the fixed upstream supply after the independent dsPIC ramp.
+    // Failure enters the existing terminal, checked power-first closeout.
     am3_bb_require_heartbeat_for_energizing_boundary(
         dspic_heartbeat_guard.as_mut(),
         &shutdown,
         !stub_loop,
-        "APW steady-voltage request",
+        "APW fixed-supply verification",
     )?;
-    if let Err(e) = psu.set_voltage_mv(bt.cold_boot.apw12_rail_steady_mv) {
-        warn!(
-            target_mv = bt.cold_boot.apw12_rail_steady_mv,
-            error = %e,
-            "am3-bb: APW rail steady-drop reported an error (continuing - Phase-D stub)"
-        );
-    } else {
-        match psu.read_voltage_mv() {
-            Ok(readback_mv) => info!(
-                steady_mv = bt.cold_boot.apw12_rail_steady_mv,
-                readback_mv, "am3-bb: APW rail steady-drop step completed"
-            ),
-            Err(e) => warn!(
-                steady_mv = bt.cold_boot.apw12_rail_steady_mv,
-                error = %e,
-                "am3-bb: APW rail steady-drop readback failed (continuing - Phase-D stub)"
-            ),
-        }
-    }
+    psu.require_fixed_supply()
+        .context("am3-bb: APW fixed supply readback failed after the dsPIC ramp")?;
 
     // ── 7b. Transfer the pre-energize watchdog owner into the mining loop.
     //       `Am3BbSafetyAdmission` armed and initially kicked `/dev/watchdog`
@@ -2186,7 +2311,7 @@ fn run_am3_bb_blocking(
         .as_ref()
         .context("am3-bb: dsPIC heartbeat owner is missing before teardown cutoff")?;
     heartbeat_feeder_owner.request_stop();
-    // GPIO59 is the load-bearing physical cut. New API commits were revoked
+    // PSU GPIO65 is the load-bearing physical cut. New API commits were revoked
     // synchronously above and the watchdog deadline/command are published;
     // perform the checked OFF write before waiting for the actor acknowledgement
     // or spending cleanup time on leases, controllers, actors, or reset sysfs.
@@ -2309,7 +2434,7 @@ fn run_am3_bb_blocking(
         .teardown_checked(board_cutoff_result.ok(), teardown_view.clone())?;
     terminal_state.record_safe_off(mining_result.is_err());
     // Stratum cancellation was published immediately after the load-bearing
-    // GPIO59 cut. Spend its bounded join budget only after controller actors
+    // PSU GPIO65 cut. Spend its bounded join budget only after controller actors
     // are quiescent and checked hardware safe-off is proven, so a wedged pool
     // task can never consume the physical-safety portion of the deadline.
     let stratum_join_deadline = am3_bb_capped_cleanup_deadline(
@@ -2363,6 +2488,10 @@ fn run_am3_bb_blocking(
         ));
     }
 
+    crate::daemon::publish_orderly_software_closeout(
+        software_closeout_run,
+        &terminal_closeout._watchdog,
+    )?;
     terminal_state.finish_stopped();
     info!("am3-bb: mining mode stopped with complete shutdown evidence");
     Ok(())
@@ -2715,11 +2844,17 @@ fn bm1362_pll_ramp_to_target(target_freq_mhz: u16) -> Vec<(u32, u16)> {
 }
 
 fn env_flag_set(name: &str) -> bool {
+    dcentrald_common::lab_env::var_os(name).is_some()
+}
+
+// A forbidden override is still reported in release builds, even though the
+// lab accessors will never grant its requested hardware behavior there.
+fn forbidden_override_is_present(name: &str) -> bool {
     std::env::var_os(name).is_some()
 }
 
 fn parse_env_u32(name: &str) -> Option<u32> {
-    let raw = std::env::var(name).ok()?;
+    let raw = dcentrald_common::lab_env::var(name).ok()?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -2757,7 +2892,7 @@ enum Am3BbWorkCodec {
 
 impl Am3BbWorkCodec {
     fn from_env() -> Self {
-        match std::env::var(ENV_AM3_BB_WORK_CODEC)
+        match dcentrald_common::lab_env::var(ENV_AM3_BB_WORK_CODEC)
             .ok()
             .map(|v| v.trim().to_ascii_lowercase())
             .as_deref()
@@ -3290,18 +3425,18 @@ fn am3_bb_dspic_heartbeat_once(
     chain_idx: usize,
     addr: u8,
 ) -> Result<Vec<u8>> {
-    let reply = am3_bb_dspic_command(
-        i2c,
-        chain_idx,
-        addr,
-        I2cMutationLabel::KeepAlive,
-        AM3_BB_DSPIC_HEARTBEAT_FRAME,
-        6,
-        20,
-        20,
-        "heartbeat",
-    )?;
-    am3_bb_validate_heartbeat_reply(chain_idx, addr, reply)
+    let reads = i2c
+        .transaction_mutating(
+            I2cMutationLabel::KeepAlive,
+            addr,
+            dcentrald_hal::bb_pic_heartbeat::transaction_steps(),
+        )
+        .with_context(|| {
+            format!("am3-bb chain {chain_idx} dsPIC 0x{addr:02X}: heartbeat transaction failed")
+        })?;
+    let reply = dcentrald_hal::bb_pic_heartbeat::complete_reply(&reads)
+        .context("am3-bb: incomplete PIC heartbeat transaction results")?;
+    am3_bb_validate_heartbeat_reply(chain_idx, addr, reply.to_vec())
 }
 
 /// Validate the exact framed heartbeat response established by the `a lab unit`
@@ -3340,17 +3475,33 @@ fn am3_bb_dspic_read_voltage(
     addr: u8,
     what: &str,
 ) -> Result<Vec<u8>> {
-    am3_bb_dspic_command(
-        i2c,
-        chain_idx,
-        addr,
-        I2cMutationLabel::QueryPrelude,
-        AM3_BB_DSPIC_READ_VOLTAGE_FRAME,
-        7,
-        50,
-        20,
-        what,
-    )
+    let reads = i2c
+        .transaction_mutating(
+            I2cMutationLabel::QueryPrelude,
+            addr,
+            dcentrald_hal::bb_pic_rail::read_steps(),
+        )
+        .with_context(|| {
+            format!("am3-bb chain {chain_idx} dsPIC 0x{addr:02X}: {what} rail query failed")
+        })?;
+    if reads.len() != dcentrald_hal::bb_pic_rail::RESPONSE_BYTES
+        || reads.iter().any(|read| read.len() != 1)
+    {
+        anyhow::bail!("am3-bb: PIC rail query did not return seven complete one-byte reads");
+    }
+    let reply: Vec<u8> = reads.into_iter().flatten().collect();
+    let observation = dcentrald_hal::bb_pic_rail::BbPicRailObservation::from_complete_reply(&reply)
+        .context("am3-bb: incomplete PIC rail observation")?;
+    info!(
+        chain = chain_idx,
+        addr = format_args!("0x{addr:02X}"),
+        stage = what,
+        raw_adc = observation.raw_adc(),
+        voltage_v = observation.voltage_v(),
+        checksum_validated = false,
+        "am3-bb: source-decoded PIC rail observation"
+    );
+    Ok(reply)
 }
 
 fn am3_bb_dspic_set_voltage(
@@ -3496,6 +3647,26 @@ where
     energize()
 }
 
+/// Observe an already-running fw89 application through the sole service.
+/// The native query retains its existing 135ms initial/20ms inter-read waits;
+/// the donor's post-RESET query is a different entry state, not timing proof
+/// for this query. No malformed or foreign reply authorizes RESET or JUMP.
+fn am3_bb_dspic_read_application<T>(chain_idx: usize, addr: u8, transaction: T) -> Result<[u8; 5]>
+where
+    T: FnOnce(I2cMutationLabel, u8, Vec<I2cTransactionStep>) -> Result<Vec<Vec<u8>>>,
+{
+    anyhow::ensure!(
+        chain_idx < 3 && addr == AM3_BB_DSPIC_BASE_ADDR + chain_idx as u8,
+        "am3-bb: application query requires its exact chain/controller address"
+    );
+    let steps = dcentrald_hal::bb_pic_application::transaction_steps();
+    let reads = transaction(I2cMutationLabel::QueryPrelude, addr, steps).with_context(|| {
+        format!("am3-bb chain {chain_idx} dsPIC 0x{addr:02X}: application query failed")
+    })?;
+    dcentrald_hal::bb_pic_application::complete_reply(&reads)
+        .map_err(|error| anyhow::anyhow!("am3-bb: {error}"))
+}
+
 fn am3_bb_dspic_init_one(
     i2c: &I2cServiceHandle,
     chain_idx: usize,
@@ -3509,82 +3680,11 @@ fn am3_bb_dspic_init_one(
         "am3-bb: LuxOS-trace dsPIC init starting"
     );
 
-    // Coordinator 2026-08-19: GET_VERSION first. JUMP only if not already
-    // fw=0x89 app. NEVER PIC/dsPIC RESET 0x07 on S19j Pro (0x89 FRAMED → 0x82 BARE).
-    let version = am3_bb_dspic_command(
-        i2c,
-        chain_idx,
-        addr,
-        I2cMutationLabel::QueryPrelude,
-        AM3_BB_DSPIC_GET_VERSION_FRAME,
-        5,
-        135,
-        20,
-        "get-version",
-    )?;
-    let Some(fw) = version.get(2).copied() else {
-        warn!(
-            chain = chain_idx,
-            addr = format_args!("0x{:02X}", addr),
-            reply = format_args!("{:02X?}", version),
-            "am3-bb: dsPIC version reply too short"
-        );
-        return Ok(None);
-    };
-    if fw != 0x89 {
-        // Bootloader or unexpected app: JUMP to app, never RESET 0x07.
-        let jump_ack = am3_bb_dspic_command(
-            i2c,
-            chain_idx,
-            addr,
-            I2cMutationLabel::Recovery,
-            AM3_BB_DSPIC_JUMP_FRAME,
-            2,
-            50,
-            20,
-            "jump-to-app",
-        )?;
-        if jump_ack.first().copied() != Some(0x06) {
-            warn!(
-                chain = chain_idx,
-                addr = format_args!("0x{:02X}", addr),
-                reply = format_args!("{:02X?}", jump_ack),
-                "am3-bb: dsPIC jump echo mismatch; treating this chain controller as absent"
-            );
-            return Ok(None);
-        }
-        thread::sleep(Duration::from_millis(400));
-        let version = am3_bb_dspic_command(
-            i2c,
-            chain_idx,
-            addr,
-            I2cMutationLabel::QueryPrelude,
-            AM3_BB_DSPIC_GET_VERSION_FRAME,
-            5,
-            135,
-            20,
-            "get-version-after-jump",
-        )?;
-        let Some(fw_after) = version.get(2).copied() else {
-            warn!(
-                chain = chain_idx,
-                addr = format_args!("0x{:02X}", addr),
-                reply = format_args!("{:02X?}", version),
-                "am3-bb: dsPIC version reply too short after JUMP"
-            );
-            return Ok(None);
-        };
-        if fw_after != 0x89 {
-            warn!(
-                chain = chain_idx,
-                addr = format_args!("0x{:02X}", addr),
-                firmware = format_args!("0x{:02X}", fw_after),
-                reply = format_args!("{:02X?}", version),
-                "am3-bb: dsPIC firmware is not the LuxOS-traced fw=0x89 path; skipping controller"
-            );
-            return Ok(None);
-        }
-    }
+    let version = am3_bb_dspic_read_application(chain_idx, addr, |label, addr, steps| {
+        i2c.transaction_mutating(label, addr, steps)
+            .map_err(anyhow::Error::new)
+    })?;
+    let fw = version[2];
 
     i2c.disable_dspic_voltage(addr, I2cDspicDisableProtocol::VnishPaddedFramed)
         .with_context(|| {
@@ -3665,17 +3765,8 @@ fn am3_bb_dspic_init_one(
         );
     }
 
-    let voltage_before = am3_bb_dspic_command(
-        i2c,
-        chain_idx,
-        addr,
-        I2cMutationLabel::QueryPrelude,
-        AM3_BB_DSPIC_READ_VOLTAGE_FRAME,
-        7,
-        50,
-        20,
-        "read-voltage-before-enable",
-    )?;
+    let voltage_before =
+        am3_bb_dspic_read_voltage(i2c, chain_idx, addr, "read-voltage-before-enable")?;
 
     let set_voltage_frame = am3_bb_dspic_set_voltage_frame(target_voltage_mv);
     let (voltage_after_set, enable_ack, voltage_after) = if early_enable {
@@ -3933,7 +4024,7 @@ impl Drop for Am3BbOnWriterPublication {
     }
 }
 
-/// One pre-opened, physically raw GPIO59 cutoff capability.
+/// One pre-opened, physically raw PSU GPIO65 cutoff capability.
 ///
 /// The direction writer plus direction/active-low/value readers are opened
 /// before cold boot and retained for the lifetime of the consumer. Cutoff is
@@ -4308,13 +4399,14 @@ enum Am3BbBoardEnableState {
     TerminalOff,
 }
 
-/// Sole owner of the GPIO59 ON transition. Emergency-only lanes never hold
+/// Sole owner of the PSU GPIO65 ON transition. Emergency-only lanes never hold
 /// this type and therefore cannot invoke the cold-boot energization trait.
 struct Am3BbBoardEnableOwner {
     io: Am3BbPreparedBoardCutoff,
     on_writer: File,
     board_enable_active_high: bool,
     state: Am3BbBoardEnableState,
+    psu_binding: Option<BbPsuControllerBinding>,
     #[cfg(test)]
     fail_on_readback_after_on_write: bool,
 }
@@ -4344,6 +4436,10 @@ impl Am3BbBoardEnableOwner {
     }
 
     fn write_on_checked(&self) -> Result<()> {
+        if let Some(binding) = &self.psu_binding {
+            anyhow::ensure!(self.gpio() == binding.gpio(), "BB PSU GPIO owner changed");
+            binding.revalidate()?;
+        }
         self.io.read_prepared_topology_checked()?;
         let mut writer = &self.on_writer;
         writer
@@ -4363,6 +4459,11 @@ impl Am3BbBoardEnableOwner {
 }
 
 impl dcentrald_hal::platform::beaglebone_cold_boot::PreparedBoardEnable for Am3BbBoardEnableOwner {
+    fn cut_checked(&mut self) -> dcentrald_hal::Result<()> {
+        Am3BbBoardEnableOwner::cut_checked(self)
+            .map(|_| ())
+            .map_err(|error| dcentrald_hal::HalError::Gpio(format!("{error:#}")))
+    }
     fn gpio(&self) -> u32 {
         self.io.gpio
     }
@@ -4582,6 +4683,7 @@ where
             on_writer,
             board_enable_active_high,
             state: Am3BbBoardEnableState::PreparedOff,
+            psu_binding: None,
             #[cfg(test)]
             fail_on_readback_after_on_write: false,
         },
@@ -4658,7 +4760,7 @@ fn am3_bb_clamp_pid_pwm(config_min_pwm: u8, config_max_pwm: u8, requested: u8) -
 /// Invariant #2 (cut hash power BEFORE raising fan noise) is encoded here as a
 /// total order: at or above the dangerous threshold the answer is always
 /// [`Am3BbThermalAction::CutHashThenFan`], which the caller services by failing
-/// closed (`poll_and_check` failure → immediate retained GPIO59 raw-LOW cut,
+/// closed (`poll_and_check` failure → immediate retained PSU GPIO65 raw-LOW cut,
 /// then dsPIC/reset defense-in-depth and quiet fan coast-down). The PID is only consulted in the
 /// [`Am3BbThermalAction::PidWithinCap`] arm, i.e. while temperature is still
 /// below dangerous — so the fan is only ever raised *within* the quiet cap and
@@ -4774,7 +4876,7 @@ impl Am3BbFanPid {
 
         // Invariant #2: at/above dangerous, the response is cut-hash-first.
         // The PID does not try to cool its way out by ramping the fan; the
-        // caller's `poll_and_check` returns Err, immediately cuts GPIO59, and
+        // caller's `poll_and_check` returns Err, immediately cuts PSU GPIO65, and
         // then performs dsPIC/reset defense-in-depth with the fan held at the
         // quiet cap. So here we simply stop trimming.
         if am3_bb_thermal_action(snapshot.max_temp_c, dangerous_temp_c)
@@ -4861,7 +4963,7 @@ fn arm_am3_bb_teardown(
 
 /// Best-effort cut-hash teardown for the `main()` crash panic hook on the am3-bb
 /// path. No-op unless an am3-bb run armed it. The watchdog's lock-free terminal
-/// feed latch is published first, then the load-bearing retained GPIO59 write;
+/// feed latch is published first, then the load-bearing retained PSU GPIO65 write;
 /// reset defense-in-depth follows and may use ordinary sysfs helpers. The
 /// retained userspace path allocates nothing, although Linux 5.4 kernfs may
 /// allocate inside a sysfs write. Errors are swallowed so the hook cannot
@@ -5027,10 +5129,12 @@ impl Am3BbRunSafetyGuard {
         fan_min_pwm: u8,
         fan_max_pwm: u8,
     ) -> Result<Self> {
-        let board_cutoffs = am3_bb_prepare_board_cutoff_set(
-            platform.board_enable_gpio_v2_0(),
-            platform.board_target().board_enable_active_high(),
-        )?;
+        // GPIO59's historical label never proved a physical cutoff. Bind the
+        // exact AM33XX PSU65 controller before any output or fan write, then
+        // reuse the retained single-writer/independent-cutoff machinery.
+        let psu_binding = BbPsuControllerBinding::observe_system()?;
+        let mut board_cutoffs = am3_bb_prepare_board_cutoff_set(psu_binding.gpio(), true)?;
+        board_cutoffs.runtime.psu_binding = Some(psu_binding);
         let safe_pwm = am3_bb_quiet_safe_pwm(fan_min_pwm, fan_max_pwm);
         let fan: Arc<dyn FanAccess> = Arc::from(
             platform
@@ -5092,15 +5196,15 @@ impl Am3BbRunSafetyGuard {
     }
 
     fn take_heartbeat_board_cutoff(&mut self) -> Result<Am3BbPreparedBoardCutoff> {
-        self.heartbeat_board_cutoff
-            .take()
-            .context("am3-bb: pre-energization heartbeat GPIO59 cutoff handle was already consumed")
+        self.heartbeat_board_cutoff.take().context(
+            "am3-bb: pre-energization heartbeat PSU GPIO65 cutoff handle was already consumed",
+        )
     }
 
     fn take_panic_board_cutoff(&mut self) -> Result<Am3BbPreparedBoardCutoff> {
         self.panic_board_cutoff
             .take()
-            .context("am3-bb: pre-energization panic GPIO59 cutoff handle was already consumed")
+            .context("am3-bb: pre-energization panic PSU GPIO65 cutoff handle was already consumed")
     }
 
     /// A clamp-enforced, `Arc`-shared view onto the guard's fan for the
@@ -5228,7 +5332,7 @@ impl Am3BbRunSafetyGuard {
             }
         }
 
-        // Acoustic coast-down follows the power cut. Once GPIO59 is checked
+        // Acoustic coast-down follows the power cut. Once PSU GPIO65 is checked
         // OFF, a fan readback failure is degraded evidence rather than a reason
         // to reboot and potentially re-energize a software-off rail.
         if let Some(fan) = self.fan.as_ref() {
@@ -5313,7 +5417,7 @@ impl Am3BbRunSafetyGuard {
                 safe_pwm = self.safe_pwm,
                 dspic_delivery_attempts = dspic_shutdown.delivery_attempts,
                 dspic_observation_failures = dspic_shutdown.observation_failures,
-                "am3-bb: every owned dsPIC SafeOff and checked reset/GPIO59 readback completed; physical rail-off was not independently measured"
+                "am3-bb: every owned dsPIC SafeOff and checked reset/PSU GPIO65 readback completed; physical rail-off was not independently measured"
             );
             Ok(Am3BbSafeOffReceipt {
                 board_enable_gpio: self.board_enable.gpio(),
@@ -5629,7 +5733,7 @@ fn am3_bb_cut_on_heartbeat_error<T>(
         Err(error) => {
             let cutoff_succeeded = am3_bb_force_board_enable_off(board_cutoff, reason);
             Err(error.context(format!(
-                "am3-bb: immediate retained GPIO59 cutoff after heartbeat failure succeeded={cutoff_succeeded}"
+                "am3-bb: immediate retained PSU GPIO65 cutoff after heartbeat failure succeeded={cutoff_succeeded}"
             )))
         }
     }
@@ -7378,7 +7482,7 @@ fn run_started_mining_loop<U: ChainUart>(
                     last_thermal_poll = Instant::now();
                     // INVARIANT #2 + #4 ORDERING: `?` fires FIRST. If the
                     // supervisor decides dangerous temp or lost-thermal-proof, it
-                    // returns Err here and the retained runtime lane cuts GPIO59
+                    // returns Err here and the retained runtime lane cuts PSU GPIO65
                     // before dsPIC/reset defense-in-depth and quiet fan coast-down,
                     // all BEFORE the PID is ever consulted. So the PID
                     // can only ever see a snapshot the supervisor already deemed
@@ -7685,7 +7789,6 @@ fn run_started_mining_loop<U: ChainUart>(
                         dup_nonces += 1;
                         continue;
                     }
-                    let vdelta = rv ^ dw.version;
                     let achieved_difficulty = am3_bb_achieved_difficulty_from_header(&header);
                     let share = dcentrald_stratum::types::ValidShare {
                         work_generation: dw.work_generation,
@@ -7694,11 +7797,10 @@ fn run_started_mining_loop<U: ChainUart>(
                         extranonce2: dw.extranonce2.clone(),
                         ntime: format!("{:08x}", dw.ntime),
                         nonce: format!("{:08x}", nr.nonce),
-                        version_bits: if vdelta != 0 {
-                            Some(format!("{:08x}", vdelta))
-                        } else {
-                            None
-                        },
+                        version_bits: dcentrald_stratum::work::bip310_version_bits(
+                            rv,
+                            dw.version_mask,
+                        ),
                         version: rv,
                         achieved_difficulty,
                     };
@@ -7942,8 +8044,91 @@ fn run_mining_loop_stub<U: ChainUart>(
 //  Tests (host-safe — no hardware)
 // ===========================================================================
 
+
+
+#[cfg(all(test, feature = "sim-hal"))]
+#[path = "../tests/sim_support/share_oracle.rs"]
+mod independent_pool;
+
+#[cfg(all(test, feature = "sim-hal"))]
+pub(crate) use tests::bb_synthetic_identity_page as deployed_sim_identity_page;
+
 #[cfg(test)]
 mod tests {
+    pub(crate) fn bb_synthetic_identity_page(name: &str, marking: &str, bad_crc: Option<usize>) -> Vec<u8> {
+        fn encrypt(plain: &[u8]) -> Vec<u8> {
+            let key: Vec<u32> = dcentrald_api_types::deployed_eeprom::KEY_LARGE[1]
+                .chunks_exact(4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            let mut words: Vec<u32> = plain
+                .chunks_exact(4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            let n = words.len();
+            let mut sum = 0u32;
+            let mut z = words[n - 1];
+            for _ in 0..(6 + 52 / n) {
+                sum = sum.wrapping_add(0x9e3779b9);
+                let e = ((sum >> 2) & 3) as usize;
+                for p in 0..n {
+                    let y = words[(p + 1) % n];
+                    let mx = ((z >> 5 ^ y << 2).wrapping_add(y >> 3 ^ z << 4))
+                        ^ ((sum ^ y).wrapping_add(key[(p & 3) ^ e] ^ z));
+                    words[p] = words[p].wrapping_add(mx);
+                    z = words[p];
+                }
+            }
+            words.iter().flat_map(|word| word.to_le_bytes()).collect()
+        }
+        use dcentrald_api_types::zhiju_eeprom::bitmain_crc5;
+        let mut page = vec![0xff; 256];
+        page[..2].copy_from_slice(&[4, 0x11]);
+        let mut identity = vec![0; 96];
+        identity[..17].copy_from_slice(b"SYNTH000000000001");
+        identity[21..21 + marking.len()].copy_from_slice(marking.as_bytes());
+        identity[60..60 + name.len()].copy_from_slice(name.as_bytes());
+        let block = [&page[..2], &identity[..95]].concat();
+        identity[95] = bitmain_crc5(&block, 776) ^ u8::from(bad_crc == Some(1));
+        let mut factory = vec![0; 16];
+        factory[..2].copy_from_slice(&1360u16.to_le_bytes());
+        factory[2..4].copy_from_slice(&545u16.to_le_bytes());
+        factory[15] = bitmain_crc5(&factory[..15], 120) ^ u8::from(bad_crc == Some(2));
+        page[2..98].copy_from_slice(&encrypt(&identity));
+        page[98..114].copy_from_slice(&encrypt(&factory));
+        page[255] = 0x5a;
+        page
+    }
+
+    #[cfg(feature = "sim-hal")]
+    include!("am3_bb_native_pool_tests.rs");
+    #[test]
+    fn lab_override_presence_does_not_hide_watched_refusal() {
+        const CHILD: &str = "DCENT_AM3_BB_LAB_ENV_TEST_CHILD";
+        if std::env::var(CHILD).as_deref() != Ok("1") {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "am3_bb_mining::tests::lab_override_presence_does_not_hide_watched_refusal",
+                ])
+                .env(CHILD, "1")
+                .env(super::ENV_AM3_BB_ALLOW_NO_RX_MINING, "0")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        // The lab API preserves presence semantics even for "0". Independently,
+        // watched mining must still refuse the forbidden request in every build.
+        assert_eq!(
+            super::env_flag_set(super::ENV_AM3_BB_ALLOW_NO_RX_MINING),
+            dcentrald_common::lab_env::compiled()
+        );
+        assert!(super::forbidden_override_is_present(
+            super::ENV_AM3_BB_ALLOW_NO_RX_MINING
+        ));
+    }
+
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -7952,6 +8137,154 @@ mod tests {
     use dcentrald_hal::platform::beaglebone::BeagleBonePlatform;
     use dcentrald_hal::platform::beaglebone_cold_boot::{ColdBootOptsV2, PreparedBoardEnable};
     use dcentrald_hal::platform::config::PlatformConfig;
+
+    #[test]
+    fn configured_bb_chains_require_individual_bm1362_family_observations() {
+        use dcentrald_silicon_profiles::energize_gate::{classify_chain, ChainProbe};
+
+        for chains in 1..=3 {
+            let valid: Vec<_> = (0..chains)
+                .map(|slot| classify_chain(slot as u8, Some(&[0x04, 0x11])))
+                .collect();
+            require_am3_bb_eeprom_family(&valid, chains).unwrap();
+            for slot in 0..chains {
+                let chain_id = slot as u8;
+                for invalid in [
+                    classify_chain(chain_id, None),
+                    classify_chain(chain_id, Some(&[0xff; 8])),
+                    classify_chain(chain_id, Some(&[0; 8])),
+                    classify_chain(chain_id, Some(&[0x04])),
+                    classify_chain(chain_id, Some(&[0x05, 0x11])),
+                    ChainProbe::Timeout { chain_id },
+                    classify_chain(7, Some(&[0x04, 0x11])),
+                ] {
+                    let mut probes = valid.clone();
+                    probes[slot] = invalid;
+                    assert!(require_am3_bb_eeprom_family(&probes, chains).is_err());
+                }
+            }
+            assert!(require_am3_bb_eeprom_family(&valid[..chains - 1], chains).is_err());
+        }
+        assert!(require_am3_bb_eeprom_family(&[], 0).is_err());
+    }
+
+    #[test]
+    fn bb_identity_reads_only_retained_bus_zero_before_supply_on() {
+        let prefix = bb_synthetic_identity_page("BHB42601", "L1C021CK11", None);
+        let mut reads = Vec::new();
+        let probes = collect_am3_bb_eeprom_probes(0, 3, 126, |slot| {
+            reads.push(slot);
+            Ok(prefix.clone())
+        })
+        .unwrap();
+        assert_eq!(reads, [0, 1, 2]);
+        assert_eq!(probes.len(), 3);
+        reads.clear();
+        // Even valid-looking data on the PSU adapter may not admit a board.
+        assert!(collect_am3_bb_eeprom_probes(1, 3, 126, |slot| {
+            reads.push(slot);
+            Ok(prefix.clone())
+        })
+        .is_err());
+        assert!(reads.is_empty());
+        // No bus-0 identity must remain a refusal even if bus 1 has a copy.
+        let bank = std::collections::BTreeMap::from([((1u8, 0usize), prefix.clone())]);
+        assert!(collect_am3_bb_eeprom_probes(0, 1, 126, |slot| {
+            bank.get(&(0, slot)).cloned().context("bus-0 EEPROM absent")
+        })
+        .is_err());
+        for count in [0, 4] {
+            assert!(collect_am3_bb_eeprom_probes(0, count, 126, |_| panic!(
+                "invalid chain count read"
+            ))
+            .is_err());
+        }
+        for size in [0, 2, 31, 32, 33, 255, 256, 257] {
+            assert!(collect_am3_bb_eeprom_probes(0, 1, 126, |_| Ok(vec![0x04; size])).is_err());
+        }
+        let source = include_str!("am3_bb_mining.rs");
+        let owner = source
+            .find(concat!(
+                "let hashboard_i2c = pre_energize_try!(",
+                "spawn_i2c_service"
+            ))
+            .unwrap();
+        let identity = source
+            .find(concat!("let probes = collect_", "am3_bb_eeprom_probes("))
+            .unwrap();
+        let supply = source
+            .find(concat!(
+                ".run_cold_boot(&mut psu,",
+                " &mut cold_boot_uarts, board_enable)"
+            ))
+            .unwrap();
+        let reuse = source
+            .find(concat!("let dspic_i2c = hashboard_", "i2c.clone();"))
+            .unwrap();
+        assert!(owner < identity && identity < supply && supply < reuse);
+        assert_eq!(
+            source[..reuse]
+                .matches(concat!(
+                    "spawn_i2c_service_no_register_touch_",
+                    "with_denylist("
+                ))
+                .count(),
+            1
+        );
+        assert!(
+            !source[owner..reuse].contains(concat!("read_hashboard_eeprom_for_", "energize_gate("))
+        );
+    }
+
+
+    #[test]
+    fn bb_factory_identity_rejects_corrupt_foreign_and_incompatible_pages() {
+        use dcentrald_silicon_profiles::energize_gate::ChainProbe;
+        let names = ["BHB42601", "BHB42603", "BHB42621", "BHB42641"];
+        for first in 0..4 {
+            let pages: Vec<_> = (0..3)
+                .map(|slot| {
+                    bb_synthetic_identity_page(names[(first + slot) % 4], "L1C021CK11", None)
+                })
+                .collect();
+            let probes =
+                collect_am3_bb_eeprom_probes(0, 3, 126, |slot| Ok(pages[slot].clone())).unwrap();
+            for (slot, probe) in probes.iter().enumerate() {
+                match probe {
+                    ChainProbe::Classified { sku, .. } => {
+                        assert_eq!(sku.sku(), names[(first + slot) % 4])
+                    }
+                    other => panic!("exact compatible SKU was lost: {other:?}"),
+                }
+            }
+        }
+        let mut garbage = vec![0; 256];
+        garbage[..2].copy_from_slice(&[4, 0x11]);
+        let invalid = [
+            garbage,
+            bb_synthetic_identity_page("BHB42601", "L1C021CK11", Some(1)),
+            bb_synthetic_identity_page("BHB42601", "L1C021CK11", Some(2)),
+            bb_synthetic_identity_page("BHB42601", "L1G021CK11", None),
+            bb_synthetic_identity_page("BHB42611", "L1C021CK11", None),
+            bb_synthetic_identity_page("BHB56903", "L1G021CK11", None),
+            bb_synthetic_identity_page("BHB42699", "L1C021CK11", None),
+        ];
+        let valid = bb_synthetic_identity_page("BHB42601", "L1C021CK11", None);
+        for bad in invalid {
+            for bad_slot in 0..3 {
+                assert!(
+                    collect_am3_bb_eeprom_probes(0, 3, 126, |slot| Ok(if slot == bad_slot {
+                        bad.clone()
+                    } else {
+                        valid.clone()
+                    }))
+                    .is_err(),
+                    "bad identity admitted on slot {bad_slot}"
+                );
+            }
+        }
+        assert!(collect_am3_bb_eeprom_probes(0, 1, 120, |_| Ok(valid.clone())).is_err());
+    }
 
     fn test_platform() -> BeagleBonePlatform {
         // `with_config` builds the platform with the explicit `PlatformConfig`
@@ -8089,15 +8422,48 @@ mod tests {
     }
 
     #[test]
-    fn retained_gpio59_cutoff_set_prepares_glitch_free_off_and_owns_the_only_on_transition() {
+    fn terminal_psu_write_fence_shares_the_retained_gpio65_cutoff_publication() {
         let root = TempGpioRoot::new();
-        let gpio = root.add_gpio(59);
+        let gpio = root.add_gpio(65);
+        let mut set = am3_bb_prepare_board_cutoff_set_at_with_direction_readback(
+            root.path(),
+            65,
+            true,
+            |_| Ok("out".into()),
+            Am3BbRetainedReadbackMode::OrdinaryFileFixture,
+        )
+        .unwrap();
+        let terminal = Arc::clone(&set.runtime.io.terminal);
+        let writer = Arc::clone(&set.runtime.io.on_writer_thread);
+        let publication = am3_bb_publish_psu_write(&terminal, &writer).unwrap();
+        assert!(am3_bb_publish_psu_write(&terminal, &writer).is_err());
+        assert_ne!(writer.load(Ordering::SeqCst), 0);
+        assert!(set.panic.cut_raw_noalloc());
+        drop(publication);
+        assert_eq!(writer.load(Ordering::SeqCst), 0);
+        assert!(am3_bb_publish_psu_write(&terminal, &writer).is_err());
+        assert!(
+            dcentrald_hal::platform::beaglebone_cold_boot::PreparedBoardEnable::assert_checked(
+                &mut set.runtime
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(gpio.join("value")).unwrap().trim(),
+            "0"
+        );
+    }
+
+    #[test]
+    fn retained_gpio65_cutoff_set_prepares_glitch_free_off_and_owns_the_only_on_transition() {
+        let root = TempGpioRoot::new();
+        let gpio = root.add_gpio(65);
         std::fs::write(gpio.join("active_low"), "1").unwrap();
         std::fs::write(gpio.join("value"), "1").unwrap();
 
         let mut set = am3_bb_prepare_board_cutoff_set_at_with_direction_readback(
             root.path(),
-            59,
+            65,
             true,
             |direction_path| {
                 // Model the kernel's atomic `direction=low` behavior: the
@@ -8129,12 +8495,12 @@ mod tests {
     }
 
     #[test]
-    fn every_retained_gpio59_lane_can_cut_with_an_independent_file_offset() {
+    fn every_retained_gpio65_lane_can_cut_with_an_independent_file_offset() {
         let root = TempGpioRoot::new();
-        let gpio = root.add_gpio(59);
+        let gpio = root.add_gpio(65);
         let mut set = am3_bb_prepare_board_cutoff_set_at_with_direction_readback(
             root.path(),
-            59,
+            65,
             true,
             |_path| Ok("out".to_owned()),
             Am3BbRetainedReadbackMode::OrdinaryFileFixture,
@@ -8155,12 +8521,12 @@ mod tests {
     }
 
     #[test]
-    fn emergency_gpio59_cut_before_energization_permanently_revokes_on_authority() {
+    fn emergency_gpio65_cut_before_energization_permanently_revokes_on_authority() {
         let root = TempGpioRoot::new();
-        let gpio = root.add_gpio(59);
+        let gpio = root.add_gpio(65);
         let mut set = am3_bb_prepare_board_cutoff_set_at_with_direction_readback(
             root.path(),
-            59,
+            65,
             true,
             |_path| Ok("out".to_owned()),
             Am3BbRetainedReadbackMode::OrdinaryFileFixture,
@@ -8177,12 +8543,12 @@ mod tests {
     }
 
     #[test]
-    fn retained_gpio59_cutoff_uses_open_inode_after_ordinary_unlink_fixture() {
+    fn retained_gpio65_cutoff_uses_open_inode_after_ordinary_unlink_fixture() {
         let root = TempGpioRoot::new();
-        let gpio = root.add_gpio(59);
+        let gpio = root.add_gpio(65);
         let mut set = am3_bb_prepare_board_cutoff_set_at_with_direction_readback(
             root.path(),
-            59,
+            65,
             true,
             |_path| Ok("out".to_owned()),
             Am3BbRetainedReadbackMode::OrdinaryFileFixture,
@@ -8201,12 +8567,12 @@ mod tests {
     }
 
     #[test]
-    fn panic_gpio59_cut_serializes_with_published_on_writer_and_finishes_low() {
+    fn panic_gpio65_cut_serializes_with_published_on_writer_and_finishes_low() {
         let root = TempGpioRoot::new();
-        let gpio = root.add_gpio(59);
+        let gpio = root.add_gpio(65);
         let set = am3_bb_prepare_board_cutoff_set_at_with_direction_readback(
             root.path(),
-            59,
+            65,
             true,
             |_path| Ok("out".to_owned()),
             Am3BbRetainedReadbackMode::OrdinaryFileFixture,
@@ -8268,10 +8634,10 @@ mod tests {
     #[test]
     fn polarity_drift_is_cut_physically_low_but_refuses_a_checked_receipt() {
         let root = TempGpioRoot::new();
-        let gpio = root.add_gpio(59);
+        let gpio = root.add_gpio(65);
         let mut set = am3_bb_prepare_board_cutoff_set_at_with_direction_readback(
             root.path(),
-            59,
+            65,
             true,
             |_path| Ok("out".to_owned()),
             Am3BbRetainedReadbackMode::OrdinaryFileFixture,
@@ -8290,10 +8656,10 @@ mod tests {
     #[test]
     fn raw_cutoff_descriptor_failure_still_revokes_on_authority() {
         let root = TempGpioRoot::new();
-        let gpio = root.add_gpio(59);
+        let gpio = root.add_gpio(65);
         let mut set = am3_bb_prepare_board_cutoff_set_at_with_direction_readback(
             root.path(),
-            59,
+            65,
             true,
             |_path| Ok("out".to_owned()),
             Am3BbRetainedReadbackMode::OrdinaryFileFixture,
@@ -8312,10 +8678,10 @@ mod tests {
     #[test]
     fn landed_on_write_with_failed_readback_is_immediately_recut() {
         let root = TempGpioRoot::new();
-        let gpio = root.add_gpio(59);
+        let gpio = root.add_gpio(65);
         let mut set = am3_bb_prepare_board_cutoff_set_at_with_direction_readback(
             root.path(),
-            59,
+            65,
             true,
             |_path| Ok("out".to_owned()),
             Am3BbRetainedReadbackMode::OrdinaryFileFixture,
@@ -8338,10 +8704,10 @@ mod tests {
     #[test]
     fn panic_cutoff_iteration_budget_exhausts_when_a_foreign_on_writer_never_retires() {
         let root = TempGpioRoot::new();
-        let gpio = root.add_gpio(59);
+        let gpio = root.add_gpio(65);
         let set = am3_bb_prepare_board_cutoff_set_at_with_direction_readback(
             root.path(),
-            59,
+            65,
             true,
             |_path| Ok("out".to_owned()),
             Am3BbRetainedReadbackMode::OrdinaryFileFixture,
@@ -8383,12 +8749,12 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_terminal_error_cuts_gpio59_before_returning_failure() {
+    fn heartbeat_terminal_error_cuts_gpio65_before_returning_failure() {
         let root = TempGpioRoot::new();
-        let gpio = root.add_gpio(59);
+        let gpio = root.add_gpio(65);
         let mut set = am3_bb_prepare_board_cutoff_set_at_with_direction_readback(
             root.path(),
-            59,
+            65,
             true,
             |_path| Ok("out".to_owned()),
             Am3BbRetainedReadbackMode::OrdinaryFileFixture,
@@ -8405,7 +8771,7 @@ mod tests {
         .to_string();
 
         assert!(
-            error.contains("immediate retained GPIO59 cutoff"),
+            error.contains("immediate retained PSU GPIO65 cutoff"),
             "{error}"
         );
         assert_eq!(std::fs::read_to_string(gpio.join("value")).unwrap(), "0");
@@ -8413,14 +8779,14 @@ mod tests {
     }
 
     #[test]
-    fn non_active_high_gpio59_topology_is_refused_before_any_gpio_mutation() {
+    fn non_active_high_gpio65_topology_is_refused_before_any_gpio_mutation() {
         let root = TempGpioRoot::new();
-        let gpio = root.add_gpio(59);
+        let gpio = root.add_gpio(65);
         std::fs::write(gpio.join("direction"), "inherited").unwrap();
         std::fs::write(gpio.join("active_low"), "1").unwrap();
         std::fs::write(gpio.join("value"), "1").unwrap();
 
-        let error = am3_bb_prepare_board_cutoff_set_at(root.path(), 59, false)
+        let error = am3_bb_prepare_board_cutoff_set_at(root.path(), 65, false)
             .err()
             .expect("inactive-high topology must be rejected")
             .to_string();
@@ -8721,6 +9087,155 @@ mod tests {
     }
 
     #[test]
+    fn pic_application_query_retains_exact_service_plan_and_admits_three_slots() {
+        for chain in 0..3 {
+            let mut calls = 0;
+            let reply =
+                am3_bb_dspic_read_application(chain, 0x20 + chain as u8, |label, addr, steps| {
+                    calls += 1;
+                    assert!(matches!(label, I2cMutationLabel::QueryPrelude));
+                    assert_eq!(addr, 0x20 + chain as u8);
+                    let mut events = Vec::new();
+                    for step in steps {
+                        match step {
+                            I2cTransactionStep::Write(bytes) => {
+                                events.push(format!("write:{bytes:02x?}"))
+                            }
+                            I2cTransactionStep::Read(count) => events.push(format!("read:{count}")),
+                            I2cTransactionStep::SleepMs(ms) => events.push(format!("wait:{ms}")),
+                            _ => panic!("unexpected application query operation"),
+                        }
+                    }
+                    assert_eq!(
+                        events,
+                        [
+                            "write:[55, aa, 04, 17, 00, 1b]",
+                            "wait:135",
+                            "read:1",
+                            "wait:20",
+                            "read:1",
+                            "wait:20",
+                            "read:1",
+                            "wait:20",
+                            "read:1",
+                            "wait:20",
+                            "read:1",
+                        ]
+                    );
+                    Ok([0x05, 0x17, 0x89, 0x00, 0xa5]
+                        .map(|byte| vec![byte])
+                        .to_vec())
+                })
+                .unwrap();
+            assert_eq!(calls, 1);
+            assert_eq!(reply, [0x05, 0x17, 0x89, 0x00, 0xa5]);
+        }
+    }
+
+    #[test]
+    fn pic_application_refuses_foreign_firmware_opcode_and_corrupt_frames() {
+        let baseline = [0x05u8, 0x17, 0x89, 0x00, 0xa5];
+        let rejects = |reply: Vec<u8>| {
+            let mut calls = 0;
+            let result = am3_bb_dspic_read_application(0, 0x20, |_, _, _| {
+                calls += 1;
+                Ok(reply.into_iter().map(|byte| vec![byte]).collect())
+            });
+            assert!(result.is_err());
+            assert_eq!(calls, 1, "no retry or recovery query after refusal");
+        };
+        // Retain a valid checksum while changing every firmware/opcode/pad
+        // value; a plausible version byte alone is insufficient admission.
+        for index in [1, 2, 3] {
+            for byte in 0..=u8::MAX {
+                if byte == baseline[index] {
+                    continue;
+                }
+                let mut reply = baseline;
+                reply[index] = byte;
+                reply[4] = reply[..4]
+                    .iter()
+                    .fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+                rejects(reply.to_vec());
+            }
+        }
+        for index in 0..5 {
+            for bit in 0..8 {
+                let mut reply = baseline;
+                reply[index] ^= 1 << bit;
+                rejects(reply.to_vec());
+            }
+        }
+        for reply in [
+            vec![],
+            vec![0x82],
+            vec![0xf5],
+            vec![0; 5],
+            vec![0xff; 5],
+            vec![0x05, 0x17, 0x89],
+            vec![0x05, 0x17, 0x89, 0x00, 0xa5, 0x00],
+        ] {
+            rejects(reply);
+        }
+    }
+
+    #[test]
+    fn pic_application_refuses_incomplete_redistributed_and_failed_acquisition() {
+        let baseline = [0x05, 0x17, 0x89, 0x00, 0xa5]
+            .map(|byte| vec![byte])
+            .to_vec();
+        let rejects = |reads| {
+            assert!(am3_bb_dspic_read_application(0, 0x20, |_, _, _| Ok(reads)).is_err());
+        };
+        for count in (0..=7).filter(|count| *count != 5) {
+            rejects(vec![vec![0]; count]);
+        }
+        for index in 0..5 {
+            for length in [0, 2, 5] {
+                let mut reads = baseline.clone();
+                reads[index] = vec![baseline[index][0]; length];
+                rejects(reads);
+            }
+        }
+        // Flattening these altered boundaries still yields the exact valid
+        // five bytes. Admission requires all five requested reads completed.
+        for index in 0..4 {
+            let mut reads = baseline.clone();
+            let next = reads[index + 1][0];
+            reads[index].push(next);
+            reads[index + 1].clear();
+            assert_eq!(
+                reads.iter().flatten().copied().collect::<Vec<_>>(),
+                [0x05, 0x17, 0x89, 0x00, 0xa5]
+            );
+            rejects(reads);
+        }
+        let mut calls = 0;
+        let failure = am3_bb_dspic_read_application(0, 0x20, |_, _, _| {
+            calls += 1;
+            anyhow::bail!("injected service cancellation");
+        })
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert!(format!("{failure:#}").contains("injected service cancellation"));
+    }
+
+    #[test]
+    fn pic_application_refuses_foreign_endpoint_before_query() {
+        for chain in [0, 1, 2, 3, usize::MAX] {
+            for addr in 0..=u8::MAX {
+                if chain < 3 && addr == 0x20 + chain as u8 {
+                    continue;
+                }
+                assert!(am3_bb_dspic_read_application(chain, addr, |_, _, _| {
+                    panic!("foreign endpoint reached service");
+                })
+                .is_err());
+            }
+        }
+    }
+
+    #[test]
     fn heartbeat_protocol_validation_requires_exact_verified_reply() {
         let verified = vec![0x06, 0x16, 0x01, 0x00, 0x00, 0x1D];
         assert_eq!(
@@ -8850,7 +9365,7 @@ mod tests {
             .split_once("fn api_identity(")
             .unwrap()
             .0;
-        assert!(capture.contains("AM3_BB_TOPOLOGY_CAPTURE_RECEIPT schema=v2"));
+        assert!(capture.contains("AM3_BB_TOPOLOGY_CAPTURE_RECEIPT schema=v3"));
         assert!(!capture.contains("AM3_BB_ROUTE_ADMISSION_RECEIPT"));
 
         let admission_start = source
@@ -9350,10 +9865,10 @@ mod tests {
     }
 
     #[test]
-    fn gpio59_cutoff_receipt_precedes_dspic_and_reset_defense_in_depth() {
+    fn psu65_cutoff_receipt_precedes_dspic_and_reset_defense_in_depth() {
         let source = include_str!("am3_bb_mining.rs");
         let closeout_start = source
-            .find("// GPIO59 is the load-bearing physical cut")
+            .find("// PSU GPIO65 is the load-bearing physical cut")
             .unwrap();
         let closeout_end = source[closeout_start..]
             .find("if let Err(mining_error) = mining_result {")
@@ -9418,7 +9933,7 @@ mod tests {
         let teardown = &source[teardown_start..teardown_end];
         let retry = teardown
             .find("self.cut_board_enable_checked(teardown_budget.clone())")
-            .expect("checked GPIO59 cutoff retry");
+            .expect("checked PSU65 cutoff retry");
         let defense = teardown
             .find("self.run_defense_in_depth()")
             .expect("defense-in-depth attempt");
@@ -9433,7 +9948,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_gpio59_authority_is_preopened_once_and_panic_cut_runs_first() {
+    fn retained_psu65_authority_is_preopened_once_and_panic_cut_runs_first() {
         let source = include_str!("am3_bb_mining.rs");
         let production = source
             .split("//  Tests (host-safe")
@@ -9498,7 +10013,15 @@ mod tests {
             .split_once("//  Tests")
             .expect("AM3 V2 cold-boot boundary")
             .0;
-        assert!(v2_cold_boot.contains("board_enable.assert_checked()?"));
+        assert!(v2_cold_boot.contains("initialize_exact_apw_supply(psu, board_enable"));
+        let supply_init = cold_boot_source
+            .split_once("fn initialize_exact_apw_supply")
+            .unwrap()
+            .1
+            .split_once("/// Run the")
+            .unwrap()
+            .0;
+        assert!(supply_init.contains("owner.assert_checked()?"));
         assert!(!v2_cold_boot.contains("export_sysfs_gpio(opts.board_enable_gpio)"));
         assert!(!v2_cold_boot.contains("write_sysfs_gpio_value(opts.board_enable_gpio"));
     }
@@ -9600,6 +10123,11 @@ mod tests {
         assert_eq!(p.eeprom_i2c_bus(), 0, "hashboard EEPROMs on bus 0");
         // gpio59 board-enable (IO-board-specific, not the W4 BBCtrl map).
         assert_eq!(p.board_enable_gpio_v2_0(), 59, "BOARD_ENABLE = gpio59");
+        assert_eq!(dcentrald_hal::platform::beaglebone_psu::PSU_ENABLE_GPIO, 65);
+        assert_ne!(
+            p.board_enable_gpio_v2_0(),
+            dcentrald_hal::platform::beaglebone_psu::PSU_ENABLE_GPIO
+        );
         // The APW UART-tunnel PSU is upstream, but the hashboards still use
         // fw=0x89 dsPIC controllers on I2C bus 0.
         assert_eq!(
@@ -9659,18 +10187,15 @@ mod tests {
         let start = src
             .find("fn am3_bb_dspic_init_one")
             .expect("am3_bb_dspic_init_one");
-        let body = &src[start..start + 4500];
+        let body = &src[start..src.find("fn am3_bb_dspic_init_all").unwrap()];
         assert!(
             !body.contains("AM3_BB_DSPIC_RESET_FRAME"),
             "S19j Pro / AM3-BB init must not send PIC RESET 0x07"
         );
-        let get = body
-            .find("AM3_BB_DSPIC_GET_VERSION_FRAME")
-            .expect("GET_VERSION first");
-        let jump = body.find("AM3_BB_DSPIC_JUMP_FRAME");
-        if let Some(jump) = jump {
-            assert!(get < jump, "GET_VERSION must precede JUMP");
-        }
+        assert!(!body.contains("AM3_BB_DSPIC_JUMP_FRAME"));
+        assert!(!body.contains("I2cMutationLabel::Recovery"));
+        let application = body.find("am3_bb_dspic_read_application").unwrap();
+        assert!(application < body.find("disable_dspic_voltage").unwrap());
         assert_eq!(
             AM3_BB_DSPIC_JUMP_FRAME,
             &[0x55, 0xAA, 0x04, 0x06, 0x00, 0x0A]
@@ -10669,3 +11194,9 @@ mod tests {
         assert_eq!(fan.apply(0).unwrap(), AM3_BB_FAN_SAFE_FLOOR_PWM);
     }
 }
+
+#[path = "am3_bb_retained_gpio.rs"]
+mod retained_gpio;
+
+#[path = "am3_bb_pre_power_run.rs"]
+mod pre_power_run;

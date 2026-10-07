@@ -50,6 +50,17 @@ IMAGES_DIR="$FIRMWARE_DIR/buildroot/output/images"
 . "$SCRIPT_DIR/lib/release_envelope.sh"
 . "$SCRIPT_DIR/lib/sysupgrade_archive_admission.sh"
 . "$SCRIPT_DIR/lib/sysupgrade_zynq_geometry.sh"
+. "$SCRIPT_DIR/lib/sysupgrade_package_common.sh"
+. "$SCRIPT_DIR/lib/am1_s9_first_install_capacity.sh"
+
+# WS-A4 (2026-09-01): RELEASE is the default image posture. Resolve the
+# canonical posture once and materialize it as an explicit
+# DCENT_RELEASE_IMAGE for every downstream read (gates, metadata, child
+# processes). DCENT_DEV_IMAGE=1 (or an explicit DCENT_RELEASE_IMAGE=0)
+# selects the DEV/LAB posture; an explicitly-set DCENT_RELEASE_IMAGE always
+# wins over the alias.
+DCENT_RELEASE_IMAGE="$(dcent_release_posture_value)"
+export DCENT_RELEASE_IMAGE
 
 OUTPUT_FILE=""
 UPLOAD_IP=""
@@ -496,10 +507,48 @@ esac
 
 ROOTFS_SIZE=$(stat -c%s "$ROOTFS" 2>/dev/null || stat -f%z "$ROOTFS" 2>/dev/null)
 KERNEL_SIZE=$(stat -c%s "$KERNEL" 2>/dev/null || stat -f%z "$KERNEL" 2>/dev/null)
-dcent_zynq_geometry_require_payload_fit "$BOARD_NAME" rootfs "$ROOTFS_SIZE" \
-    || error "Rootfs exceeds the evidence-backed $BOARD_NAME package window"
-dcent_zynq_geometry_require_payload_fit "$BOARD_NAME" kernel "$KERNEL_SIZE" \
-    || error "Kernel exceeds the evidence-backed $BOARD_NAME package window"
+
+# Route-scoped geometry admission (AM1-A Drop-1; owner adjudication
+#
+# Option A, ratified 2026-09-15). The AM1_S9 windows in
+# scripts/lib/sysupgrade_zynq_geometry.sh are the live-sysupgrade (self-update)
+# volume plan — evidence-backed, operator-ratified hardware truth this script
+# must not widen or reinterpret. Payloads that FIT keep exactly the historical
+# dual-route package. A payload that EXCEEDS its window no longer kills the
+# producer (Drop-1 scoping): the package is still built for the FIRST-INSTALL
+# route — the stock two-reboot installer transaction, which is self-validating
+# against the real stock NAND layout — and its MANIFEST must then carry the
+# typed first-install-only contract that explicitly DENIES self-update
+# (toolbox.install_mode=first_install_only + update_command=null, enforced
+# below through dcent_require_toolbox_{install,update}_contract). The
+# on-device self-update path independently refuses an oversized rootfs before
+# any NAND write (br2_external_dcentos/board/zynq/rootfs-overlay/usr/sbin/
+# sysupgrade: dcent_zynq_geometry_require_payload_fit on rootfs+kernel), so
+# the denial is fail-closed on both the host and the target.
+AM1_S9_SELF_UPDATE_FITS=1
+AM1_S9_WINDOW_OVERSIZED_NOTES=""
+if ! AM1_S9_ROOTFS_FIT=$(dcent_zynq_geometry_require_payload_fit "$BOARD_NAME" rootfs "$ROOTFS_SIZE" 2>&1); then
+    AM1_S9_SELF_UPDATE_FITS=0
+    AM1_S9_WINDOW_OVERSIZED_NOTES="$AM1_S9_WINDOW_OVERSIZED_NOTES$AM1_S9_ROOTFS_FIT
+"
+fi
+if ! AM1_S9_KERNEL_FIT=$(dcent_zynq_geometry_require_payload_fit "$BOARD_NAME" kernel "$KERNEL_SIZE" 2>&1); then
+    AM1_S9_SELF_UPDATE_FITS=0
+    AM1_S9_WINDOW_OVERSIZED_NOTES="$AM1_S9_WINDOW_OVERSIZED_NOTES$AM1_S9_KERNEL_FIT
+"
+fi
+if [ "$AM1_S9_SELF_UPDATE_FITS" -eq 0 ]; then
+    warn "am1-s9 payload exceeds the live-sysupgrade (self-update) window;"
+    warn "the measured refusal(s) from the canonical geometry helper:"
+    printf '%s' "$AM1_S9_WINDOW_OVERSIZED_NOTES" | sed 's/^/  [WARN] /' >&2
+    warn "Drop-1 scoping (adjudication Option A, 2026-09-15): this package is"
+    warn "built FIRST-INSTALL-ONLY; the live-sysupgrade artifact is deferred to"
+    warn "Drop-2 (rootfs trims land meanwhile). The manifest will carry the"
+    warn "typed self-update denial contract toolbox.install_mode=first_install_only."
+else
+    info "am1-s9 kernel+rootfs fit the live-sysupgrade windows; dual-route"
+    info "(first-install and self-update) package contract retained."
+fi
 
 info "Kernel: $(basename "$KERNEL") ($((KERNEL_SIZE / 1024)) KB)"
 info "Rootfs: $(basename "$ROOTFS") ($((ROOTFS_SIZE / 1024)) KB)"
@@ -533,6 +582,47 @@ case "$ARTIFACT_FILENAME" in
 esac
 SYSUPGRADE_DIR="$STAGING/$SYSUPGRADE_SUBDIR"
 mkdir -p "$SYSUPGRADE_DIR"
+
+# Typed operator-route contract derived from the route-scoped geometry
+# admission above. Fitting payloads keep the historical dual-route
+# (target_sysupgrade) contract byte-for-byte in behavior; oversized payloads
+# carry the explicit first-install-only self-update denial.
+S9_TOOLBOX_INSTALL_COMMAND="dcent install <ip> -f $ARTIFACT_FILENAME"
+if [ "$AM1_S9_SELF_UPDATE_FITS" -eq 1 ]; then
+    S9_TOOLBOX_INSTALL_MODE=target_sysupgrade
+    S9_TOOLBOX_UPDATE_COMMAND_PLAIN="$S9_TOOLBOX_INSTALL_COMMAND"
+    S9_TOOLBOX_UPDATE_COMMAND_JSON="\"$S9_TOOLBOX_INSTALL_COMMAND\""
+    S9_REQUIRES_INACTIVE_SLOT=true
+else
+    S9_TOOLBOX_INSTALL_MODE=first_install_only
+    S9_TOOLBOX_UPDATE_COMMAND_PLAIN=""
+    S9_TOOLBOX_UPDATE_COMMAND_JSON=null
+    S9_REQUIRES_INACTIVE_SLOT=false
+    # First-install capacity admission (merge-critic follow-up, both
+    # critics): the first-install route is the stock two-reboot transaction,
+    # whose phase-2 creates HARD-SIZED UBI volumes (kernel -s 8MiB, rootfs
+    # -s 20MiB — stage1_builder.py:640/:642). A payload beyond those would
+    # only fail at ubiupdatevol INSIDE phase 2 (after the phase-1 flash +
+    # reboot), aborting mid-transaction. Refuse at seal time: an over-window
+    # AND over-capacity payload has no installable route at all.
+    if ! AM1_S9_FIRST_INSTALL_CAPACITY_FIT=$(dcent_am1_s9_require_first_install_capacity "$KERNEL_SIZE" "$ROOTFS_SIZE" 2>&1); then
+        printf '%s\n' "$AM1_S9_FIRST_INSTALL_CAPACITY_FIT" | sed 's/^/  [ERROR] /' >&2
+        error "am1-s9 payload exceeds BOTH the live-sysupgrade window and the first-install stock-transaction capacity (scripts/lib/am1_s9_first_install_capacity.sh) — no installable route; refusing to seal"
+    fi
+fi
+# Fail-closed adversarial guard: a package that CLAIMS the self-update route
+# (any mode other than first_install_only) while a payload exceeds the
+# live-sysupgrade window must never be packaged.
+if [ "$S9_TOOLBOX_INSTALL_MODE" != "first_install_only" ] && [ "$AM1_S9_SELF_UPDATE_FITS" -eq 0 ]; then
+    error "am1-s9 package would claim the self-update route (install_mode=$S9_TOOLBOX_INSTALL_MODE) while a payload exceeds the live-sysupgrade window — refusing to seal a self-update contract for an oversized package"
+fi
+# The emitted contract must satisfy the same shared typed-contract machinery
+# every other producer's MANIFEST is held to (scripts/lib/sysupgrade_package_common.sh).
+dcent_require_toolbox_install_contract "$S9_TOOLBOX_INSTALL_COMMAND" "$S9_TOOLBOX_INSTALL_MODE" \
+    || error "am1-s9 toolbox install contract is not admissible (mode=$S9_TOOLBOX_INSTALL_MODE)"
+dcent_require_toolbox_update_contract "$S9_TOOLBOX_UPDATE_COMMAND_PLAIN" "$S9_TOOLBOX_INSTALL_MODE" \
+    || error "am1-s9 toolbox update contract is not admissible (mode=$S9_TOOLBOX_INSTALL_MODE)"
+info "Toolbox route contract: install_mode=$S9_TOOLBOX_INSTALL_MODE"
 
 # Copy kernel and rootfs with expected names
 cp "$KERNEL" "$SYSUPGRADE_DIR/kernel"
@@ -623,10 +713,11 @@ cat > "$SYSUPGRADE_DIR/MANIFEST.json" << EOF
   },
   "toolbox": {
     "install_command": "dcent install <ip> -f $ARTIFACT_FILENAME",
-    "update_command": "dcent install <ip> -f $ARTIFACT_FILENAME",
+    "update_command": $S9_TOOLBOX_UPDATE_COMMAND_JSON,
     "upload_endpoint": null,
     "board_target_header": null,
-    "requires_inactive_slot": true
+    "requires_inactive_slot": $S9_REQUIRES_INACTIVE_SLOT,
+    "install_mode": "$S9_TOOLBOX_INSTALL_MODE"
   }
 }
 EOF
@@ -694,10 +785,11 @@ if [ -n "$SIGNING_KEY" ]; then
   },
   "toolbox": {
     "install_command": "dcent install <ip> -f $ARTIFACT_FILENAME",
-    "update_command": "dcent install <ip> -f $ARTIFACT_FILENAME",
+    "update_command": $S9_TOOLBOX_UPDATE_COMMAND_JSON,
     "upload_endpoint": null,
     "board_target_header": null,
-    "requires_inactive_slot": true
+    "requires_inactive_slot": $S9_REQUIRES_INACTIVE_SLOT,
+    "install_mode": "$S9_TOOLBOX_INSTALL_MODE"
   }
 }
 EOF
@@ -768,6 +860,15 @@ info "MD5:    $MD5"
 
 if [ -n "$UPLOAD_IP" ]; then
     header "Uploading to $UPLOAD_IP"
+
+    # AM1-A Drop-1 route scoping: --upload drives the LIVE sysupgrade rail
+    # (stage on /data + target sysupgrade), which the first-install-only
+    # contract explicitly denies. Refuse host-side; the on-device sysupgrade
+    # would refuse the over-window rootfs independently, but the packager
+    # must not even offer this rail for such a package.
+    if [ "$S9_TOOLBOX_INSTALL_MODE" = "first_install_only" ]; then
+        error "Refusing --upload of a first-install-only package: the live sysupgrade rail is the self-update route this package's manifest explicitly denies (Drop-1 scoping, adjudication Option A). Install from stock via the toolbox first-install route instead."
+    fi
 
     SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
     SSH_CMD="ssh $SSH_OPTS root@$UPLOAD_IP"
@@ -925,23 +1026,42 @@ if [ -z "$UPLOAD_IP" ]; then
     echo -e "${BOLD}Output:${NC} $OUTPUT_FILE ($((OUTPUT_SIZE / 1024)) KB)"
     echo -e "${BOLD}Integrity:${NC} MANIFEST.json + SHA256SUMS embedded in package"
     echo ""
-    echo -e "${BOLD}Installation methods:${NC}"
-    echo ""
-    echo "  1. This script with --upload (S9 / am1-s9 only):"
-    echo "     $(basename "$0") --upload <miner_ip>"
-    echo ""
-    echo "  2. SSH + sysupgrade (stage on /data — /tmp is 64 MB tmpfs on S9):"
-    echo "     scp -O $OUTPUT_FILE root@<miner_ip>:/data/"
-    echo "     ssh root@<miner_ip> 'sysupgrade -n /data/$(basename "$OUTPUT_FILE")'"
-    echo ""
-    echo "  3. BraiinsOS Web UI compatibility upload:"
-    echo "     Open http://<miner_ip> → System → Firmware → Flash Image"
-    echo "     Upload: $(basename "$OUTPUT_FILE")"
-    echo "     Check 'Do not preserve settings' → Flash"
-    echo ""
-    echo -e "  After target reboot and management reachability: ${GREEN}ssh root@<miner_ip>${NC} (bootstrap password: ${BOLD}dcentral${NC})"
-    echo "  First reachable boot: open the dashboard and set the owner password before using the API."
-    echo ""
+    if [ "$S9_TOOLBOX_INSTALL_MODE" = "first_install_only" ]; then
+        echo -e "${YELLOW}${BOLD}Drop-1 FIRST-INSTALL-ONLY package${NC} (install_mode=first_install_only)"
+        echo ""
+        echo "  A payload exceeds the live-sysupgrade (self-update) window, so this"
+        echo "  package's manifest explicitly DENIES the self-update route"
+        echo "  (owner adjudication Option A, 2026-09-15:"
+        echo "  docs/dev/2026-09-13-dcentos-full-line-beta-army/owner-adjudications/AM1_S9_ROOTFS_WINDOW_ADJUDICATION.md)."
+        echo "  The live-sysupgrade artifact is deferred to Drop-2."
+        echo ""
+        echo "  Permitted install route (stock unit, two-reboot transaction):"
+        echo "    1. Toolbox first-install leg / stock installer:"
+        echo "       dcent install <miner_ip> -f $(basename "$OUTPUT_FILE")"
+        echo ""
+        echo "  REFUSED for this package (manifest carries the typed denial):"
+        echo "    - sysupgrade onto an already-converted unit (SSH or web UI)"
+        echo "    - toolbox/OTA update flows (update_command is null)"
+        echo ""
+    else
+        echo -e "${BOLD}Installation methods:${NC}"
+        echo ""
+        echo "  1. This script with --upload (S9 / am1-s9 only):"
+        echo "     $(basename "$0") --upload <miner_ip>"
+        echo ""
+        echo "  2. SSH + sysupgrade (stage on /data — /tmp is 64 MB tmpfs on S9):"
+        echo "     scp -O $OUTPUT_FILE root@<miner_ip>:/data/"
+        echo "     ssh root@<miner_ip> 'sysupgrade -n /data/$(basename "$OUTPUT_FILE")'"
+        echo ""
+        echo "  3. BraiinsOS Web UI compatibility upload:"
+        echo "     Open http://<miner_ip> → System → Firmware → Flash Image"
+        echo "     Upload: $(basename "$OUTPUT_FILE")"
+        echo "     Check 'Do not preserve settings' → Flash"
+        echo ""
+        echo -e "  After target reboot and management reachability: ${GREEN}ssh root@<miner_ip>${NC} (bootstrap password: ${BOLD}dcentral${NC})"
+        echo "  First reachable boot: open the dashboard and set the owner password before using the API."
+        echo ""
+    fi
 
     # Note about signature verification
      echo -e "${YELLOW}NOTE:${NC} This package path is currently validated only for am1-s9."

@@ -310,14 +310,31 @@ impl ArtifactMaturity {
 /// Consumed by [`RuntimeStatus::SpecialisedLifecycle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LifecycleLane {
+    /// Exact S15/T15 flat FPGA BM1391 lifecycle and retained application PIC.
+    #[serde(rename = "bm1391_native")]
+    Bm1391Native,
+    /// Exact T17e BM1396 FPGA/PIC native lifecycle with retained safety owners.
+    #[serde(rename = "bm1396_native")]
+    Bm1396Native,
+    /// Native C43 flat FPGA FIFO and retained framed-PIC lifecycle (BM1393).
+    #[serde(rename = "c43_bm1393_native")]
+    C43Bm1393Native,
     /// Native Amlogic serial-mining lifecycle with retained bus-1 power/thermal
     /// ownership (the NoPic management fabric). Generic `Platform` construction
     /// is deliberately refused on this carrier.
     #[serde(rename = "amlogic_native_serial")]
     AmlogicNativeSerial,
+    /// Classic AML BHB42601/21/41: retained fw89 PIC, shared APW12 rail,
+    /// all selected UARTs and independent GPIO cutoff. Never NoPic custody.
+    #[serde(rename = "classic_aml_native_serial")]
+    ClassicAmlNativeSerial,
     /// Exact AM2/Zynq BM1362 direct-serial lifecycle.
     #[serde(rename = "am2_bm1362_serial")]
     Am2Bm1362Serial,
+    /// Native AM2 BM1398 FPGA command/work FIFO lifecycle, selected by the
+    /// serial entry point before generic hardware construction.
+    #[serde(rename = "am2_bm1398_native")]
+    Am2Bm1398Native,
     /// AM3 BeagleBone serial lifecycle (`--am3-bb-mining`).
     #[serde(rename = "am3_bb_serial")]
     Am3BbSerial,
@@ -338,8 +355,13 @@ pub enum LifecycleLane {
 impl LifecycleLane {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Bm1391Native => "bm1391_native",
+            Self::Bm1396Native => "bm1396_native",
+            Self::C43Bm1393Native => "c43_bm1393_native",
             Self::AmlogicNativeSerial => "amlogic_native_serial",
+            Self::ClassicAmlNativeSerial => "classic_aml_native_serial",
             Self::Am2Bm1362Serial => "am2_bm1362_serial",
+            Self::Am2Bm1398Native => "am2_bm1398_native",
             Self::Am3BbSerial => "am3_bb_serial",
             Self::S19jHybrid => "s19j_hybrid",
             Self::S17Hybrid => "s17_hybrid",

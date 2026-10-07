@@ -186,13 +186,27 @@ pub trait Apw12SmbusAuthorized: sealed::Sealed {}
 
 /// Marker types for platforms that own APW12-protocol PSUs.
 ///
-/// All SHIP markers — `Cv1835S19jPro`, `Am335xBbS19jPro`, `AmlogicS19jPro` —
-/// match the PIC1704 platform whitelist exactly. `Cv1835S19`, `Cv1835S19i`,
-/// and `Cv1835S19XP` are forward-looking placeholders for the W11C
-/// cross-platform broadening pass; their PIC1704 counterparts are still
-/// pending in `pic1704/service.rs`.
+/// AM335x BB and Amlogic markers remain available. Their actual runtime
+/// admission still requires the exact platform identity and controller checks.
+///
+/// CV1835 runtime markers were retired in L17. Historical mock tests retain
+/// private test-build access; a normal library exposes no CV constructor marker.
+///
+/// ```compile_fail
+/// use dcentrald_hal::psu_apw12_smbus::platforms::Cv1835S19jPro;
+/// ```
+/// ```compile_fail
+/// use dcentrald_hal::psu_apw12_smbus::platforms::Cv1835S19;
+/// ```
+/// ```compile_fail
+/// use dcentrald_hal::psu_apw12_smbus::platforms::Cv1835S19i;
+/// ```
+/// ```compile_fail
+/// use dcentrald_hal::psu_apw12_smbus::platforms::Cv1835S19XP;
+/// ```
 pub mod platforms {
     /// CV1835 S19j Pro — Sophgo CV1835 SoC, eMMC-rooted variant.
+    #[cfg(test)]
     pub struct Cv1835S19jPro;
     /// AM335x BB S19j Pro — BeagleBone-class control board.
     pub struct Am335xBbS19jPro;
@@ -200,14 +214,19 @@ pub mod platforms {
     /// NoPic — those families do not use APW12 SMBus.
     pub struct AmlogicS19jPro;
     /// CV1835 S19 — placeholder for W11C cross-platform broadening.
+    #[cfg(test)]
     pub struct Cv1835S19;
     /// CV1835 S19i — placeholder for W11C cross-platform broadening.
+    #[cfg(test)]
     pub struct Cv1835S19i;
     /// CV1835 S19 XP — placeholder for W11C cross-platform broadening.
+    #[cfg(test)]
     pub struct Cv1835S19XP;
 }
 
+#[cfg(test)]
 impl sealed::Sealed for platforms::Cv1835S19jPro {}
+#[cfg(test)]
 impl Apw12SmbusAuthorized for platforms::Cv1835S19jPro {}
 
 impl sealed::Sealed for platforms::Am335xBbS19jPro {}
@@ -216,13 +235,19 @@ impl Apw12SmbusAuthorized for platforms::Am335xBbS19jPro {}
 impl sealed::Sealed for platforms::AmlogicS19jPro {}
 impl Apw12SmbusAuthorized for platforms::AmlogicS19jPro {}
 
+#[cfg(test)]
 impl sealed::Sealed for platforms::Cv1835S19 {}
+#[cfg(test)]
 impl Apw12SmbusAuthorized for platforms::Cv1835S19 {}
 
+#[cfg(test)]
 impl sealed::Sealed for platforms::Cv1835S19i {}
+#[cfg(test)]
 impl Apw12SmbusAuthorized for platforms::Cv1835S19i {}
 
+#[cfg(test)]
 impl sealed::Sealed for platforms::Cv1835S19XP {}
+#[cfg(test)]
 impl Apw12SmbusAuthorized for platforms::Cv1835S19XP {}
 
 // ===========================================================================

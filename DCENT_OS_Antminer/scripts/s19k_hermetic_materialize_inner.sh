@@ -80,7 +80,7 @@ import stat
 import sys
 
 
-EXPECTED_POLICY_SHA256 = "e2404535f875adca47fd149a02d9bdb57848bf9da22a4e1f1247b185013b988a"
+EXPECTED_POLICY_SHA256 = "f7101ab4eff6fe2eb59a4080f0d3aef96d9e6ef525e0071c861298c4d4378fa1"
 POLICY_REL = Path("DCENT_OS_Antminer/scripts/s19k_hermetic_dependencies.json")
 MATERIALIZER_REL = Path("DCENT_OS_Antminer/scripts/s19k_hermetic_materialize_inner.sh")
 SNAPSHOT_HELPER_REL = Path("DCENT_OS_Antminer/scripts/source_snapshot.py")
@@ -269,7 +269,7 @@ if policy["buildroot"] != {
 if policy["toolchain"] != {
     "archive": "gcc-linaro-7.2.1-2017.11-x86_64_aarch64-linux-gnu.tar.xz",
     "download_root": "buildroot/dl",
-    "sha256": "40dce3d35e95a3a92cba27acbb21f30f86a720d320bc2a2e8a48fea423bc16f7",
+    "sha256": "20181f828e1075f1a493947ff91e82dd578ce9f8638fbdfc39e24b62857d8f8d",
     "toolchain_id_binding": "authenticated-policy-exact-token",
     "url": "https://releases.linaro.org/components/toolchain/binaries/7.2-2017.11/aarch64-linux-gnu/gcc-linaro-7.2.1-2017.11-x86_64_aarch64-linux-gnu.tar.xz",
 }:
@@ -357,7 +357,7 @@ mkdir "$RESULT_ROOT" "$BUILDROOT_OUTPUT" "$BUILDROOT_EXTERNAL" \
 BUILDROOT_URL=https://github.com/buildroot/buildroot.git
 BUILDROOT_COMMIT=7c8edc1b402efcd7bba2dabfe0b3be877adaed7a
 TOOLCHAIN_ARCHIVE=gcc-linaro-7.2.1-2017.11-x86_64_aarch64-linux-gnu.tar.xz
-TOOLCHAIN_SHA256=40dce3d35e95a3a92cba27acbb21f30f86a720d320bc2a2e8a48fea423bc16f7
+TOOLCHAIN_SHA256=20181f828e1075f1a493947ff91e82dd578ce9f8638fbdfc39e24b62857d8f8d
 
 python3 "$SNAPSHOT_HELPER" verify \
     --commit "$SOURCE_COMMIT" \
@@ -512,7 +512,7 @@ import sys
 
 
 SELECTION_SCHEMA = "dcentos.s19k-hermetic-dependency-selection/v1"
-EXPECTED_POLICY_SHA256 = "e2404535f875adca47fd149a02d9bdb57848bf9da22a4e1f1247b185013b988a"
+EXPECTED_POLICY_SHA256 = "f7101ab4eff6fe2eb59a4080f0d3aef96d9e6ef525e0071c861298c4d4378fa1"
 MAX_FILE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_FILES = 1_000_000
 MAX_TOTAL_BYTES = MAX_FILE_BYTES * 16

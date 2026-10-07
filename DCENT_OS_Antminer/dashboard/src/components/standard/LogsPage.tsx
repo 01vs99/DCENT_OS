@@ -7,6 +7,7 @@ import { StatePanel } from '../common/StatePanel';
 import { EmptyState } from '../common/EmptyState';
 import { NoLogsIllustration } from '../common/illustrations';
 import { SectionSkeleton } from '../common/skeletons';
+import { ReportProblem } from '../common/ReportProblem';
 
 const LEVEL_COLORS: Record<LogEntry['level'], string> = {
   info: 'var(--text-secondary)',
@@ -174,6 +175,7 @@ export function LogsPage() {
 
   return (
     <div className="page-content">
+      <ReportProblem />
       <div className="page-hero-strip">
         <div className="page-hero-summary">
           <div className="page-hero-eyebrow">DAEMON LOGS</div>

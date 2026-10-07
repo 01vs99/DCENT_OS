@@ -32,7 +32,9 @@ def load_overlay_csrf(path: pathlib.Path) -> types.ModuleType:
     source = path.read_text(encoding="utf-8")
     start = source.index("def _strip_host_port")
     end = source.index("def cors_allow_origin_value")
-    snippet = "import os\n" + source[start:end]
+    origin_start = source.index("def same_origin(")
+    origin_end = source.index("def cookie_bearer(")
+    snippet = "import os\n" + source[origin_start:origin_end] + source[start:end]
     module = types.ModuleType(path.name)
     exec(snippet, module.__dict__)  # noqa: S102 — extracted overlay helpers only
     return module

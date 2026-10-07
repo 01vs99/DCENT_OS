@@ -3,6 +3,7 @@ import { api } from '../../../api/client';
 import type { NetworkInfoResponse } from '../../../api/types';
 import { useMinerStore } from '../../../store/miner';
 import { NotificationSettings } from '../NotificationSettings';
+import { FleetApiSettings } from './FleetApiSettings';
 
 export function NetworkTab() {
   const systemInfo = useMinerStore(s => s.systemInfo);
@@ -221,6 +222,10 @@ export function NetworkTab() {
             )}
           </div>
         </div>
+      </div>
+
+      <div className="section">
+        <FleetApiSettings />
       </div>
 
       <div className="section">

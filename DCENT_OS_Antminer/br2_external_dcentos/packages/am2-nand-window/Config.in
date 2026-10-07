@@ -1,0 +1,7 @@
+config BR2_PACKAGE_AM2_NAND_WINDOW
+	bool "AM2 exact NAND window and native OTA boot tools"
+	depends on BR2_arm
+	select BR2_PACKAGE_PYTHON3
+	help
+	  Finite inactive-FPGA NAND writer, complete native boot tuple producer,
+	  and redundant environment readback for exact AM2 Zynq images.

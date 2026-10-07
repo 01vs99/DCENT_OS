@@ -345,7 +345,7 @@ pub fn open_core_enable_value(core: u32) -> u32 {
 /// S19 Pro standalone path produces nonces WITHOUT it, so it never runs unless
 /// an operator explicitly enables it for a first-live-unit comparison.
 fn bm139x_open_core_enabled() -> bool {
-    std::env::var("DCENT_BM139X_OPEN_CORE")
+    dcentrald_common::lab_env::var("DCENT_BM139X_OPEN_CORE")
         .map(|v| v == "1")
         .unwrap_or(false)
 }

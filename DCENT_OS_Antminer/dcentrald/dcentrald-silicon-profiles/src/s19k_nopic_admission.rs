@@ -11,12 +11,112 @@
 //! - am3-s19k GPIO437 `PWR_CONTROL` is active-LOW (`0=ON`); checked
 //!   HIGH (`1=OFF`) SafeOff is an orthogonal OTA gate
 //!
-//! Native BM1366 mining remains `NOT IMPLEMENTED` / experimental opt-in
-//! fail-closed in `serial_mining` until a deliberate BETA mining admission
-//! path exists.
+//! Native BM1366 mining is implemented by `serial_mining`. This fabric
+//! identity result cannot substitute for its fresh EEPROM, UART, cooling,
+//! watchdog, power and terminal-owner admission.
 
 use crate::hashboard_topology::descriptor_by_sku;
 use crate::sensor_topology::sensor_topology_for_sku;
+use dcentrald_common::cooling_medium::CoolingMedium;
+
+/// Cooling choice cannot turn stock `Fans OK` (min_fans=0) into airflow.
+/// Undeclared cooling keeps the four physical fan channels mandatory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bm1366CoolingRule {
+    FourFans,
+    /// No fan command is meaningful here. The separate liquid runtime must
+    /// retain its ExternalCutoffGate; tach values cannot admit this medium.
+    ExternalLoopOwnerRequired,
+}
+
+pub const BM1366_MIN_FAN_RPM: u32 = 2_000;
+
+pub const fn bm1366_cooling_rule(medium: Option<CoolingMedium>) -> Bm1366CoolingRule {
+    match medium {
+        None | Some(CoolingMedium::Air) => Bm1366CoolingRule::FourFans,
+        Some(CoolingMedium::Hydro | CoolingMedium::Immersion) => {
+            Bm1366CoolingRule::ExternalLoopOwnerRequired
+        }
+    }
+}
+
+/// Check a fresh tach sample taken by the retained fan owner after a checked
+/// PWM command. All four unique channels must reach the floor. This function
+/// accepts no stock status string or min_fans override. It grants no power.
+pub fn admit_bm1366_airflow(
+    medium: Option<CoolingMedium>,
+    readings: &[(u8, u32)],
+) -> Result<(), &'static str> {
+    if bm1366_cooling_rule(medium) != Bm1366CoolingRule::FourFans {
+        return Err("BM1366 liquid cooling requires an external-loop owner and cutoff latch");
+    }
+    if readings.len() != 4 {
+        return Err("BM1366 air cooling requires all four tach channels");
+    }
+    let mut seen = [false; 4];
+    for &(channel, rpm) in readings {
+        let slot = seen
+            .get_mut(usize::from(channel))
+            .ok_or("BM1366 air cooling has an unknown tach channel")?;
+        if *slot || rpm < BM1366_MIN_FAN_RPM {
+            return Err("BM1366 air cooling requires four unique tachs at or above 2000 RPM");
+        }
+        *slot = true;
+    }
+    Ok(())
+}
+
+/// Stock endpoints, not a frozen operating point. The driver allows quiet
+/// underclocking below `low_power_mhz` and independently validates voltage,
+/// temperatures and cooling. Voltage values are stock centivolts, not mV.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bm1366StockLevels {
+    pub low_power_mhz: u16,
+    pub low_power_centivolts: u16,
+    pub maximum_mhz: u16,
+    pub maximum_centivolts: u16,
+}
+
+/// Extracted from held Bitmain `etc/levels.json` in the following packages:
+/// s19k-pro-merge-20240409, s19-xp-merge-20241111, s19j-xp-merge-20241014.
+/// Exact decoded SKU and model are both required; no sibling fallback.
+pub fn bm1366_stock_levels(board_target: &str, sku: &str) -> Option<Bm1366StockLevels> {
+    let (low_power_mhz, low_power_centivolts, maximum_mhz, maximum_centivolts) =
+        match (board_target, sku) {
+            ("am3-s19k", "BHB56901") => (635, 1320, 695, 1390),
+            ("am3-s19k", "BHB56902" | "BHB56903") => (
+                540,
+                1320,
+                dcentrald_common::s19k_bm1366_wire_b::S19K_NATIVE_MAX_FREQUENCY_MHZ,
+                1440,
+            ),
+            ("am3-s19xp", "BHB56801" | "BHB56802" | "BHB56806") => (410, 1240, 485, 1320),
+            ("am3-s19jxp", "BHB56804" | "BHB56807") => (300, 1240, 515, 1320),
+            _ => return None,
+        };
+    Some(Bm1366StockLevels {
+        low_power_mhz,
+        low_power_centivolts,
+        maximum_mhz,
+        maximum_centivolts,
+    })
+}
+
+/// Resolve and bound both the requested frequency and the programmed divider
+/// ratio. The 100 MHz floor is driver policy, not the stock low-power level.
+pub fn resolve_bm1366_stock_pll(
+    board_target: &str,
+    sku: &str,
+    requested_mhz: u16,
+) -> Result<(u32, u16), &'static str> {
+    let levels = bm1366_stock_levels(board_target, sku)
+        .ok_or("BM1366 PLL requires exact held stock model/SKU levels")?;
+    dcentrald_common::s19k_bm1366_wire_b::bm1366_pll_in_envelope(
+        requested_mhz,
+        100,
+        levels.maximum_mhz,
+    )
+}
 
 /// Exact board_name strings admitted for S19k-class BM1366 NoPic identity.
 ///
@@ -37,9 +137,8 @@ pub const S19K_CHIPS_PER_CHAIN: u8 = 77;
 /// does **not** unlock a work codec.
 pub const S19K_MIDSTATE_NUMBER: u8 = 8;
 
-/// Baseline native-mining refusal reused by admission helpers so BETA
-/// readiness language cannot drift from the serial engine.
-pub const S19K_NATIVE_MINING_REFUSAL: &str = "NOT IMPLEMENTED: native BM1366 catalog identities are live-evidence-backed NoPic hashboards; the former AMLCtrl_BHB56 dsPIC route contradicts BHB56902 EEPROM evidence [05,11] and must not authorize controller, voltage, or ASIC mutation";
+/// A fabric claim is never a capability to execute the native mining engine.
+pub const S19K_NATIVE_MINING_REFUSAL: &str = "native BM1366 execution requires the exact runtime owner: fresh EEPROM identity, UART response coverage, cooling, watchdog and retained power cutoff; a NoPic fabric claim must not authorize controller, voltage or ASIC mutation";
 
 /// Declared Has_Pic / controller-class inputs for one S19k profile candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,14 +169,14 @@ pub enum S19kNoPicAdmission {
 /// Mining disposition attached to every successful fabric admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum S19kMiningDisposition {
-    /// Default: native mining remains NOT IMPLEMENTED.
-    NotImplemented,
+    /// The separate native owner must admit every physical safety prerequisite.
+    NativeOwnerRequired,
 }
 
 impl S19kMiningDisposition {
     pub const fn refusal_message(self) -> &'static str {
         match self {
-            Self::NotImplemented => S19K_NATIVE_MINING_REFUSAL,
+            Self::NativeOwnerRequired => S19K_NATIVE_MINING_REFUSAL,
         }
     }
 }
@@ -134,7 +233,7 @@ pub fn admit_s19k_nopic_profile(claim: S19kNoPicProfileClaim) -> S19kNoPicAdmiss
         board_name: claim.board_name,
         chips_per_chain: claim.chips_per_chain,
         midstate_number: S19K_MIDSTATE_NUMBER,
-        mining: S19kMiningDisposition::NotImplemented,
+        mining: S19kMiningDisposition::NativeOwnerRequired,
     }
 }
 
@@ -254,6 +353,96 @@ impl S19kNopicFabricPhaseLatch {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cooling_medium_selects_fans_or_external_owner_without_stock_status() {
+        let valid = [(3, 2_000), (1, 2_001), (0, 2_300), (2, 2_100)];
+        for medium in [None, Some(CoolingMedium::Air)] {
+            assert_eq!(bm1366_cooling_rule(medium), Bm1366CoolingRule::FourFans);
+            admit_bm1366_airflow(medium, &valid).unwrap();
+            for readings in [
+                vec![],
+                valid[..3].to_vec(),
+                vec![(0, 2000), (0, 2000), (2, 2000), (3, 2000)],
+                vec![(0, 2000), (1, 2000), (2, 2000), (4, 2000)],
+            ] {
+                assert!(admit_bm1366_airflow(medium, &readings).is_err());
+            }
+            for failed in 0..4 {
+                let mut readings = valid;
+                readings[failed].1 = 1_999;
+                assert!(admit_bm1366_airflow(medium, &readings).is_err());
+            }
+        }
+        for medium in [CoolingMedium::Hydro, CoolingMedium::Immersion] {
+            assert_eq!(
+                bm1366_cooling_rule(Some(medium)),
+                Bm1366CoolingRule::ExternalLoopOwnerRequired
+            );
+            assert!(admit_bm1366_airflow(Some(medium), &valid).is_err());
+            assert!(admit_bm1366_airflow(Some(medium), &[]).is_err());
+        }
+    }
+
+    #[test]
+    fn held_stock_levels_keep_s19k_and_xp_skus_separate() {
+        for (target, skus, expected) in [
+            ("am3-s19k", &["BHB56901"][..], (635, 1320, 695, 1390)),
+            (
+                "am3-s19k",
+                &["BHB56902", "BHB56903"][..],
+                (540, 1320, 670, 1440),
+            ),
+            (
+                "am3-s19xp",
+                &["BHB56801", "BHB56802", "BHB56806"][..],
+                (410, 1240, 485, 1320),
+            ),
+            (
+                "am3-s19jxp",
+                &["BHB56804", "BHB56807"][..],
+                (300, 1240, 515, 1320),
+            ),
+        ] {
+            for sku in skus {
+                let levels = bm1366_stock_levels(target, sku).unwrap();
+                assert_eq!(
+                    (
+                        levels.low_power_mhz,
+                        levels.low_power_centivolts,
+                        levels.maximum_mhz,
+                        levels.maximum_centivolts
+                    ),
+                    expected
+                );
+                for request in [100, 200, levels.low_power_mhz, levels.maximum_mhz] {
+                    let (register, actual) =
+                        resolve_bm1366_stock_pll(target, sku, request).unwrap();
+                    let numerator = 25 * ((register >> 16) & 0xff);
+                    let denominator = ((register >> 8) & 0xff)
+                        * (((register >> 4) & 0x0f) + 1)
+                        * ((register & 0x0f) + 1);
+                    assert!(numerator <= u32::from(levels.maximum_mhz) * denominator);
+                    assert!(actual.abs_diff(request) <= 2);
+                }
+                for request in [0, 99, levels.maximum_mhz + 1, u16::MAX] {
+                    assert!(resolve_bm1366_stock_pll(target, sku, request).is_err());
+                }
+            }
+        }
+        for (target, sku) in [
+            ("am3-s19xp", "BHB56804"),
+            ("am3-s19jxp", "BHB56801"),
+            ("am3-s19k", "BHB56906"),
+            ("am3-s19kpro", "BHB56902"),
+            ("am3-s21", "BHB56902"),
+            ("", ""),
+            ("am3-s19k", " BHB56902"),
+        ] {
+            assert!(bm1366_stock_levels(target, sku).is_none());
+            assert!(resolve_bm1366_stock_pll(target, sku, 400).is_err());
+        }
+    }
+
     fn good_claim() -> S19kNoPicProfileClaim {
         S19kNoPicProfileClaim {
             board_name: "BHB56902",
@@ -277,8 +466,10 @@ mod tests {
                 assert_eq!(board_name, "BHB56902");
                 assert_eq!(chips_per_chain, 77);
                 assert_eq!(midstate_number, 8);
-                assert_eq!(mining, S19kMiningDisposition::NotImplemented);
-                assert!(mining.refusal_message().contains("NOT IMPLEMENTED"));
+                assert_eq!(mining, S19kMiningDisposition::NativeOwnerRequired);
+                assert!(mining
+                    .refusal_message()
+                    .contains("requires the exact runtime owner"));
                 assert!(mining.refusal_message().contains("NoPic"));
             }
             other => panic!("expected fabric admission, got {other:?}"),
@@ -361,7 +552,7 @@ mod tests {
             );
             match admit_s19k_nopic_profile(claim) {
                 S19kNoPicAdmission::AdmittedFabric { mining, .. } => {
-                    assert_eq!(mining, S19kMiningDisposition::NotImplemented);
+                    assert_eq!(mining, S19kMiningDisposition::NativeOwnerRequired);
                 }
                 S19kNoPicAdmission::Refused(r) => panic!("{board} refused: {r}"),
             }
@@ -442,7 +633,7 @@ mod tests {
                 board_name, mining, ..
             } => {
                 assert_eq!(board_name, "BHB56903");
-                assert_eq!(mining, S19kMiningDisposition::NotImplemented);
+                assert_eq!(mining, S19kMiningDisposition::NativeOwnerRequired);
             }
             other => panic!("expected admit BHB56903, got {other:?}"),
         }

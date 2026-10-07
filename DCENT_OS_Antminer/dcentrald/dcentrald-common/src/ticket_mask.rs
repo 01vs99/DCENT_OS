@@ -82,7 +82,11 @@ pub fn ticket_mask_esp_miner_pow2_floor(difficulty: u32) -> u32 {
 pub fn try_ticket_mask_encoding_for_chip_id(chip_id: u16) -> Option<TicketMaskEncoding> {
     match chip_id {
         // Bit-reversed family (jig / Braiins / BM1397 pure / BM1391 set_TM).
-        0x1387 | 0x1391 | 0x1393 | 0x1397 | 0x1398 => Some(TicketMaskEncoding::BitReversed),
+        // R06: BM1396 joins on its cold-spine golden 0x14 = 0xfe
+        // (difficulty 128 bit-reversed; HAL stock_bm1396_cold.rs).
+        0x1387 | 0x1391 | 0x1393 | 0x1396 | 0x1397 | 0x1398 => {
+            Some(TicketMaskEncoding::BitReversed)
+        }
         // BM136x industrial plain (fixture 0x7F @ diff 128).
         0x1362 | 0x1366 | 0x1368 | 0x1370 | 0x1373 => Some(TicketMaskEncoding::PlainDiffMinusOne),
         // BM1489: plain (wave-8 unconfirmed vs BM1485 bit-reversed predecessor).

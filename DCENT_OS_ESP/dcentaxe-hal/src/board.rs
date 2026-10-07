@@ -4137,6 +4137,58 @@ pub struct BoardConfig {
     /// profile row and deliberately absent from `apply_hardware_config`.
     #[serde(default)]
     pub identity_strap_addr: Option<u8>,
+    /// XPSAFE-8: which of a dual-fan controller's headers the operator declares
+    /// PHYSICALLY POPULATED. Default [`FanPopulation::Both`], which is the
+    /// reference build for every dual-fan row and reproduces the prior
+    /// behavior byte for byte.
+    ///
+    /// This does NOT relax [`requires_fan_tach`](Self::requires_fan_tach) — a
+    /// Hex still MUST prove a tachometer. It changes only WHICH fans the proof
+    /// is demanded from, so a board running one fan fails closed on the fan it
+    /// actually has instead of failing closed forever on a header that was
+    /// never populated. Consumed by the `main.rs` boot and runtime gates via
+    /// [`declared_fan_tach_missing`](Self::declared_fan_tach_missing).
+    ///
+    /// `#[serde(default)]` keeps every previously-serialized blob deserializing
+    /// as `Both`.
+    #[serde(default)]
+    pub fans_populated: FanPopulation,
+}
+
+/// Which headers of a dual-fan controller are physically populated.
+///
+/// XPSAFE-8. There is deliberately no `None` variant: a board in
+/// [`BoardConfig::requires_fan_tach`] must always prove at least one
+/// tachometer, so "no fans fitted" is unrepresentable here rather than merely
+/// rejected at runtime. Single-fan controllers (EMC2101) ignore this — they
+/// have one header and go through [`BoardConfig::tach_proof_required`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FanPopulation {
+    /// Both headers fitted. The reference build, and the default.
+    #[default]
+    Both,
+    /// Only header 1 (EMC2302 FAN1) is fitted.
+    Fan1Only,
+    /// Only header 2 (EMC2302 FAN2) is fitted.
+    Fan2Only,
+}
+
+impl FanPopulation {
+    /// Is header 1 declared fitted?
+    pub fn fan1(&self) -> bool {
+        matches!(self, Self::Both | Self::Fan1Only)
+    }
+
+    /// Is header 2 declared fitted?
+    pub fn fan2(&self) -> bool {
+        matches!(self, Self::Both | Self::Fan2Only)
+    }
+
+    /// How many headers are declared fitted. Never zero.
+    pub fn count(&self) -> u8 {
+        self.fan1() as u8 + self.fan2() as u8
+    }
 }
 
 /// I2C SDA pin — compile-time selected by pin family feature.
@@ -4270,6 +4322,10 @@ impl BoardConfig {
             // to the inherent Hex/EMC2103 requirement, see requires_fan_tach.
             fan_tach_required: profile.fan_tach_required(),
             identity_strap_addr: profile.identity_strap_addr(),
+            // XPSAFE-8: every row's reference build populates both headers, so
+            // the default reproduces the prior gate exactly. An operator running
+            // one fan declares it through config (`fans_populated`).
+            fans_populated: FanPopulation::Both,
             plug_sense: profile.plug_sense(),
             asic_enable: profile.asic_enable(),
             uart_tx_pin: uart_tx_gpio(),
@@ -5275,6 +5331,45 @@ impl BoardConfig {
         self.requires_fan_tach() || self.fan_tach_present
     }
 
+    /// XPSAFE-8: declare which dual-fan headers are physically populated.
+    ///
+    /// Does not relax [`requires_fan_tach`](Self::requires_fan_tach); it only
+    /// scopes WHICH fans the mandatory proof is demanded from.
+    pub fn set_fans_populated(&mut self, populated: FanPopulation) {
+        self.fans_populated = populated;
+    }
+
+    /// XPSAFE-8: is a fan the operator declared PRESENT failing to report tach?
+    ///
+    /// This is the predicate the `main.rs` dual-fan boot gate and runtime
+    /// stall kill must consume instead of a bare `rpm1 == 0 || rpm2 == 0`.
+    /// With the default [`FanPopulation::Both`] it is exactly that expression,
+    /// so no shipping board's verdict changes. With one header declared, an
+    /// unpopulated header's permanent 0 RPM stops being read as a dead fan,
+    /// while the populated fan keeps the full fail-closed posture: it must
+    /// prove RPM at boot and a later stall still trips the kill.
+    pub fn declared_fan_tach_missing(&self, rpm1: u32, rpm2: u32) -> bool {
+        (self.fans_populated.fan1() && rpm1 == 0) || (self.fans_populated.fan2() && rpm2 == 0)
+    }
+
+    /// XPSAFE-8: have all declared-present fans proven tach? Boot retry exit.
+    pub fn declared_fan_tach_proven(&self, rpm1: u32, rpm2: u32) -> bool {
+        !self.declared_fan_tach_missing(rpm1, rpm2)
+    }
+
+    /// XPSAFE-8: the RPM to treat as this board's primary fan reading.
+    ///
+    /// Header 1 when it is populated, otherwise header 2. Without this a
+    /// `Fan2Only` board would feed a hardcoded 0 into the stall kill and the
+    /// primary telemetry field while its real fan spins.
+    pub fn primary_tach_rpm(&self, rpm1: u32, rpm2: u32) -> u32 {
+        if self.fans_populated.fan1() {
+            rpm1
+        } else {
+            rpm2
+        }
+    }
+
     pub fn accessory_mode(&self) -> AccessoryMode {
         if self.model.has_bap() {
             AccessoryMode::BapTouch
@@ -5396,7 +5491,105 @@ mod xpsafe7_fan_tach_capability {
         }
     }
 
-    // ── XPSAFE-7: Hex / EMC2103 boards already require proof regardless of flag ──
+    // ── XPSAFE-8: the default fan population reproduces the OLD gate exactly ──
+    // The prior boot/runtime predicate was a bare `rpm1 == 0 || rpm2 == 0`.
+    // With the default `Both`, `declared_fan_tach_missing` must equal it for
+    // every row and every RPM combination, so this change is provably
+    // behavior-preserving for every shipping board.
+    #[test]
+    fn default_fan_population_equals_the_old_both_fans_predicate() {
+        for profile in BoardVersionProfile::ALL {
+            let cfg = BoardConfig::for_profile(&profile);
+            assert_eq!(
+                cfg.fans_populated,
+                FanPopulation::Both,
+                "{}: every row must default to both headers populated",
+                profile.board_version
+            );
+            for (rpm1, rpm2) in [(0, 0), (0, 1500), (1500, 0), (1500, 1500)] {
+                assert_eq!(
+                    cfg.declared_fan_tach_missing(rpm1, rpm2),
+                    rpm1 == 0 || rpm2 == 0,
+                    "{}: default population must reproduce the old predicate at \
+                     fan1={rpm1} fan2={rpm2}",
+                    profile.board_version
+                );
+            }
+        }
+    }
+
+    // ── XPSAFE-8: declaring one header keeps the fan you HAVE fail-closed ──
+    // The whole point of the change: an unpopulated header's permanent 0 RPM
+    // stops blocking, but the populated fan must still prove tach and a later
+    // stall must still trip. If this test can pass with a stalled declared fan,
+    // the gate has been gutted rather than scoped.
+    #[test]
+    fn single_fan_declaration_scopes_the_gate_without_disarming_it() {
+        // Board 702 (Hex Supra) is in the mandatory-tach set.
+        let mut cfg = BoardConfig::for_profile(
+            BoardVersionProfile::find("702").expect("702 is a registered row"),
+        );
+        assert!(
+            cfg.requires_fan_tach(),
+            "declaring a fan population must NOT remove the Hex tach requirement"
+        );
+
+        cfg.set_fans_populated(FanPopulation::Fan2Only);
+        assert!(cfg.requires_fan_tach(), "still mandatory-tach after declaring");
+        assert_eq!(cfg.fans_populated.count(), 1);
+
+        // The empty header reading 0 forever no longer blocks...
+        assert!(!cfg.declared_fan_tach_missing(0, 1650));
+        assert!(cfg.declared_fan_tach_proven(0, 1650));
+        // ...but the fan that IS fitted must prove tach, and a stall trips.
+        assert!(cfg.declared_fan_tach_missing(0, 0));
+        assert!(cfg.declared_fan_tach_missing(1650, 0));
+        // Primary telemetry/stall RPM follows the populated header.
+        assert_eq!(cfg.primary_tach_rpm(0, 1650), 1650);
+
+        // Mirror case: only header 1 fitted.
+        cfg.set_fans_populated(FanPopulation::Fan1Only);
+        assert!(!cfg.declared_fan_tach_missing(1650, 0));
+        assert!(cfg.declared_fan_tach_missing(0, 1650));
+        assert_eq!(cfg.primary_tach_rpm(1650, 0), 1650);
+    }
+
+    // ── XPSAFE-8: "no fans" must be unrepresentable, not merely refused ──
+    #[test]
+    fn every_fan_population_declares_at_least_one_header() {
+        for p in [
+            FanPopulation::Both,
+            FanPopulation::Fan1Only,
+            FanPopulation::Fan2Only,
+        ] {
+            assert!(
+                p.count() >= 1,
+                "{p:?}: a declaration that populates no header would disarm the \
+                 mandatory-tach gate entirely"
+            );
+            assert!(p.fan1() || p.fan2());
+            // A gate that demands nothing can never report a missing fan.
+            assert!(
+                p.fan1() || p.fan2(),
+                "{p:?}: at least one header must be proof-bearing"
+            );
+        }
+        // All-zero RPM must block under EVERY declaration.
+        let mut cfg = BoardConfig::for_model(BitAxeModel::HexSupra);
+        for p in [
+            FanPopulation::Both,
+            FanPopulation::Fan1Only,
+            FanPopulation::Fan2Only,
+        ] {
+            cfg.set_fans_populated(p);
+            assert!(
+                cfg.declared_fan_tach_missing(0, 0),
+                "{p:?}: zero tach on every header must always fail closed"
+            );
+        }
+    }
+
+    // ── XPSAFE-8: Hex / EMC2103 boards already require proof regardless of flag ──
     #[test]
     fn hex_and_emc2103_always_require_proof() {
         // A Hex board (inherently requires tach) keeps proof required even with

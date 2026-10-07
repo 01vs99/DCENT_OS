@@ -411,8 +411,14 @@ export function estimateDailyCost(watts: number, electricityRate: number): numbe
   return (watts * 24) / 1000 * electricityRate;
 }
 
-/** Firmware default donation when config has not been read. Never treat unknown as 0%. */
-export const DEFAULT_DONATION_PERCENT = 2;
+/**
+ * Firmware default donation when config has not been read. Mirrors the
+ * daemon's `DonationConfig` default (C6, operator decision 2026-09-01):
+ * donation is DISABLED and 0% until the operator opts in. An opted-in
+ * config (enabled=true + percent) still applies its full percent below —
+ * the earnings math must never silently zero an active donation.
+ */
+export const DEFAULT_DONATION_PERCENT = 0;
 
 const POOL_FEE_STORAGE_KEY = 'dcentos-earnings-pool-fee-percent';
 const POOL_FEE_MAX_PERCENT = 10;
@@ -429,8 +435,8 @@ export function clampPoolFeePercent(percent: number): number {
 
 /**
  * Effective donation take-rate for earnings math.
- * Unknown/missing config → 2% (daemon default). Operator-disabled → 0.
- * Explicit 0% while still enabled is operator choice, not a product default.
+ * Unknown/missing config → 0% (the daemon's opt-in default). Operator-disabled → 0.
+ * An opted-in config always applies its configured percent (never silently zeroed).
  */
 export function donationTakePercent(
   config: { enabled?: boolean; percent?: number } | null | undefined,

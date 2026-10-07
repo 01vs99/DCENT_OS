@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Hermetic host/fake-Docker proof for the S9 release-capsule orchestrator.
+# Generic capsule lifecycle with fake Docker/build work and a real signed runtime package.
+# Caller holds the shared heavy lock for the one production ELF fixture build.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,39 +46,35 @@ grep -Fq 'BUILD_CONTAINER_ID="$(docker image inspect --format' \
 grep -Fq '"$BUILD_CONTAINER_ID" bash -c' "$SCRIPT_DIR/build_in_docker.sh"
 grep -Fq -- '-v "${POSIX_PROJECT_DIR}:/src:ro"' "$SCRIPT_DIR/build_in_docker.sh"
 grep -Fq -- '--output-dir for its private release-set stage' "$SCRIPT_DIR/build_in_docker.sh"
-grep -Fq 'portable_release_evidence.py" create-live' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh"
-grep -Fq 'sign_release_artifact.py" "$PORTABLE_EVIDENCE_PATH"' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh"
-grep -Fq 'RELEASE_TARGET=s9' "$SCRIPT_DIR/build_s9_release_capsule.sh"
-grep -Fq 'release_capsule_target_policy.py' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh"
-grep -Fq 'portable_release_evidence.py" verify-stage' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh"
-grep -Fq 'portable_release_evidence.py" verify' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh"
+grep -Fq 'release_producer.py" create-result' "$SCRIPT_DIR/build_release_capsule.sh"
+grep -Fq 'release_producer.py" create-cohort-result' "$SCRIPT_DIR/build_release_capsule.sh"
+grep -Fq 'release_producer_evidence.py" retain-live' "$SCRIPT_DIR/build_release_capsule.sh"
+grep -Fq 'exec bash "$SCRIPT_DIR/build_release_capsule.sh" --producer' "$SCRIPT_DIR/build_s9_release_capsule.sh"
+grep -Fq 'for RELEASE_PRODUCER in "${RELEASE_PRODUCERS[@]}"' "$SCRIPT_DIR/build_release_capsule.sh"
+grep -Fq 'tee "$PUBLIC_OUTPUT_ROOT/../lane-${RELEASE_PRODUCER}.log"' \
+    "$SCRIPT_DIR/build_release_capsule.sh"
 grep -Fq 'release_signing_authority.py" create' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh"
+    "$SCRIPT_DIR/build_release_capsule.sh"
 grep -Fq -- '--result-output "$RESULT_CREATE_RESULT_FILE"' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh"
+    "$SCRIPT_DIR/build_release_capsule.sh"
 grep -Fq 'result-stage cleanup failed; recovery result retained:' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh"
+    "$SCRIPT_DIR/build_release_capsule.sh"
 grep -Fq 'result-stage creation recovery failed; locator retained:' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh"
+    "$SCRIPT_DIR/build_release_capsule.sh"
 grep -Fq 'result-stage recovery result is unreadable; retained:' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh"
+    "$SCRIPT_DIR/build_release_capsule.sh"
 grep -Fq -- '--result-output "$SIGNING_AUTHORITY_RESULT_FILE"' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh"
+    "$SCRIPT_DIR/build_release_capsule.sh"
 grep -Fq 'signing-authority cleanup failed; recovery result retained:' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh"
+    "$SCRIPT_DIR/build_release_capsule.sh"
 grep -Fq 'registered signing-authority recovery result is missing; upstream authority retained:' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh"
+    "$SCRIPT_DIR/build_release_capsule.sh"
 grep -Fq 'dependent cleanup failed; invocation retained for recovery:' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh"
+    "$SCRIPT_DIR/build_release_capsule.sh"
 grep -Fq 'cleanup helper source retained for recovery:' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh"
+    "$SCRIPT_DIR/build_release_capsule.sh"
 grep -Fq 'DCENT_RELEASE_SIGNING_KEY="$SIGNING_AUTHORITY_PRIVATE_KEY"' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh"
+    "$SCRIPT_DIR/build_release_capsule.sh"
 grep -Fq 'clean|exact_git_object_snapshot' "$SCRIPT_DIR/lib/release_envelope.sh"
 if grep -Fq 'VOLUME_NAME="dcentos-build-work"' \
     <(sed -n '/if \[ "${DCENT_RELEASE_CAPSULE_MODE/,/fi/p' "$SCRIPT_DIR/build_in_docker.sh"); then
@@ -87,13 +84,20 @@ fi
 
 for helper in \
     atomic_publish_directory.py atomic_publish_file.py durable_file_io.py \
-    build_s9_release_capsule.sh source_snapshot.py release_invocation.py \
+    build_s9_release_capsule.sh build_release_capsule.sh source_snapshot.py release_source_git.py release_invocation.py \
     release_result_stage.py release_set_publication.py release_publication.py \
     release_docker_resources.py release_signing_authority.py \
-    release_capsule_target_policy.py sign_release_artifact.py \
+    release_capsule_target_policy.py release_producer.py release_train.py runtime_image_manifest.py release_runtime_exports.py sign_release_artifact.py \
     sign_release_receipt.py \
-    firmware_release_name.sh verify_release_keypair.sh; do
+    firmware_release_name.sh verify_release_keypair.sh release_host_tools.py; do
     cp "$SCRIPT_DIR/$helper" "$LIVE_REPO/DCENT_OS_Antminer/scripts/$helper"
+done
+# The release helper imports its packaged canonical verifier in this isolated
+# source snapshot too; copying only scripts must not hide that dependency.
+TOOLBOX_FIXTURE="$LIVE_REPO/projects/dcent-toolbox/src/dcent_toolbox"
+mkdir -p "$TOOLBOX_FIXTURE/core"
+for helper in __init__.py core/__init__.py core/signed_runtime_image.py core/squashfs_files.py; do
+    cp "$SCRIPT_DIR/../../dcent-toolbox/src/dcent_toolbox/$helper" "$TOOLBOX_FIXTURE/$helper"
 done
 grep -Fq 'from atomic_publish_file import' \
     "$LIVE_REPO/DCENT_OS_Antminer/scripts/release_set_publication.py"
@@ -101,11 +105,11 @@ grep -Fq 'from atomic_publish_directory import' \
     "$LIVE_REPO/DCENT_OS_Antminer/scripts/release_set_publication.py"
 grep -Fq 'from durable_file_io import' \
     "$LIVE_REPO/DCENT_OS_Antminer/scripts/atomic_publish_file.py"
-chmod +x "$LIVE_REPO/DCENT_OS_Antminer/scripts/build_s9_release_capsule.sh"
+chmod +x "$LIVE_REPO/DCENT_OS_Antminer/scripts/build_release_capsule.sh"
 grep -Fq 'release-set cleanup failed; capability retained for recovery:' \
-    "$LIVE_REPO/DCENT_OS_Antminer/scripts/build_s9_release_capsule.sh"
+    "$LIVE_REPO/DCENT_OS_Antminer/scripts/build_release_capsule.sh"
 grep -Fq 'release_set_destroy_error' \
-    "$LIVE_REPO/DCENT_OS_Antminer/scripts/build_s9_release_capsule.sh"
+    "$LIVE_REPO/DCENT_OS_Antminer/scripts/build_release_capsule.sh"
 
 # The orchestrator needs only create/query/destroy from this outer-owned input
 # authority. The production helper has its own exhaustive adversarial suite.
@@ -130,45 +134,49 @@ else:
     shutil.rmtree(snap.parent)
 PY
 
-# The real portable-evidence helper has a dedicated Git/signature/exact-set
-# suite. This interface stub pins outer-driver ordering: project while private,
-# sign before sealing, then independently verify only after publication.
-cat > "$LIVE_REPO/DCENT_OS_Antminer/scripts/portable_release_evidence.py" <<'PY'
-#!/usr/bin/env python3
-import argparse, json, os, pathlib, shutil
-p=argparse.ArgumentParser(); s=p.add_subparsers(dest="cmd", required=True)
-c=s.add_parser("create-live")
-for name in ("repo-root","target","output-name","source-commit","source-snapshot","release-invocation","cargo-input-snapshot","result-stage","artifact-dir","closure","closure-signature","public-key"):
-    c.add_argument("--"+name, required=True)
-for command in ("verify-stage", "verify"):
-    v=s.add_parser(command); v.add_argument("--repo-root", required=True); v.add_argument("--public-key", required=True); v.add_argument("release_dir")
-a=p.parse_args()
-if a.cmd=="create-live":
-    if a.target != "s9": raise SystemExit("outer S9 capsule did not bind portable target")
-    if not a.output_name.startswith("DCENTOS_XIL1_S9_"): raise SystemExit("outer S9 capsule did not bind release name")
-    out=pathlib.Path(a.artifact_dir)
-    shutil.copyfile(a.source_snapshot, out/"release-source-snapshot.json")
-    shutil.copyfile(pathlib.Path(a.release_invocation)/"invocation.json", out/"release-invocation.json")
-    shutil.copyfile(a.cargo_input_snapshot, out/"release-cargo-input.json")
-    (out/"release-result-audit.json").write_text('{"claim":"audit-only"}\n', encoding="ascii")
-    (out/"portable-release-evidence.json").write_text(json.dumps({"schema":"harness-portable-evidence.v1"}, separators=(",",":"), sort_keys=True)+"\n", encoding="ascii")
-    with open(os.environ["HARNESS_AUDIT_LOG"],"a",encoding="utf-8") as log: log.write("portable-create=private\n")
-elif a.cmd=="verify-stage":
-    root=pathlib.Path(a.release_dir)
-    if not (root/".dcent-release-set.json").is_file(): raise SystemExit("unsealed release stage")
-    if any(pathlib.Path(os.environ["HARNESS_OUTPUT_ROOT"], "releases").glob("*")): raise SystemExit("stage verified after publication")
-    with open(os.environ["HARNESS_AUDIT_LOG"],"a",encoding="utf-8") as log: log.write("portable-verify=stage\n")
-else:
-    root=pathlib.Path(a.release_dir)
-    for name in ("portable-release-evidence.json","portable-release-evidence.json.sig","release-source-snapshot.json","release-invocation.json","release-cargo-input.json","release-packaging-input.json","release-result-audit.json"):
-        if not (root/name).is_file(): raise SystemExit("missing portable member: "+name)
-    with open(os.environ["HARNESS_AUDIT_LOG"],"a",encoding="utf-8") as log: log.write("portable-verify=published\n")
+# This lifecycle model uses a synthetic Cargo input snapshot above. Retain its
+# exact descriptor with the real source/invocation/result projections here;
+# test_source_closure.sh exercises the production retain/audit implementation
+# against actual signed receipts and destroyed private authorities.
+cat > "$LIVE_REPO/DCENT_OS_Antminer/scripts/release_producer_evidence.py" <<'PY'
+import argparse, pathlib, shutil
+import release_invocation, release_result_stage
+p = argparse.ArgumentParser()
+p.add_argument("command", choices=["retain-live"])
+for name in ("repo-root", "source-commit", "source-snapshot", "release-invocation",
+             "cargo-input-snapshot", "result-stage", "artifact-dir"):
+    p.add_argument("--" + name, required=True)
+a = p.parse_args()
+directory = pathlib.Path(a.artifact_dir)
+invocation = release_invocation.verify_invocation(pathlib.Path(a.release_invocation))
+result = release_result_stage.verify_result_stage(pathlib.Path(a.result_stage), pathlib.Path(a.release_invocation))
+assert result.descriptor["state"] == "sealed"
+shutil.copyfile(a.source_snapshot, directory / "release-source-snapshot.json")
+shutil.copyfile(a.cargo_input_snapshot, directory / "release-cargo-input.json")
+(directory / "release-invocation.json").write_bytes(release_invocation.canonical_bytes(invocation.descriptor))
+(directory / "release-result-audit.json").write_bytes(release_result_stage.canonical_bytes(release_result_stage.audit_projection(result)))
 PY
+
+# These copies supply the real registry/version readers inside the authenticated
+# source snapshot. The hardware engine itself is never built or run here.
+mkdir -p "$LIVE_REPO/DCENT_OS_Antminer/dcentrald/dcentrald-common/src"
+cp "$SCRIPT_DIR/../dcentrald/dcentrald-common/src/board_desc.rs" \
+    "$LIVE_REPO/DCENT_OS_Antminer/dcentrald/dcentrald-common/src/board_desc.rs"
+printf '[workspace.package]\nversion = "1.2.3"\n' > "$LIVE_REPO/DCENT_OS_Antminer/dcentrald/Cargo.toml"
+# Real package verification imports this production read-only decoder from the
+# authenticated repository snapshot, exactly as a real release does.
+TOOLBOX_SOURCE="$SCRIPT_DIR/../../dcent-toolbox/src/dcent_toolbox"
+TOOLBOX_FIXTURE="$LIVE_REPO/projects/dcent-toolbox/src/dcent_toolbox"
+mkdir -p "$TOOLBOX_FIXTURE/core"
+cp "$TOOLBOX_SOURCE/__init__.py" "$TOOLBOX_FIXTURE/__init__.py"
+cp "$TOOLBOX_SOURCE/core/__init__.py" "$TOOLBOX_FIXTURE/core/__init__.py"
+cp "$TOOLBOX_SOURCE/core/squashfs_files.py" "$TOOLBOX_FIXTURE/core/squashfs_files.py"
 
 cat > "$LIVE_REPO/DCENT_OS_Antminer/scripts/build-dcentrald.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 script_dir="$(cd "$(dirname "$0")" && pwd)"
+printf 'compile=%s\n' "$1" >> "$HARNESS_AUDIT_LOG"
 case "$DCENT_RELEASE_SIGNING_KEY" in
   "$HARNESS_OUTPUT_ROOT"/.dcent-release-capsules/signing-authorities/*/private-key.pem) ;;
   *) echo 'Cargo signer did not receive the private authority snapshot' >&2; exit 1;;
@@ -219,9 +227,6 @@ tree="$(printf '%s\n' "$verified" | python3 "$script_dir/source_snapshot.py" que
 [ "$project_dir" = "$tree/DCENT_OS_Antminer" ]
 [ "$(cat "$project_dir/source-marker.txt")" = snapshot-A ]
 [ "$(cat "$HARNESS_LIVE_ROOT/DCENT_OS_Antminer/source-marker.txt")" = mutated-live-B ]
-if find "$HARNESS_OUTPUT_ROOT/releases" -mindepth 1 -print -quit | grep -q .; then
-    echo 'public release existed before promotion' >&2; exit 1
-fi
 invocation="$(python3 "$script_dir/release_invocation.py" query --field invocation_id "$DCENT_CAPSULE_INVOCATION_STAGE")"
 volume="$(python3 "$script_dir/release_invocation.py" query --field buildroot_volume "$DCENT_CAPSULE_INVOCATION_STAGE")"
 tag="$(python3 "$script_dir/release_docker_resources.py" query-builder-tag "$DCENT_CAPSULE_INVOCATION_STAGE")"
@@ -238,12 +243,21 @@ printf 'source=%s\nlive=%s\nvolume=%s\ntag=%s\nimage=%s\nprivate=%s\n' \
     "$(cat "$project_dir/source-marker.txt")" \
     "$(cat "$HARNESS_LIVE_ROOT/DCENT_OS_Antminer/source-marker.txt")" \
     "$volume" "$tag" "$image_id" "$output" >> "$HARNESS_AUDIT_LOG"
-python3 "$script_dir/release_publication.py" stdin --output "$output/dcentos-sysupgrade-118.tar" \
-    <<< 'private firmware bytes from snapshot A' >/dev/null
+primary="$(python3 "$script_dir/release_producer.py" query "$DCENT_RELEASE_PRODUCER" primary_artifact)"
+case "$DCENT_RELEASE_PRODUCER" in
+    s9) artifact=$HARNESS_ARTIFACT ;;
+    am2-s19jpro) artifact=$HARNESS_AM2_ARTIFACT ;;
+    *) echo 'unexpected fixture producer' >&2; exit 1 ;;
+esac
+printf 'producer=%s\n' "$DCENT_RELEASE_PRODUCER" >> "$HARNESS_AUDIT_LOG"
+for suffix in '' .sig .runtime-image.json .runtime-image.sig; do
+    cp "$artifact$suffix" "$output/$primary$suffix"
+done
+printf 'SD/installer policy remains independent. https://d-central.tech/fund/\n' > "$output/TESTER_README.txt"
 printf '{"schema":"harness-packaging-input.v1"}\n' > "$output/release-packaging-input.json"
 printf '{"schema":"harness-source-closure.v1"}\n' > \
-    "$output/dcentos-sysupgrade-118.tar.source-closure.json"
-head -c 64 /dev/zero > "$output/dcentos-sysupgrade-118.tar.source-closure.json.sig"
+    "$output/$primary.source-closure.json"
+head -c 64 /dev/zero > "$output/$primary.source-closure.json.sig"
 if [ "${HARNESS_FAIL_AFTER_PRIVATE:-0}" = 1 ]; then exit 91; fi
 if [ -n "${HARNESS_SIGNAL_READY:-}" ]; then
     # Docker resources are already disposed in the real driver before control
@@ -291,13 +305,28 @@ git -C "$LIVE_REPO" init -q
 git -C "$LIVE_REPO" config user.email test@example.invalid
 git -C "$LIVE_REPO" config user.name 'Capsule Harness'
 git -C "$LIVE_REPO" add .
+mkdir -p "$LIVE_REPO/public-releases/unrelated"
+git -C "$LIVE_REPO" update-index --add --cacheinfo 160000 \
+    abababababababababababababababababababab public-releases/unrelated
 git -C "$LIVE_REPO" commit -qm 'snapshot A'
 printf 'mutated-live-B\n' > "$LIVE_REPO/DCENT_OS_Antminer/source-marker.txt"
 
 SIGNING_KEY="$TMPDIR_TEST/signing.pem"; PUBLIC_KEY="$TMPDIR_TEST/public.pem"
 OTHER_KEY="$TMPDIR_TEST/other.pem"; OTHER_PUBLIC_KEY="$TMPDIR_TEST/other-public.pem"
-openssl genpkey -algorithm ED25519 -out "$SIGNING_KEY" >/dev/null 2>&1
-openssl pkey -in "$SIGNING_KEY" -pubout -out "$PUBLIC_KEY" >/dev/null 2>&1
+# Only this fixture compiles; package/signature verification below is production.
+python3 - "$SCRIPT_DIR" "$TMPDIR_TEST/package-fixture" <<'PYFIXTURE'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from test_release_runtime_exports import package_fixture
+base = package_fixture(Path(sys.argv[2]))
+package_fixture(Path(sys.argv[2]) / "am2", board="am2-s19j", key=base["key"], pubkey=base["pubkey"], daemon=base["daemon"])
+PYFIXTURE
+cp "$TMPDIR_TEST/package-fixture/elf/test-key.pem" "$SIGNING_KEY"
+cp "$TMPDIR_TEST/package-fixture/elf/test-pub.pem" "$PUBLIC_KEY"
+HARNESS_ARTIFACT="$TMPDIR_TEST/package-fixture/dcentos-sysupgrade-118.tar"
+HARNESS_AM2_ARTIFACT="$TMPDIR_TEST/package-fixture/am2/dcentos-sysupgrade-am2-s19jpro.tar"
+COHORT_EXTRA_ARGS=()
 openssl genpkey -algorithm ED25519 -out "$OTHER_KEY" >/dev/null 2>&1
 openssl pkey -in "$OTHER_KEY" -pubout -out "$OTHER_PUBLIC_KEY" >/dev/null 2>&1
 EXPECTED_PRIVATE_KEY="$(cat "$SIGNING_KEY")"
@@ -314,11 +343,13 @@ run_capsule_raw() {
         HARNESS_ORIGINAL_PRIVATE_KEY="$SIGNING_KEY" HARNESS_ORIGINAL_PUBLIC_KEY="$PUBLIC_KEY" \
         HARNESS_OTHER_PRIVATE_KEY="$OTHER_KEY" HARNESS_OTHER_PUBLIC_KEY="$OTHER_PUBLIC_KEY" \
         HARNESS_EXPECTED_PRIVATE_KEY="$EXPECTED_PRIVATE_KEY" HARNESS_EXPECTED_PUBLIC_KEY="$EXPECTED_PUBLIC_KEY" \
+        HARNESS_ARTIFACT="$HARNESS_ARTIFACT" HARNESS_AM2_ARTIFACT="$HARNESS_AM2_ARTIFACT" \
         DCENT_RELEASE_SIGNING_KEY="$SIGNING_KEY" DCENT_RELEASE_PUBKEY_FILE="$PUBLIC_KEY" \
+        DCENT_REQUIRE_RELEASE_KEY=1 \
         DCENT_MANIFEST_PUBLIC_KEY_HEX="$MANIFEST_PUBLIC_KEY_HEX" \
         DCENT_RUST_BUILDER_BASE="rust-test@sha256:$(printf 'b%.0s' {1..64})" \
         DCENT_TOOLCHAIN_SHA256_VERIFIED=1 "$@" \
-        "$LIVE_REPO/DCENT_OS_Antminer/scripts/build_s9_release_capsule.sh" --output-root "$OUTPUT_ROOT"
+        "$LIVE_REPO/DCENT_OS_Antminer/scripts/build_release_capsule.sh" --producer s9 "${COHORT_EXTRA_ARGS[@]}" --output-root "$OUTPUT_ROOT" --result-json "$OUTPUT_ROOT/cohort-result.json"
 }
 run_capsule() {
     set +e
@@ -382,27 +413,18 @@ test ! -d "$OUTPUT_ROOT/.dcent-release-capsules" \
     || test -z "$(find "$OUTPUT_ROOT/.dcent-release-capsules" -name 'result-stage-*.result.json' -print -quit)"
 PUBLISHED="$(find "$OUTPUT_ROOT/releases" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 test -n "$PUBLISHED"
-test "$(cat "$PUBLISHED/dcentos-sysupgrade-118.tar")" = 'private firmware bytes from snapshot A'
-test -f "$PUBLISHED/release-source-snapshot.json"
-test -f "$PUBLISHED/release-invocation.json"
-test -f "$PUBLISHED/release-cargo-input.json"
-test -f "$PUBLISHED/release-packaging-input.json"
-test -f "$PUBLISHED/release-result-audit.json"
-test -f "$PUBLISHED/portable-release-evidence.json"
-test -f "$PUBLISHED/portable-release-evidence.json.sig"
-# These portable descriptor copies are evidence, not the capability-owned live
-# authorities accepted by the admission verifier. Pin that distinction so the
-# release path cannot silently advertise post-cleanup independent verification.
-if python3 "$SCRIPT_DIR/source_snapshot.py" verify "$PUBLISHED/release-source-snapshot.json" \
-    > "$TMPDIR_TEST/portable-source.out" 2>&1; then
-    echo 'portable source descriptor unexpectedly acted as a live snapshot authority' >&2; exit 1
-fi
-grep -Eq 'owned|descriptor' "$TMPDIR_TEST/portable-source.out"
-grep -Fq 'explicit post-cleanup portable-audit verifier' "$SCRIPT_DIR/source_closure.py"
+cmp "$PUBLISHED/dcentos-sysupgrade-118.tar" "$HARNESS_ARTIFACT"
+test -f "$PUBLISHED/producer-result.json"
+test -f "$PUBLISHED/producer-result.json.sig"
+python3 - "$SCRIPT_DIR" "$OUTPUT_ROOT/cohort-result.json" "$OUTPUT_ROOT" "$PUBLIC_KEY" <<'PYVERIFY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from release_producer import load_result, verify_cohort
+value = load_result(Path(sys.argv[2]))
+verify_cohort(value, Path(sys.argv[3]), ["s9"], value["source_commit"], "1.2.3", "beta", Path(sys.argv[4]))
+PYVERIFY
 test ! -e "$PUBLISHED/knowledge-base/extractions/s9/kernel.bin"
-grep -q '^portable-create=private$' "$AUDIT_LOG"
-grep -q '^portable-verify=stage$' "$AUDIT_LOG"
-grep -q '^portable-verify=published$' "$AUDIT_LOG"
 grep -q '^signing-private=.*/.dcent-release-capsules/signing-authorities/.*/private-key.pem$' "$AUDIT_LOG"
 grep -q '^signing-public=.*/.dcent-release-capsules/signing-authorities/.*/public-key.pem$' "$AUDIT_LOG"
 grep -q '^original-keys-rotated=yes$' "$AUDIT_LOG"
@@ -414,19 +436,40 @@ grep -q '^image=sha256:777777777777777777777777777777777777777777777777777777777
 grep -q '/src:ro' "$DOCKER_LOG"
 ! grep -q 'dcentos-build-work' "$DOCKER_LOG"
 openssl pkeyutl -verify -rawin -pubin -inkey "$PUBLIC_KEY" \
-    -in "$PUBLISHED/portable-release-evidence.json" \
-    -sigfile "$PUBLISHED/portable-release-evidence.json.sig" >/dev/null
+    -in "$PUBLISHED/producer-result.json" \
+    -sigfile "$PUBLISHED/producer-result.json.sig" >/dev/null
 test ! -d "$OUTPUT_ROOT/.dcent-release-capsules/signing-authorities" \
     || test -z "$(find "$OUTPUT_ROOT/.dcent-release-capsules/signing-authorities" -name private-key.pem -print -quit)"
 FIRST_SHA="$(sha256sum "$PUBLISHED/dcentos-sysupgrade-118.tar" | awk '{print $1}')"
 
-# Same-name publication is no-replace. A second complete invocation fails and
+# Same-name publication is no-replace. A fresh result destination still fails and
 # cannot modify or delete the already authoritative release set.
+rm "$OUTPUT_ROOT/cohort-result.json"
 if run_capsule > "$TMPDIR_TEST/collision.out" 2>&1; then
     echo 'same-name release collision unexpectedly succeeded' >&2; exit 1
 fi
 test "$(sha256sum "$PUBLISHED/dcentos-sysupgrade-118.tar" | awk '{print $1}')" = "$FIRST_SHA"
 test "$(find "$OUTPUT_ROOT/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1
+
+# Two real signed packages share one sealed Cargo result, with distinct private
+# stages. Verification requires both exact selected producer identities.
+OUTPUT_ROOT="$TMPDIR_TEST/cohort-output"
+COHORT_EXTRA_ARGS=(--producer am2-s19jpro)
+: > "$AUDIT_LOG"
+run_capsule > "$TMPDIR_TEST/cohort.out"
+test "$(grep -c '^compile=zynq$' "$AUDIT_LOG")" -eq 1
+test "$(grep -c '^producer=' "$AUDIT_LOG")" -eq 2
+test "$(grep '^private=' "$AUDIT_LOG" | sort -u | wc -l)" -eq 2
+python3 - "$SCRIPT_DIR" "$OUTPUT_ROOT/cohort-result.json" "$OUTPUT_ROOT" "$PUBLIC_KEY" <<'PYCOHORT'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from release_producer import load_result, verify_cohort
+value = load_result(Path(sys.argv[2]))
+verify_cohort(value, Path(sys.argv[3]), ["s9", "am2-s19jpro"], value["source_commit"], "1.2.3", "beta", Path(sys.argv[4]))
+assert len({record["files"]["primary"]["path"].rsplit("/", 1)[0] for record in value["results"]}) == 2
+PYCOHORT
+test -z "$(find "$FAKE_STATE/volumes" -mindepth 1 -print -quit)"
 
 # Invocation/result descriptor swapping is rejected by the production helper.
 CONTROL="$TMPDIR_TEST/swap-control"; mkdir -p "$CONTROL"
@@ -443,4 +486,4 @@ if python3 "$SCRIPT_DIR/release_result_stage.py" verify --invocation-stage "$s2"
 fi
 grep -Eq 'invocation|different|bound' "$TMPDIR_TEST/swap.out"
 
-echo 'S9 release capsule driver fake-Docker tests passed'
+echo 'Generic release capsule lifecycle and real signed-package tests passed'

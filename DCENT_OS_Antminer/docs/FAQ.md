@@ -2,10 +2,12 @@
 
 ## Is DCENT_OS really free, with no developer fee?
 
-Yes. DCENT_OS has **no mandatory fee and no license server**. There is an *optional* donation
-(default ~2%, adjustable from 0% to 5%, and fully disableable) that is always visible on the
-dashboard when active. D-Central makes its living repairing and selling mining hardware — not by
-skimming your hashrate. Zero donation is a completely valid setting.
+Yes. DCENT_OS ships with **0% donation by default — no mandatory fee, ever, and no license
+server**. Nothing is taken from your hashrate unless you explicitly opt in. The *optional*
+donation (off by default; opt in at 1-5% if you want to fund development) is always visible on
+the dashboard when active and is one tap off. D-Central makes its living repairing and selling
+mining hardware — not by skimming your hashrate. Prefer not to touch hashrate at all?
+[Support the project directly](https://d-central.tech/fund/).
 
 ## How is DCENT_OS different from Braiins OS+, LuxOS, and VNish?
 

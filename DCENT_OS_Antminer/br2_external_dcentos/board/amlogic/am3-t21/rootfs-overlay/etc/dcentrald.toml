@@ -2,10 +2,16 @@
 # D-Central Technologies — Phase 4B scaffold (2026-05-15)
 #
 # This is a disabled Amlogic T21 packaging scaffold. Held stock firmware proves
-# Amlogic, Zynq7007, and CV controller variants for the BHB6870X family. Held
-# VNish/ePIC desk registries consistently describe BM1368 T21 hashboards as
-# three 108-chip chains; controller-specific PIC, PSU, and reset topology is
-# still unresolved.
+# Amlogic, Zynq7007, and CV controller variants for the BHB6870X family.
+#
+# Stock-contract reconciliation (Gauntlet B9, 2026-09-02): Bitmain's own
+# t21-merge-20240926 image (BMU sha256 f9dcf13a...) settles the hashboard
+# contracts first-party: BM1368, three 108-chip chains (12 domains x 9,
+# interval 2), PSU APW11A @ I2C 0x10 gpio 907, per-chain voltage-MCU label
+# PIC1704 @ 0x20 + AT24C02D EEPROM @ 0x50, four fans. Pinned in
+# dcentrald-silicon-profiles/src/t21_stock_topol.rs (every datum cited).
+# The AML control-board record in the same image is SEALED (code-9 ANDROID),
+# so Amlogic-side GPIO/storage/cold-init contracts remain unresolved.
 #
 # Platform identity:
 #   /etc/dcentos-platform           = am3-aml-t21
@@ -26,8 +32,13 @@ log_level = "info"
 [mining]
 enabled = false
 # These are schema-valid desk-evidence hints, not release-authoritative
-# geometry. BHB68701/BHB68703 records agree on 108 chips per chain, but runtime
-# admission remains management-only pending raw constructor or live proof.
+# geometry. The stock topol (BHB68701/03/05, byte-identical except names)
+# settles 108 chips per chain first-party (t21_stock_topol). Stock levels
+# ladder for reference: 600 MHz / 350 MHz (opaque voltage tokens 1550/1300
+# — unit NOT established; 525/13550 below are inert scaffold hints, not
+# stock values). Runtime admission stays management-only pending a live
+# unit; the native-serial resolver still refuses t21 (controller
+# contradiction flagged, not adjudicated).
 serial_chip_type = "BM1368"
 serial_chip_count = 108
 frequency_mhz = 525
@@ -54,9 +65,14 @@ fan_max_pwm = 30
 fan_min_pwm = 10
 
 [psu]
-# Inactive S21-derived placeholder. VNish separately reports via-PIC voltage
-# control and APW171215a/APW380 with PSU-v2; their exact binding is unresolved.
-model = "APW12"
+# Inactive while mining is disabled. PSU identity CORRECTED on stock evidence
+# (B9, 2026-09-02): the T21 stock topol states APW11A @ I2C 0x10 gpio 907
+# (version keys 66/67/106/113/114/115/117/118/119/120/193; stock probes the
+# PSU version then falls back to a v2 protocol) — the earlier APW12 label
+# was an S21-derived placeholder, flagged as a conflict in the B9 dossier.
+# No APW11A rail-law constant is extracted (K1/K2 class): bench/Ghidra
+# follow-up; this section authorizes nothing.
+model = "APW11A"
 power_target_w = 1500
 power_step_w = 300
 hashrate_target_ths = 60.0
@@ -68,12 +84,17 @@ target_watts = 1500
 
 [power.psu_override]
 enabled = false
-model = "APW12"
+# Same stock correction as [psu]: APW11A per the t21-merge topol. Override
+# stays disabled and authorizes nothing.
+model = "APW11A"
 voltage_v = 14.0
 
 [hashboard]
-# No parser family is claimed. Held T21 board identities are BHB68701/BHB68703;
-# exact EEPROM and PIC routing remain unresolved, and mining stays disabled.
+# No parser family is claimed. T21 board identities: BHB68701/03/05 (one
+# contract family — stock records byte-identical except names). Stock pins
+# the hashboard-side map (PIC1704 label @ 0x20, AT24C02D EEPROM @ 0x50,
+# LM75A @ 0x48-0x4B) but a label is not a populated-part proof and the AML
+# control board is sealed; mining stays disabled.
 eeprom_parser = "auto"
 
 [api]
@@ -89,9 +110,11 @@ cgminer_lan_writes = false
 metrics_require_auth = true
 
 [donation]
-# Voluntary 2% donation supports open-source firmware development.
-enabled = true
-percent = 2.0
+# DCENT_OS ships with ZERO mandatory fee. Optional transparent donation:
+# set enabled = true and percent 1-5 (time-sliced, always visible, one tap
+# off). Fund development: https://d-central.tech/fund/
+enabled = false
+percent = 0.0
 pool_url = "stratum+tcp://pool.d-central.tech:3333"
 worker = "DungeonMaster"
 password = "x"
@@ -120,7 +143,15 @@ enabled = true
 active = "home"
 
 [autotuner]
-enabled = false
+# Autotune is ON by default (operator decision 2026-09-01). Safety contract:
+# the tuner REFUSES to tune blind - every frequency/voltage step validates
+# against the variant BoardDesc cut-ladder + published envelope BEFORE
+# execution; variants with unknown/missing envelope datums surface
+# NOT TUNABLE instead of tuning. First boot parks at the safe-stock
+# profile until health + fans + temp-in-envelope (+ ExperimentalOptIn
+# operator ack) pass. Voltage autotune on am2 stays behind the
+# DCENT_AM2_VOLTAGE_AUTOTUNE live-safety fence.
+enabled = true
 min_freq_mhz = 200
 max_freq_mhz = 500
 

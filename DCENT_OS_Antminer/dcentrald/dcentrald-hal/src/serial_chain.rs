@@ -37,11 +37,16 @@
 //!
 //! The response length is chip-dependent and must be set via `set_response_len()`.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use crate::serial::{pl_uart_assert_mcr_out2, pl_uart_diag_registers, DevmemUart, SerialChain};
 use crate::{HalError, Result};
+
+#[path = "serial_chain_tx_observation.rs"]
+mod tx_observation;
 
 // ---------------------------------------------------------------------------
 // UART backend abstraction — file-based (/dev/ttyS*) or devmem (/dev/mem)
@@ -102,6 +107,13 @@ impl UartBackend {
                 d.flush_io();
                 Ok(())
             }
+        }
+    }
+
+    fn flush_rx(&mut self) -> Result<()> {
+        match self {
+            UartBackend::File(serial) => serial.flush_rx(),
+            UartBackend::Devmem(serial) => serial.flush_rx(),
         }
     }
 
@@ -282,6 +294,8 @@ struct RxBuffer {
     len: usize,
     /// Complete BM1366 candidates rejected since construction.
     crc_rejected: u64,
+    /// Complete nonce bodies retained by an owner register conversation.
+    retained: VecDeque<Vec<u8>>,
 }
 
 impl RxBuffer {
@@ -290,6 +304,7 @@ impl RxBuffer {
             buf: vec![0u8; 1024],
             len: 0,
             crc_rejected: 0,
+            retained: VecDeque::new(),
         }
     }
 
@@ -312,6 +327,11 @@ impl RxBuffer {
     ///
     /// Returns the number of body bytes extracted, or 0 if no complete frame.
     fn try_extract_frame(&mut self, body_len: usize, out: &mut [u8]) -> usize {
+        if let Some(body) = self.retained.pop_front() {
+            let count = body.len().min(out.len());
+            out[..count].copy_from_slice(&body[..count]);
+            return count;
+        }
         let frame_len = 2 + body_len; // preamble + body
 
         // Scan for preamble
@@ -363,18 +383,225 @@ impl RxBuffer {
     /// Discard all buffered data.
     fn clear(&mut self) {
         self.len = 0;
+        self.retained.clear();
     }
 }
 
+/// Exclusive, nonblocking I/O borrowed from the already admitted serial owner.
+/// No transport is opened, cloned, or shared. All phases use one absolute
+/// deadline, including TX and stale-RX draining. Kernel flags and interleaved
+/// nonce bodies are restored even when the conversation returns an error.
+pub struct BoundedSerialResponseIo<'a> {
+    backend: &'a mut UartBackend,
+    rx: &'a mut RxBuffer,
+    body_len: usize,
+    deadline: Instant,
+    cancelled: &'a dyn Fn() -> bool,
+    original_flags: Option<i32>,
+    retained: Vec<Vec<u8>>,
+    wire_bytes: &'a AtomicU64,
+}
+
+impl BoundedSerialResponseIo<'_> {
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
+    pub fn is_cancelled(&self) -> bool {
+        (self.cancelled)()
+    }
+    pub fn response_body_len(&self) -> usize {
+        self.body_len
+    }
+
+    pub fn check_budget(&self) -> Result<()> {
+        if self.is_cancelled() {
+            return Err(HalError::Platform("register conversation cancelled".into()));
+        }
+        if Instant::now() >= self.deadline {
+            return Err(HalError::Platform(
+                "register conversation deadline expired".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Command frame only; no flush/tcdrain whose wait escapes the deadline.
+    pub fn send_command(&mut self, body: &[u8]) -> Result<()> {
+        if !matches!(
+            body,
+            [0x42, 0x05, _, _] | [0x41 | 0x51, 0x09, _, _, _, _, _, _]
+        ) {
+            return Err(HalError::Platform(
+                "bounded owner conversation only accepts BM1397+ register commands".into(),
+            ));
+        }
+        let mut frame = Vec::with_capacity(body.len() + 3);
+        frame.extend_from_slice(&CMD_PREAMBLE);
+        frame.extend_from_slice(body);
+        frame.push(crc5(body));
+        let mut sent = 0;
+        while sent < frame.len() {
+            self.check_budget()?;
+            let count = match self.backend {
+                UartBackend::File(serial) => serial.try_write_bounded(&frame[sent..])?,
+                UartBackend::Devmem(serial) => serial.try_write_bounded(&frame[sent..])?,
+            };
+            sent += count;
+            if count == 0 {
+                std::thread::yield_now();
+            }
+        }
+        self.check_budget()
+    }
+
+    /// Bounded replacement for tcdrain / spin-count waits before changing baud.
+    pub fn drain_tx(&mut self) -> Result<()> {
+        loop {
+            self.check_budget()?;
+            let empty = match self.backend {
+                UartBackend::File(serial) => serial.bounded_tx_empty()?,
+                UartBackend::Devmem(serial) => serial.bounded_tx_empty(),
+            };
+            if empty {
+                return self.check_budget();
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    /// One nonblocking parser step, with no independent timeout or mutex wait.
+    pub fn poll_response(&mut self) -> Result<Option<Vec<u8>>> {
+        self.check_budget()?;
+        let mut body = vec![0; self.body_len];
+        let mut count = self.rx.try_extract_frame(self.body_len, &mut body);
+        if count == 0 {
+            let mut bytes = [0; 256];
+            let received = self.backend.read_bytes(&mut bytes)?;
+            self.wire_bytes
+                .fetch_add(received as u64, Ordering::Relaxed);
+            self.rx.push(&bytes[..received]);
+            count = self.rx.try_extract_frame(self.body_len, &mut body);
+        }
+        if let Err(error) = self.check_budget() {
+            if count != 0 {
+                self.retained.push(body[..count].to_vec());
+            }
+            return Err(error);
+        }
+        Ok((count != 0).then(|| body[..count].to_vec()))
+    }
+
+    pub fn retain_nonce(&mut self, body: Vec<u8>) -> Result<()> {
+        // Stop admission before the queue can grow without bound. Previously
+        // retained shares survive this error and re-enter the normal RX path.
+        if body.len() != self.body_len {
+            return Err(HalError::Platform(
+                "retained nonce has wrong response layout".into(),
+            ));
+        }
+        self.retained.push(body);
+        if self.retained.len() > 256 {
+            return Err(HalError::Platform(
+                "register conversation nonce retention full".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn restore_flags(&mut self) -> Result<()> {
+        if let (Some(flags), UartBackend::File(serial)) = (self.original_flags, &mut self.backend) {
+            serial.restore_io_flags(flags)?;
+            self.original_flags = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for BoundedSerialResponseIo<'_> {
+    fn drop(&mut self) {
+        for body in self.retained.drain(..).rev() {
+            self.rx.retained.push_front(body);
+        }
+        if let Err(error) = self.restore_flags() {
+            tracing::error!(%error, "failed to restore owner serial flags after register conversation");
+        }
+    }
+}
+
+/// Captured transport selection after any lab-only IRQ handoff completes.
+/// This parameter selects an adapter; it does not authorize hardware access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SerialBackendPreference {
+    #[default]
+    PlatformDefault,
+    PreferKernel,
+}
+
 impl SerialChainBackend {
+    pub fn with_bounded_response_io<T>(
+        &mut self,
+        deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
+        conversation: impl FnOnce(&mut BoundedSerialResponseIo<'_>) -> Result<T>,
+    ) -> Result<T> {
+        if cancelled() || Instant::now() >= deadline {
+            return Err(HalError::Platform(
+                "register conversation cancelled or expired before admission".into(),
+            ));
+        }
+        let body_len = self.resp_body_len.load(Ordering::Relaxed);
+        if !matches!(body_len, 7 | 9) {
+            return Err(HalError::Platform(
+                "register conversation refuses unsupported response format (including BM1387)"
+                    .into(),
+            ));
+        }
+        // Exclusive &mut self gives direct access, never waiting on an owner
+        // mutex while a clock budget silently expires.
+        let backend = self
+            .serial
+            .get_mut()
+            .map_err(|_| HalError::Platform("serial owner poisoned".into()))?;
+        let rx = self
+            .rx_buf
+            .get_mut()
+            .map_err(|_| HalError::Platform("serial RX owner poisoned".into()))?;
+        let original_flags = match backend {
+            UartBackend::File(serial) => Some(serial.begin_bounded_io()?),
+            UartBackend::Devmem(_) => None,
+        };
+        let mut io = BoundedSerialResponseIo {
+            backend,
+            rx,
+            body_len,
+            deadline,
+            cancelled,
+            original_flags,
+            retained: Vec::new(),
+            wire_bytes: &self.rx_wire_bytes,
+        };
+        let result = conversation(&mut io);
+        io.restore_flags()?;
+        result
+    }
+
     /// Open a serial chain backend on the given device path.
     ///
     /// `chain_id` is used for logging and error context.
     /// `baud` is the initial baud rate (typically 115200 for enumeration).
     pub fn open(chain_id: u8, device: &str, baud: u32) -> Result<Self> {
+        Self::open_with_preference(chain_id, device, baud, SerialBackendPreference::PlatformDefault)
+    }
+
+    pub fn open_with_preference(
+        chain_id: u8,
+        device: &str,
+        baud: u32,
+        preference: SerialBackendPreference,
+    ) -> Result<Self> {
         // PL UARTs on Zynq (/dev/ttyS1-4) have broken kernel IRQ handling.
         // Always use devmem for these. File-based for everything else.
-        let (backend, selection) = if Self::needs_devmem(device) {
+        let (backend, selection) = if preference != SerialBackendPreference::PreferKernel && Self::needs_devmem(device) {
             // On am2 we want the direct-register UART path without tearing down
             // the kernel tty binding. The dedicated no-unbind path exists for
             // this board family because unbinding can perturb adjacent system
@@ -398,6 +625,29 @@ impl SerialChainBackend {
         };
         Self::log_open_diagnostics(chain_id, device, baud, "normal", selection, &backend);
 
+        Ok(Self {
+            serial: Mutex::new(backend),
+            chain_id,
+            resp_body_len: AtomicUsize::new(DEFAULT_RESP_BODY_LEN),
+            rx_buf: Mutex::new(RxBuffer::new()),
+            rx_unframed_log_budget: AtomicU32::new(8),
+            rx_timeout_log_budget: AtomicU32::new(8),
+            rx_wire_bytes: AtomicU64::new(0),
+            rx_framed_responses: AtomicU64::new(0),
+        })
+    }
+
+    /// Open an exclusively held Linux UART without a platform fallback.
+    ///
+    /// Exact native routes whose admission already binds their Linux device
+    /// path use this factory. A failed open must not acquire an AM2 /dev/mem
+    /// UART through the generic compatibility factory. SerialChain retains
+    /// the file and its TIOCEXCL claim for the complete backend lifetime.
+    pub fn open_native_linux_only(chain_id: u8, device: &str, baud: u32) -> Result<Self> {
+        let backend = UartBackend::File(SerialChain::open(device, baud)?);
+        // Generic diagnostics may inspect AM2 PL registers through /dev/mem.
+        // This exact Linux factory has no authority for those observations.
+        tracing::info!(chain_id, device, baud, "Exclusive native Linux UART opened");
         Ok(Self {
             serial: Mutex::new(backend),
             chain_id,
@@ -452,7 +702,15 @@ impl SerialChainBackend {
 
     /// Open in passthrough mode — preserve existing baud rate from previous firmware.
     pub fn open_passthrough(chain_id: u8, device: &str) -> Result<Self> {
-        let (backend, selection) = if Self::needs_devmem(device) {
+        Self::open_passthrough_with_preference(chain_id, device, SerialBackendPreference::PlatformDefault)
+    }
+
+    pub fn open_passthrough_with_preference(
+        chain_id: u8,
+        device: &str,
+        preference: SerialBackendPreference,
+    ) -> Result<Self> {
+        let (backend, selection) = if preference != SerialBackendPreference::PreferKernel && Self::needs_devmem(device) {
             // On am2 passthrough, preserve inherited UART state instead of
             // resetting FIFOs / rewriting baud during attach.
             let devmem = DevmemUart::open_preserve_state(device, crate::serial::BAUD_3125000)?;
@@ -525,7 +783,7 @@ impl SerialChainBackend {
         // Diagnostic escape hatch: stock bosminer on .139 uses the kernel ttyS
         // path, so allow a one-shot kernel-backed experiment without changing
         // the default am2 behavior for every caller.
-        if std::env::var_os("DCENT_PREFER_KERNEL_UART").is_some() {
+        if dcentrald_common::lab_env::var_os("DCENT_PREFER_KERNEL_UART").is_some() {
             return false;
         }
 
@@ -732,6 +990,15 @@ impl SerialChainBackend {
     pub fn flush_io(&self) -> Result<()> {
         let mut backend = self.serial.lock().unwrap();
         backend.flush_io()?;
+        self.rx_buf.lock().unwrap().clear();
+        Ok(())
+    }
+
+    /// Discard stale kernel/MMIO and assembled RX, preserving queued TX.
+    /// Keep the same serial-then-parser lock order as the complete flush.
+    pub fn flush_rx(&self) -> Result<()> {
+        let mut backend = self.serial.lock().unwrap();
+        backend.flush_rx()?;
         self.rx_buf.lock().unwrap().clear();
         Ok(())
     }
@@ -1329,6 +1596,271 @@ mod tests {
         BM139X_RESP_BODY_LEN, DEFAULT_RESP_BODY_LEN,
     };
 
+    fn bounded_owner_pty() -> (SerialChainBackend, std::fs::File, std::fs::File) {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: openpty initializes two valid descriptor outputs; optional
+        // name, termios and winsize pointers are null. Tests contact only a
+        // local pseudo-terminal, never a miner or physical UART.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            },
+            0
+        );
+        // SAFETY: successful openpty returned two new, separately owned fds.
+        let master = unsafe { std::fs::File::from_raw_fd(master) };
+        // SAFETY: this is the other new descriptor, consumed exactly once.
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        let path = format!("/proc/self/fd/{}", slave.as_raw_fd());
+        let serial = SerialChainBackend::open(0, &path, 115200).unwrap();
+        (serial, master, slave)
+    }
+
+    fn owner_file_flags(serial: &SerialChainBackend) -> i32 {
+        let backend = serial.serial.lock().unwrap();
+        let super::UartBackend::File(file) = &*backend else {
+            panic!("PTY must be file backed")
+        };
+        // SAFETY: live descriptor, integer-only F_GETFL operation.
+        unsafe { libc::fcntl(file.raw_fd(), libc::F_GETFL) }
+    }
+
+    #[test]
+    fn native_linux_factory_retains_exclusive_file_and_preserves_open_error() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: local PTY descriptor outputs are valid pointers; optional
+        // name, termios and size are absent. No hardware is contacted.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            },
+            0
+        );
+        // SAFETY: the successful call returned two fresh descriptors, each
+        // adopted exactly once by its File owner.
+        let _master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        let path = format!("/proc/self/fd/{}", slave.as_raw_fd());
+        let serial = SerialChainBackend::open_native_linux_only(2, &path, 115200).unwrap();
+        assert_eq!(serial.chain_id(), 2);
+        let backend = serial.serial.lock().unwrap();
+        let super::UartBackend::File(file) = &*backend else {
+            panic!("native Linux factory selected a non-Linux backend")
+        };
+        let mut exclusive = 0;
+        // SAFETY: TIOCGEXCL writes one integer for this live local PTY fd.
+        assert_eq!(
+            unsafe { libc::ioctl(file.raw_fd(), libc::TIOCGEXCL, &mut exclusive) },
+            0
+        );
+        assert_eq!(exclusive, 1);
+        drop(backend);
+        let absent = format!("/dcent-test-absent-uart-{}", std::process::id());
+        let direct = crate::serial::SerialChain::open(&absent, 115200)
+            .err()
+            .unwrap()
+            .to_string();
+        let native = SerialChainBackend::open_native_linux_only(0, &absent, 115200)
+            .err()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            native, direct,
+            "must preserve Linux failure without AM2 fallback"
+        );
+    }
+
+    #[test]
+    fn fresh_rx_flush_preserves_unread_queued_tx_and_clears_both_rx_layers() {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        use std::time::{Duration, Instant};
+        let (serial, mut master, slave) = bounded_owner_pty();
+        // Seed stale input independently of the parser's already retained body.
+        master
+            .write_all(&[0xaa, 0x55, 1, 2, 3, 4, 5, 6, 7])
+            .unwrap();
+        let mut input = libc::pollfd {
+            fd: slave.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one live local PTY descriptor and one initialized pollfd.
+        assert_eq!(unsafe { libc::poll(&mut input, 1, 1_000) }, 1);
+        serial.rx_buf.lock().unwrap().retained.push_back(vec![9; 7]);
+
+        // Fill TX until actual backpressure while the peer reads nothing.
+        // This makes queued-output preservation observable, without a sleep.
+        let bytes: Vec<u8> = (0..65_536).map(|index| index as u8).collect();
+        let sent = {
+            let mut backend = serial.serial.lock().unwrap();
+            let super::UartBackend::File(file) = &mut *backend else {
+                panic!("PTY must be file backed")
+            };
+            let flags = file.begin_bounded_io().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let mut sent = 0;
+            while sent < bytes.len() {
+                assert!(Instant::now() < deadline);
+                let count = file.try_write_bounded(&bytes[sent..]).unwrap();
+                if count == 0 {
+                    break;
+                }
+                sent += count;
+            }
+            file.restore_io_flags(flags).unwrap();
+            assert!(
+                sent > 0 && sent < bytes.len(),
+                "expected real TX backpressure"
+            );
+            sent
+        };
+        serial.flush_rx().unwrap();
+        assert_eq!(serial.rx_observation().buffered_bytes, 0);
+        assert!(serial.rx_buf.lock().unwrap().retained.is_empty());
+        input.revents = 0;
+        // SAFETY: same owned local descriptor; zero timeout is a read-only poll.
+        assert_eq!(unsafe { libc::poll(&mut input, 1, 0) }, 0);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut observed = vec![0; sent];
+        let mut received = 0;
+        while received < sent {
+            assert!(Instant::now() < deadline, "RX flush discarded committed TX");
+            let mut output = libc::pollfd {
+                fd: master.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one initialized poll descriptor for the owned PTY peer.
+            assert_eq!(unsafe { libc::poll(&mut output, 1, 100) }, 1);
+            received += master.read(&mut observed[received..]).unwrap();
+        }
+        assert_eq!(observed, bytes[..sent]);
+        serial.send_get_address_bm1397plus().unwrap();
+        let mut query = [0; 7];
+        master.read_exact(&mut query).unwrap();
+        assert_eq!(&query[..6], &[0x55, 0xaa, 0x52, 5, 0, 0]);
+    }
+
+    #[test]
+    fn bounded_register_owner_restores_flags_and_retains_nonces_on_error_and_unwind() {
+        use std::time::{Duration, Instant};
+        let (mut serial, _master, _slave) = bounded_owner_pty();
+        let flags = owner_file_flags(&serial);
+        let result: crate::Result<()> = serial.with_bounded_response_io(
+            Instant::now() + Duration::from_secs(1),
+            &|| false,
+            |io| {
+                io.retain_nonce(vec![1; 7])?;
+                io.retain_nonce(vec![2; 7])?;
+                Err(crate::HalError::Platform("injected failure".into()))
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(owner_file_flags(&serial), flags);
+        assert_eq!(serial.read_response_timeout(0).unwrap(), Some(vec![1; 7]));
+        assert_eq!(serial.read_response_timeout(0).unwrap(), Some(vec![2; 7]));
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: crate::Result<()> = serial.with_bounded_response_io(
+                Instant::now() + Duration::from_secs(1),
+                &|| false,
+                |io| {
+                    io.retain_nonce(vec![3; 7])?;
+                    panic!("injected owner unwind");
+                },
+            );
+        }));
+        assert!(panic.is_err());
+        assert_eq!(owner_file_flags(&serial), flags);
+        assert_eq!(serial.read_response_timeout(0).unwrap(), Some(vec![3; 7]));
+    }
+
+    #[test]
+    fn bounded_register_owner_stops_unread_pty_tx_at_total_deadline() {
+        use std::time::{Duration, Instant};
+        let (mut serial, _master, _slave) = bounded_owner_pty();
+        let flags = owner_file_flags(&serial);
+        let started = Instant::now();
+        let result: crate::Result<()> =
+            serial.with_bounded_response_io(started + Duration::from_millis(30), &|| false, |io| {
+                // The peer never drains TX. A blocking write_all here would
+                // hang indefinitely once the PTY output queue fills.
+                loop {
+                    io.send_command(&[0x42, 0x05, 0, 8])?;
+                }
+            });
+        assert!(result.unwrap_err().to_string().contains("deadline"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(owner_file_flags(&serial), flags);
+    }
+
+    #[test]
+    fn bounded_register_owner_retention_limit_preserves_terminal_nonce() {
+        use std::time::{Duration, Instant};
+        let (mut serial, _master, _slave) = bounded_owner_pty();
+        let result: crate::Result<()> = serial.with_bounded_response_io(
+            Instant::now() + Duration::from_secs(1),
+            &|| false,
+            |io| {
+                for index in 0..257_u16 {
+                    let mut nonce = vec![0; 7];
+                    nonce[..2].copy_from_slice(&index.to_be_bytes());
+                    io.retain_nonce(nonce)?;
+                }
+                panic!("retention must terminate the conversation at its limit");
+            },
+        );
+        assert!(result.unwrap_err().to_string().contains("retention full"));
+        for index in 0..257_u16 {
+            let body = serial.read_response_timeout(0).unwrap().unwrap();
+            assert_eq!(&body[..2], &index.to_be_bytes());
+        }
+        assert_eq!(serial.read_response_timeout(0).unwrap(), None);
+        serial.set_response_len(super::BM1387_RESP_BODY_LEN);
+        assert!(serial
+            .with_bounded_response_io(Instant::now() + Duration::from_secs(1), &|| false, |_| Ok(
+                ()
+            ))
+            .is_err());
+    }
+
+    #[test]
+    fn bounded_register_owner_cancellation_prevents_following_write() {
+        use std::io::Read;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        let (mut serial, mut master, _slave) = bounded_owner_pty();
+        let stopped = AtomicBool::new(false);
+        let result: crate::Result<()> = serial.with_bounded_response_io(
+            Instant::now() + Duration::from_secs(1),
+            &|| stopped.load(Ordering::Relaxed),
+            |io| {
+                io.send_command(&[0x42, 0x05, 0, 8])?;
+                stopped.store(true, Ordering::Relaxed);
+                io.send_command(&[0x51, 0x09, 0, 0x28, 0x11, 0x30, 0, 0])
+            },
+        );
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        let mut frame = [0; 7];
+        master.read_exact(&mut frame).unwrap();
+        assert_eq!(&frame[..6], &[0x55, 0xaa, 0x42, 0x05, 0, 8]);
+    }
+
     // -----------------------------------------------------------------------
     // RxBuffer::try_extract_frame — the byte-stream frame assembler shared by
     // BOTH gating chips (BM1387 / BM1362 via SerialChainBackend). Ported from
@@ -1790,3 +2322,15 @@ mod tests {
         }
     }
 }
+
+#[path = "serial_chain_raw_io.rs"]
+mod raw_io;
+pub use raw_io::{RawIoStatus, RawReadAttempt, RawWriteAttempt};
+
+pub use crate::serial::tx_observation::{BackendKind, Reading, TxDrainAttempt};
+
+#[path = "serial_chain_baud_transition.rs"]
+mod baud_transition;
+pub use crate::serial::baud_transition::{
+    BaudTransitionAttempt, EnumerationBaudAttempt, NativeBbBaud,
+};

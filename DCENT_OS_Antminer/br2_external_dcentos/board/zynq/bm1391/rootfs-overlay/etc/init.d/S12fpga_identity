@@ -1,0 +1,17 @@
+#!/bin/sh
+# Exact fabric observation precedes source GPIO parking and ordinary services.
+set -eu
+case "${1:-}" in
+    start)
+        rm -f /run/dcentos/bm1391-boot-cut-ready
+        . /usr/libexec/dcentos/bm1391-fabric-identity.sh
+        dcent_bm1391_fabric_identity /etc/dcentos/board_target /etc/dcentos/bm1391-bitstream.sha256 \
+            /proc/cmdline /proc/sys/kernel/random/boot_id \
+            /sys/class/xdevcfg/xdevcfg/device/prog_done /run/dcentos
+        /usr/bin/dcentrald --bm1391-boot-cut-only
+        cat /proc/sys/kernel/random/boot_id > /run/dcentos/bm1391-boot-cut-ready
+        ;;
+    stop) ;;
+    restart) "$0" start ;;
+    *) exit 1 ;;
+esac

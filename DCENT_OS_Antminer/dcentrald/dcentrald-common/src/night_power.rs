@@ -859,7 +859,11 @@ mod tests {
             serial_night_power_desired_mhz(525, thermal_off, watt_home, 12),
             525
         );
-        let supervisor = include_str!("../../dcentrald-thermal/src/supervisor.rs");
+        // The multi-line needle is line-ending sensitive: normalize the
+        // checked-out file (this Windows checkout carries CRLF) before the
+        // contains, exactly like the committed-matrix drift pins do.
+        let supervisor = include_str!("../../dcentrald-thermal/src/supervisor.rs")
+            .replace("\r\n", "\n");
         assert!(
             supervisor.contains("fn default_board_hot() -> f32 {\n    65.0\n}"),
             "SERIAL_PLL_RAISE_BOARD_HOT_C must stay pinned to supervisor board_hot"

@@ -27,6 +27,28 @@ class S19kGauntletWorkflowTests(unittest.TestCase):
             workflow.DEFAULT_MANIFEST
         )
 
+    def manifest_with_repo_fixture(self) -> tuple[dict, str]:
+        """Exercise the DAG with a verifiable fixture, not a moving checkout.
+
+        The historical campaign seals exact source inventories. New runtime
+        implementation correctly makes that old seal refuse the working tree;
+        a graph test must not require rewriting those historical identities.
+        The real repository verifier still reads and hashes this fixture.
+        """
+        manifest = copy.deepcopy(self.manifest)
+        path = Path(__file__).resolve()
+        relative = path.relative_to(workflow.REPO_ROOT).as_posix()
+        raw = path.read_bytes()
+        verifier = next(
+            phase for phase in manifest["phases"]
+            if phase["id"] == workflow.ADOPTED_REPO_PHASE_ID
+        )["verifier"]
+        verifier["required_paths"] = [relative]
+        verifier["required_identities"] = {
+            relative: {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        }
+        return manifest, hashlib.sha256(workflow.canonical_json(manifest)).hexdigest()
+
     def test_manifest_spans_adopted_native_persistent_and_terminal_routes(self) -> None:
         phase_ids = [phase["id"] for phase in self.manifest["phases"]]
         for required in (
@@ -81,11 +103,12 @@ class S19kGauntletWorkflowTests(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, source)
 
-    def test_current_frontier_is_derived_and_terminal_remains_denied(self) -> None:
+    def test_verified_repo_frontier_is_derived_and_terminal_remains_denied(self) -> None:
+        manifest, manifest_sha = self.manifest_with_repo_fixture()
         with tempfile.TemporaryDirectory() as raw_temp:
             report = workflow.evaluate(
-                self.manifest,
-                self.manifest_sha,
+                manifest,
+                manifest_sha,
                 Path(raw_temp) / "evidence",
                 None,
             )
@@ -110,14 +133,15 @@ class S19kGauntletWorkflowTests(unittest.TestCase):
         )
 
     def test_agent_wave_has_bounded_owner_review_and_separate_operator_gate(self) -> None:
+        manifest, manifest_sha = self.manifest_with_repo_fixture()
         with tempfile.TemporaryDirectory() as raw_temp:
             report = workflow.evaluate(
-                self.manifest,
-                self.manifest_sha,
+                manifest,
+                manifest_sha,
                 Path(raw_temp) / "evidence",
                 None,
             )
-        wave = workflow.emit_agent_tasks(self.manifest, report)
+        wave = workflow.emit_agent_tasks(manifest, report)
         self.assertEqual(wave["max_parallel_agents"], 3)
         self.assertEqual(len(wave["tasks"]), 6)
         self.assertEqual(wave["tasks"][0]["expert"], "DCENT_Release")
@@ -131,6 +155,20 @@ class S19kGauntletWorkflowTests(unittest.TestCase):
             ["portable-artifact-custody"],
         )
         self.assertIn("controller grants none", wave["operator_gates"][0]["authorization"])
+
+    def test_stale_repository_identity_refuses_without_resealing_the_campaign(self) -> None:
+        manifest, _ = self.manifest_with_repo_fixture()
+        phase = next(p for p in manifest["phases"] if p["id"] == workflow.ADOPTED_REPO_PHASE_ID)
+        self.assertEqual(workflow.verify_repo_phase(phase)["required_file_count"], 1)
+        identity = next(iter(phase["verifier"]["required_identities"].values()))
+        identity["sha256"] = "0" * 64
+        with self.assertRaisesRegex(workflow.WorkflowError, "file identity mismatch"):
+            workflow.verify_repo_phase(phase)
+        with tempfile.TemporaryDirectory() as raw_temp:
+            report = workflow.evaluate(manifest, "0" * 64, Path(raw_temp), None)
+        states = {p["id"]: p["state"] for p in report["phases"]}
+        self.assertEqual(states[workflow.ADOPTED_REPO_PHASE_ID], "refused")
+        self.assertFalse(report["complete"])
 
     def test_waiting_desk_readiness_is_visible_without_bypassing_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:

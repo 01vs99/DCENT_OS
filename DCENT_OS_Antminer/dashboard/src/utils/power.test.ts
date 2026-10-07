@@ -192,6 +192,6 @@ describe('power telemetry helpers', () => {
         delta_watts: 60,
         comparison: 'over',
       },
-    })).toBe('Power mode: 1,200 W target active');
+    })).toBe('Power mode: 1,200 W requested');
   });
 });

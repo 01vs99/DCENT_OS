@@ -218,6 +218,23 @@ pub static CARRIER_FIFO_FABRIC: &[CarrierFifoFabric] = &[
         provenance: "UNDECLARED: capture-first target, no bitstream probe",
     },
     CarrierFifoFabric {
+        board_target: "am1-s9k",
+        fifo_fabric_hz: None,
+        provenance: "UNDECLARED: capture-first target; the C43 S9k native \
+                     stock-FPGA executor pins its own fabric independently \
+                     (r03 evidence) and this Braiins-layout table takes no position",
+    },
+    CarrierFifoFabric {
+        board_target: "am1-s9-hydro",
+        fifo_fabric_hz: None,
+        provenance: "UNDECLARED: capture-first target, no bitstream probe",
+    },
+    CarrierFifoFabric {
+        board_target: "am2-s19j-classic",
+        fifo_fabric_hz: None,
+        provenance: "UNDECLARED: no am2 FIFO serializer clock declared",
+    },
+    CarrierFifoFabric {
         board_target: "am2-s19j",
         fifo_fabric_hz: None,
         provenance: "UNDECLARED: FCLK0=100 MHz live-verified \
@@ -228,6 +245,26 @@ pub static CARRIER_FIFO_FABRIC: &[CarrierFifoFabric] = &[
         board_target: "am2-s19pro",
         fifo_fabric_hz: None,
         provenance: "UNDECLARED: no am2 FIFO serializer clock declared",
+    },
+    CarrierFifoFabric {
+        board_target: "am2-s19",
+        fifo_fabric_hz: None,
+        provenance: "UNDECLARED: no am2 FIFO serializer clock declared",
+    },
+    CarrierFifoFabric {
+        board_target: "am2-s19i",
+        fifo_fabric_hz: None,
+        provenance: "UNDECLARED: no am2 FIFO serializer clock declared",
+    },
+    CarrierFifoFabric {
+        board_target: "am2-s19a",
+        fifo_fabric_hz: None,
+        provenance: "UNDECLARED: no am2 FIFO serializer clock declared",
+    },
+    CarrierFifoFabric {
+        board_target: "am2-s19plus",
+        fifo_fabric_hz: None,
+        provenance: "UNDECLARED: exact loaded fabric identity remains a native-owner check",
     },
     CarrierFifoFabric {
         board_target: "am2-s17p",
@@ -495,7 +532,7 @@ const BLOCK_WORK_TX: usize = 3;
 /// no-op; if the readback sticks, it is a real RW WORK_TIME register).
 /// Default-off — does not change `a lab unit` / `a lab unit` behaviour.
 fn am2_write_work_time_mmio_enabled() -> bool {
-    std::env::var("DCENT_AM2_WRITE_WORK_TIME_MMIO")
+    dcentrald_common::lab_env::var("DCENT_AM2_WRITE_WORK_TIME_MMIO")
         .map(|v| {
             matches!(
                 v.as_str(),
@@ -1135,6 +1172,28 @@ impl FpgaChain {
             .drain_trace()
     }
 
+    /// Observe the same in-memory FIFO after moving its owner into a dispatcher.
+    /// The returned view has no transport or register mutation methods.
+    #[cfg(feature = "sim-hal")]
+    pub fn sim_chain_observer(&self) -> Result<crate::platform::sim::SimChainObserver> {
+        self.sim_chain
+            .as_ref()
+            .map(SimChain::observer)
+            .ok_or_else(|| crate::HalError::Platform("not a simulated FPGA chain".into()))
+    }
+
+    #[cfg(feature = "sim-hal")]
+    pub fn configure_sim_bm1398_native_wire(
+        &self,
+        chips: u8,
+        interval: u8,
+        fault: crate::platform::sim::SimBm1398WireFault,
+    ) -> Result<()> {
+        self.sim_chain.as_ref()
+            .ok_or_else(|| crate::HalError::Platform("not a simulated FPGA chain".into()))?
+            .configure_bm1398_native_wire(chips, interval, fault)
+    }
+
     /// Open an am2 chain via UIO.
     pub fn open_am2(chain_id: u8, uio_base: u8) -> Result<Self> {
         let mut chain = Self::open(chain_id, uio_base)?;
@@ -1632,7 +1691,7 @@ fn tx_flush_settle_mode_for(env_value: Option<&str>) -> TxFlushSettle {
 /// Reads the env gate and returns the configured settle mode.
 fn tx_flush_settle_mode() -> TxFlushSettle {
     tx_flush_settle_mode_for(
-        std::env::var("DCENT_FPGA_TX_FLUSH_FENCE_ONLY")
+        dcentrald_common::lab_env::var("DCENT_FPGA_TX_FLUSH_FENCE_ONLY")
             .ok()
             .as_deref(),
     )

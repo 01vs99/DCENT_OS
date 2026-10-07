@@ -52,10 +52,10 @@ chmod 0755 "${TARGET_DIR}"/usr/sbin/dcent-enable-ssh 2>/dev/null || true
 
 dcent_ensure_armv7_busybox_init "$TARGET_DIR" "DCENTos post-build (am3-bb-s19jpro)"
 
-# W5.1 (2026-05-07): install the dashboard SPA at the canonical location
-# served by server.py on the other platforms. The am3-bb-s19jpro image
-# tracks parity with am3-bb base; the dashboard ships as a static asset
-# even though server.py is not yet bound on AM335x.
+# Install the same per-device HTTPS frontend as the Amlogic images, then
+# the canonical dashboard artifact. Keys are generated on the miner only.
+. "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/dashboard_https.sh"
+dcent_stage_bb_dashboard_https "$TARGET_DIR"
 DASHBOARD_SRC="${BR2_EXTERNAL_DCENTOS_PATH}/../dashboard/dist/index.html"
 DASHBOARD_GZ_SRC="${DASHBOARD_SRC}.gz"
 DASHBOARD_SHA_SRC="${DASHBOARD_SRC}.sha256"
@@ -242,18 +242,19 @@ else
 fi
 
 # Production-readiness matrix §7 #1 (public-image trust boundary): release-image
-# marker + first-boot SSH posture when DCENT_RELEASE_IMAGE=1. NO-OP on DEV/LAB.
+# marker + first-boot SSH posture on a RELEASE build (the default posture since
+# WS-A4). NO-OP on an explicit DEV/LAB opt-out.
 . "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/release_image_provision.sh"
+python3 "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/provision_runtime_policy.py" "$TARGET_DIR"
 dcent_provision_release_image "$TARGET_DIR" "am3-bb-s19jpro"
 
 # RELEASE must not ship the AM3-BB lab rescue SSH marker. DEV/lab keeps it
-# (required above). provision.sh strips it when DCENT_RELEASE_IMAGE=1.
-case "${DCENT_RELEASE_IMAGE:-0}" in
-    1|true|TRUE|yes|YES|y|Y)
-        if [ -e "${TARGET_DIR}/etc/dcentos/rescue_ssh_enabled" ]; then
-            echo "DCENTos post-build (am3-bb-s19jpro): ERROR: RELEASE image still has /etc/dcentos/rescue_ssh_enabled" >&2
-            exit 1
-        fi
-        echo "DCENTos post-build (am3-bb-s19jpro): RELEASE image — AM3-BB rescue SSH marker absent"
-        ;;
-esac
+# (required above). provision.sh strips it on the release posture
+# (dcent_release_posture_is_release; DCENT_DEV_IMAGE=1 opts out).
+if dcent_release_posture_is_release; then
+    if [ -e "${TARGET_DIR}/etc/dcentos/rescue_ssh_enabled" ]; then
+        echo "DCENTos post-build (am3-bb-s19jpro): ERROR: RELEASE image still has /etc/dcentos/rescue_ssh_enabled" >&2
+        exit 1
+    fi
+    echo "DCENTos post-build (am3-bb-s19jpro): RELEASE image — AM3-BB rescue SSH marker absent"
+fi

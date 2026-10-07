@@ -29,7 +29,7 @@
 #
 # `verified_revertable: false` in PROFILE_TABLE.amlogic-a113d-bm1362 — this
 # script is CODE-COMPLETE but NOT live-tested. The office S19j Pro Amlogic
-# .78 + s19jpro are the planned bench targets.
+# lab-unit + s19jpro are the planned bench targets.
 #
 # ============================================================================
 # EXPECTED FLEET STATE
@@ -49,11 +49,11 @@
 #   DCENT_REVERT_AUTHORIZED=1 ./revert_to_stock_am3_aml_s19jpro.sh \
 #       --operator-acknowledged-data-loss \
 #       --firmware Antminer-S19jpro-AML-release-XXXXX.tar.gz \
-#       --target 203.0.113.133 \
+#       --target 192.0.2.10 \
 #       [--sha256 <expected>]
 #
 #   ./revert_to_stock_am3_aml_s19jpro.sh --dry-run \
-#       --firmware ./stock-s19jpro-aml.tar.gz --target 203.0.113.133
+#       --firmware ./stock-s19jpro-aml.tar.gz --target 192.0.2.10
 
 set -eu
 

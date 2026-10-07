@@ -24,6 +24,32 @@
 
 use crate::{Profile, ProfileSource, SiliconTable};
 
+/// Exact stock operating table for an image-selected BM1398 board. This is
+/// software evidence, without a measured hash-rate or electrical admission
+/// claim. Native startup consumes these same common-crate rows.
+pub fn stock_profile(
+    board_target: &str,
+) -> Option<dcentrald_common::s19_bm1398_runtime::Bm1398HybridModel> {
+    use dcentrald_common::s19_bm1398_runtime::Bm1398HybridModel as Model;
+    match board_target {
+        "am2-s19pro" => Some(Model::S19Pro),
+        "am2-s19" => Some(Model::S19Classic),
+        "am2-t19" => Some(Model::T19),
+        "am2-s19a" => Some(Model::S19a),
+        "am2-s19plus" => Some(Model::S19Plus),
+        _ => None,
+    }
+}
+
+/// The held Bitmain S19+ maintenance guide, section IV.1, states 80
+/// BM1398AC chips in ten domains of eight. Its copied NBS1902 jig filename
+/// is not evidence of a 76-chip board or an operational frequency ladder.
+/// The exact VNish rc5 profile independently joins this geometry to its own
+/// operational default; it does not inherit the NBS1902 ladder.
+pub const S19_PLUS_DOCUMENTED_CHIPS: u16 = 80;
+pub const S19_PLUS_DOCUMENTED_VOLTAGE_DOMAINS: u8 = 10;
+pub const S19_PLUS_DOCUMENTED_CHIPS_PER_DOMAIN: u8 = 8;
+
 /// The 5 BM1398 silicon profile rows, ordered by `step`.
 ///
 /// Voltage column is chain-rail voltage in volts. Hashrate column is
@@ -306,6 +332,163 @@ pub fn pll_compute(target_mhz: u32, ref_mhz: u32) -> Option<PllParams> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_profiles_match_each_models_held_stock_topology_and_entire_ladder() {
+        use dcentrald_api_types::bm1398_protocol::*;
+        let sources = [
+            (
+                "am2-s19pro",
+                S19_PRO_NBP1901_BOARD_GEOMETRY,
+                include_str!("../tests/fixtures/bm1398-stock/s19-pro-20211116/topol.conf"),
+                include_str!("../tests/fixtures/bm1398-stock/s19-pro-20211116/levels.json"),
+            ),
+            (
+                "am2-s19",
+                S19_NBS1902_BOARD_GEOMETRY,
+                include_str!("../tests/fixtures/bm1398-stock/s19-20211116/topol.conf"),
+                include_str!("../tests/fixtures/bm1398-stock/s19-20211116/levels.json"),
+            ),
+            (
+                "am2-t19",
+                T19_NBT1903_BOARD_GEOMETRY,
+                include_str!("../tests/fixtures/bm1398-stock/t19-20230320/topol.conf"),
+                include_str!("../tests/fixtures/bm1398-stock/t19-20230320/levels.json"),
+            ),
+            (
+                "am2-s19a",
+                S19A_BHB28611_BOARD_GEOMETRY,
+                include_str!("../tests/fixtures/bm1398-stock/s19a-20221206/topol.conf"),
+                include_str!("../tests/fixtures/bm1398-stock/s19a-20221206/levels.json"),
+            ),
+        ];
+        // Eight byte-for-byte vendor configuration files, each from its own
+        // held asicminingsupplies/<release>/components/minerfs.image.gz.tree/etc.
+        // These are software inputs, not synthesized electrical measurements.
+        for (target, geometry, topol, levels) in sources {
+            let topol: serde_json::Value = serde_json::from_str(topol).unwrap();
+            let levels: serde_json::Value = serde_json::from_str(levels).unwrap();
+            let model = stock_profile(target).unwrap();
+            assert_eq!(topol["machine"], model.stock_board_names()[0], "{target}");
+            assert_eq!(topol["chain"]["chain_asic_num"], model.chips_per_chain());
+            assert_eq!(
+                topol["asic"]["asic_addr_interval"],
+                model.address_interval()
+            );
+            assert_eq!(topol["chain"]["chain_row"], geometry.chain_row);
+            assert_eq!(topol["chain"]["chain_column"], geometry.chain_column);
+            assert_eq!(
+                topol["chain"]["chain_domain_num"],
+                geometry.voltage_domain_count
+            );
+            assert_eq!(
+                topol["chain"]["domain_asic_num"],
+                geometry.chips_per_voltage_domain
+            );
+            assert_eq!(topol["chain"]["pic"]["type"], "PIC1704");
+            assert_eq!(topol["chain"]["pic"]["i2c_addr"], 0x20);
+            assert_eq!(topol["power"]["gpio"], 907);
+            assert_eq!(topol["power"]["i2c_addr"], 0x10);
+            let held: Vec<(u16, u16)> = levels["levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    (
+                        u16::try_from(row["frequency"].as_u64().unwrap()).unwrap(),
+                        u16::try_from(row["voltage"].as_u64().unwrap()).unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                model.stock_levels(),
+                held,
+                "every exact {target} row and its ordering"
+            );
+            assert!(held.contains(&model.default_operating_point()));
+        }
+    }
+
+    #[test]
+    fn exact_stock_bins_use_their_own_geometry_and_operating_ladder() {
+        for (target, chips, interval, default) in [
+            ("am2-s19pro", 114, 2, (500, 1280)),
+            ("am2-s19", 76, 3, (650, 1380)),
+            ("am2-t19", 76, 3, (550, 1420)),
+            ("am2-s19a", 72, 3, (660, 1280)),
+            ("am2-s19plus", 80, 3, (645, 1400)),
+        ] {
+            let profile = stock_profile(target).unwrap();
+            assert_eq!(profile.board_target(), target);
+            assert_eq!(profile.chips_per_chain(), chips);
+            assert_eq!(profile.address_interval(), interval);
+            assert_eq!(profile.default_operating_point(), default);
+            assert!(profile.stock_levels().contains(&default));
+            for &(frequency, _) in profile.stock_levels() {
+                assert!(dcentrald_common::resolve_bm1398_pll(frequency).is_some());
+            }
+        }
+        let a = stock_profile("am2-s19a").unwrap();
+        assert_eq!(a.stock_levels().len(), 40);
+        assert!(!a.stock_levels().contains(&(660, 1240)));
+        assert!(!a.stock_levels().contains(&(750, 1250)));
+        assert!(!a.stock_levels().contains(&(650, 1380)));
+    }
+
+    #[test]
+    fn s19plus_profile_matches_exact_held_model_constructor_and_default() {
+        use dcentrald_api_types::bm1398_protocol::S19_PLUS_BHB28701_BOARD_GEOMETRY as geometry;
+        // Exact output of held hwscan 0x22310("s19plus", "xil") captured at
+        // its serializer boundary in memory. No syscalls or hardware I/O were
+        // executed. This fixture is software data, not a physical observation.
+        let model: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/bm1398-stock/s19plus-vnish-rc5/model-info-emulated.json"
+        ))
+        .unwrap();
+        let profile = stock_profile("am2-s19plus").unwrap();
+        assert_eq!(model["model"], "s19plus");
+        assert_eq!(model["btm_model"], profile.stock_board_names()[0]);
+        assert_eq!(model["chip"]["model"], "BM1398");
+        assert_eq!(model["num_chains"], 3);
+        assert_eq!(model["chain"]["num_chips"], profile.chips_per_chain());
+        assert_eq!(
+            model["chain"]["chip_addr_interval"],
+            profile.address_interval()
+        );
+        assert_eq!(model["chain"]["num_domains"], geometry.voltage_domain_count);
+        assert_eq!(
+            model["chain"]["num_chips_per_domain"],
+            geometry.chips_per_voltage_domain
+        );
+        assert_eq!(model["chain"]["topology"]["num_rows"], geometry.chain_row);
+        assert_eq!(
+            model["chain"]["topology"]["num_cols"],
+            geometry.chain_column
+        );
+        let default = profile.default_operating_point();
+        assert_eq!(model["performance"]["default_freq"], default.0);
+        assert_eq!(model["performance"]["default_volt"], default.1 * 10);
+        assert_eq!(profile.stock_levels(), &[(645, 1400)]);
+        assert_eq!(geometry.address_plan.hardware_address(79).unwrap(), 237);
+        assert!(geometry.address_plan.hardware_address(80).is_none());
+        assert!(model["psu"]["models"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(0x71)));
+        for sensor in model["chain"]["sensors"].as_array().unwrap() {
+            assert_eq!(sensor["access"], "via-pic");
+            assert!((0x48..=0x4b).contains(&sensor["i2c_addr"].as_u64().unwrap()));
+        }
+        assert_eq!(S19_PLUS_DOCUMENTED_CHIPS, 80);
+        assert_eq!(
+            u16::from(S19_PLUS_DOCUMENTED_VOLTAGE_DOMAINS)
+                * u16::from(S19_PLUS_DOCUMENTED_CHIPS_PER_DOMAIN),
+            80
+        );
+        for target in ["am2-s19+", "am2-s19plus ", "am2-s19a ", "am2-s19j", ""] {
+            assert!(stock_profile(target).is_none());
+        }
+    }
 
     #[test]
     fn table_has_five_steps_in_correct_range() {

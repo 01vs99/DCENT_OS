@@ -86,6 +86,7 @@ export function getDefaultPageForMode(mode: OperatingMode): string {
 
 export function normalizePageForMode(mode: OperatingMode, page: string): string {
   const primary = getPrimaryPage(page);
+  if (primary === 'help') return page;
   if (mode === 'heater') {
     return HEATER_PAGES.has(page) ? page : MODE_DEFAULT_PAGE.heater;
   }

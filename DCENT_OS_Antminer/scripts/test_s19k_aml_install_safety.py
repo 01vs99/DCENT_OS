@@ -184,23 +184,22 @@ class S19kAmlInstallSafetyTests(unittest.TestCase):
             "S37board_setup": (
                 "require_mutation_authority",
                 "boot-safeoff",
-                "S19k boot-safeoff capability is missing or insecure",
+                "boot-safeoff capability is missing or insecure",
             ),
             "S82dcentrald": (
                 "require_runtime_authority",
                 "daemon-hardware",
-                "S19k daemon-hardware capability is missing or insecure",
+                "daemon-hardware capability is missing or insecure",
             ),
             "S99upgrade": (
                 "require_ota_mutation_policy",
                 "ota-storage",
-                "S19k ota-storage capability is missing or insecure",
+                "ota-storage capability is missing or insecure",
             ),
         }
         for filename, (function, capability, refusal) in cases.items():
             with self.subTest(filename=filename):
                 body = function_body(read(AML_INIT / filename), function)
-                self.assertIn("am3-s19k", body)
                 self.assertIn("dcent_mutation_policy_has", body)
                 self.assertIn(capability, body)
                 self.assertIn(refusal, body)
@@ -554,15 +553,18 @@ class S19kAmlInstallSafetyTests(unittest.TestCase):
         authority = function_body(source, "require_mutation_authority")
         self.assertLess(
             authority.index("read_identity ||"),
-            authority.index('case "$PLATFORM_HINT:$TARGET_HINT"'),
+            authority.index("dcent_mutation_policy_has"),
         )
-        self.assertIn("am3-aml-s19k:am3-s19k)", authority)
+        identity = function_body(source, "read_identity")
+        self.assertIn("am3-aml-s19k:am3-s19k|", identity)
+        self.assertIn("am3-aml-s19kpro:am3-s19kpro|", identity)
         for broad in ("am3-aml-s19k:*", "*:am3-s19k", "*:am3-s19kpro"):
             self.assertNotIn(broad, authority)
 
         exact_pairs = (
             ("am3-aml-s19jpro", "am3-s19jpro-aml"),
             ("am3-aml-s19k", "am3-s19k"),
+            ("am3-aml-s19kpro", "am3-s19kpro"),
             ("am3-aml-s21", "am3-s21"),
             ("am3-aml-s21pro", "am3-s21pro"),
             ("am3-aml-s21xp", "am3-s21xp"),
@@ -641,8 +643,8 @@ class S19kAmlInstallSafetyTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual({path: path.read_bytes() for path in sentinels}, sentinels)
 
-    def test_s19k_image_grants_only_boot_safeoff_with_secure_policy_parser(self) -> None:
-        self.assertEqual("boot-safeoff\n", read(S19K_POLICY))
+    def test_s19k_image_grants_boot_safeoff_and_daemon_without_persistent_writes(self) -> None:
+        self.assertEqual("boot-safeoff\ndaemon-hardware\n", read(S19K_POLICY))
         helper = read(POLICY_HELPER)
         self.assertIn('[ ! -L "$policy_file" ]', helper)
         self.assertIn("stat -c '%u'", helper)
@@ -771,8 +773,12 @@ class S19kAmlInstallSafetyTests(unittest.TestCase):
             2,
             source.count('ssh_stream_get "nanddump --bb=padbad --omitoob \'$MTD_DEV\'"'),
         )
+        # 2026-08-31 r7 (99e32c650, live .80 six-MTD backup) appended a
+        # locked_pages field to every rescue row (the Amlogic boot partition
+        # carries factory-locked pages; mtd5's rootfs has none). Assert the exact
+        # current row including that field.
         self.assertIn(
-            '"mtd5=system,$MTD5_BACKUP_SIZE,$MTD5_LOCAL_SHA,padbad,omitoob,duplicate-match,badblocks=$MTD5_BAD_BLOCKS_AFTER"',
+            '"mtd5=system,$MTD5_BACKUP_SIZE,$MTD5_LOCAL_SHA,padbad,omitoob,duplicate-match,badblocks=$MTD5_BAD_BLOCKS_AFTER,locked_pages=none"',
             source,
         )
         self.assertNotIn("badmap-empty", source)

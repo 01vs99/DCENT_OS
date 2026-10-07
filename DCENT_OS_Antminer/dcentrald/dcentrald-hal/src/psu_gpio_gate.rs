@@ -22,7 +22,7 @@ const DEFAULT_LABEL: &str = "PWR_CONTROL";
 const GPIO_SETTLE_DELAY_MS: u64 = 50;
 
 fn env_flag(name: &str) -> bool {
-    std::env::var(name)
+    dcentrald_common::lab_env::var(name)
         .ok()
         .map(|v| {
             matches!(
@@ -185,6 +185,10 @@ impl PsuGpioGate {
         // Resolve polarity before exporting or mutating the line, then retain
         // it immutably for the full RAII session and terminal closeout.
         let active_low = pwr_control_active_low(gpio)?;
+        Self::assert_resolved_with_io(gpio, active_low, io)
+    }
+
+    fn assert_resolved_with_io(gpio: u32, active_low: bool, io: Arc<dyn GpioIo>) -> Result<Self> {
         let asserted_value = !active_low;
         let off_level = active_low;
         let outcome = io.ensure_exported(gpio)?;
@@ -229,16 +233,9 @@ impl PsuGpioGate {
                 gpio, error, rollback
             )));
         }
-        // 2026-06-07 (.25 active-LOW PWR_CONTROL): the RE-018 true-cold strace
-        // proves gpio907 on `a lab unit` is ACTIVE-LOW — "0" = rail ON, "1" = rail OFF
-        // (bosminer writes "1" to hold-off at cold, then "0" to energize ~55 s
-        // later). DCENT historically wrote "1" to "assert", which on `a lab unit` turns
-        // the rail OFF → the per-board DC-DC has no input → chips unpowered →
-        // chain enum=0 even though the dsPIC ENABLE ACKs (the dsPIC runs on the
-        // 3.3 V standby rail). Gate the asserted level on
-        // DCENT_AM2_PWR_CONTROL_ACTIVE_LOW: default-OFF keeps the active-HIGH
-        // ("1") behaviour for every other unit AND the bosminer-handoff path
-        // (which uses TRUST_RAIL_FALLBACK and never asserts here) byte-identical.
+        // The exact wiring recipe was resolved before export. Keep that
+        // ON/OFF pair for this owner and every terminal retry; never infer
+        // a sibling's GPIO907 polarity from a shared AM2 platform marker.
         if let Err(error) = gate.io.write_value(gpio, asserted_value) {
             let rollback = gate.force_safe_off_verified();
             return Err(HalError::Gpio(format!(
@@ -278,7 +275,6 @@ impl PsuGpioGate {
 
         tracing::info!(
             gpio,
-            spec = spec.unwrap_or("label:PWR_CONTROL"),
             active_low,
             observed_asserted = ?observed_value,
             "PWR_CONTROL asserted before PSU init (sysfs readback recorded)"
@@ -456,15 +452,17 @@ impl Drop for PsuGpioGate {
 
 fn pwr_control_active_low(gpio: u32) -> Result<bool> {
     let active_low = env_flag("DCENT_AM2_PWR_CONTROL_ACTIVE_LOW");
-    let active_high = env_flag("DCENT_AM2_PWR_CONTROL_ACTIVE_HIGH");
-    if gpio == crate::board_control::AM2_PSU_ENABLE_GPIO && active_low == active_high {
-        return Err(HalError::Gpio(format!(
-            "PWR_CONTROL gpio{} polarity unknown or conflicting; set exactly one of \
-             DCENT_AM2_PWR_CONTROL_ACTIVE_LOW=1 or DCENT_AM2_PWR_CONTROL_ACTIVE_HIGH=1",
-            gpio
-        )));
+    if gpio != crate::board_control::AM2_PSU_ENABLE_GPIO {
+        return Ok(active_low);
     }
-    Ok(active_low)
+    let lab_declared = dcentrald_common::lab_env::var_os("DCENT_AM2_PWR_CONTROL_ACTIVE_LOW").is_some()
+        || dcentrald_common::lab_env::var_os("DCENT_AM2_PWR_CONTROL_ACTIVE_HIGH").is_some();
+    dcentrald_common::runtime_hardware_recipe::resolve_power_control_polarity(
+        dcentrald_common::runtime_hardware_recipe::gpio907_polarity(),
+        lab_declared.then(|| (active_low, env_flag("DCENT_AM2_PWR_CONTROL_ACTIVE_HIGH"))),
+    )
+    .map(|polarity| polarity.active_low())
+    .map_err(|message| HalError::Gpio(format!("PWR_CONTROL gpio{}: {}", gpio, message)))
 }
 
 fn resolve_gpio(spec: Option<&str>) -> Result<u32> {
@@ -623,48 +621,9 @@ fn write_value(gpio: u32, high: bool) -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::{BTreeSet, VecDeque};
-    use std::ffi::OsString;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::Mutex;
 
     static POLARITY_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct PolarityEnvGuard {
-        _lock: MutexGuard<'static, ()>,
-        previous_low: Option<OsString>,
-        previous_high: Option<OsString>,
-    }
-
-    impl PolarityEnvGuard {
-        fn active_high() -> Self {
-            let lock = POLARITY_ENV_LOCK.lock().unwrap();
-            let low_key = "DCENT_AM2_PWR_CONTROL_ACTIVE_LOW";
-            let high_key = "DCENT_AM2_PWR_CONTROL_ACTIVE_HIGH";
-            let previous_low = std::env::var_os(low_key);
-            let previous_high = std::env::var_os(high_key);
-            std::env::remove_var(low_key);
-            std::env::set_var(high_key, "1");
-            Self {
-                _lock: lock,
-                previous_low,
-                previous_high,
-            }
-        }
-    }
-
-    impl Drop for PolarityEnvGuard {
-        fn drop(&mut self) {
-            let low_key = "DCENT_AM2_PWR_CONTROL_ACTIVE_LOW";
-            let high_key = "DCENT_AM2_PWR_CONTROL_ACTIVE_HIGH";
-            match self.previous_low.take() {
-                Some(value) => std::env::set_var(low_key, value),
-                None => std::env::remove_var(low_key),
-            }
-            match self.previous_high.take() {
-                Some(value) => std::env::set_var(high_key, value),
-                None => std::env::remove_var(high_key),
-            }
-        }
-    }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum FakeOp {
@@ -824,9 +783,8 @@ mod tests {
 
     #[test]
     fn injected_gpio_lifecycle_establishes_off_before_on_and_never_restores_inherited_on() {
-        let _env = PolarityEnvGuard::active_high();
         let fake = FakeGpioIo::inherited("out", true);
-        let mut gate = PsuGpioGate::assert_with_io(Some("gpio:907"), fake.clone()).unwrap();
+        let mut gate = PsuGpioGate::assert_resolved_with_io(907, false, fake.clone()).unwrap();
         assert!(gate.is_asserted());
 
         let receipt = gate.force_safe_off_verified().unwrap();
@@ -855,12 +813,11 @@ mod tests {
 
     #[test]
     fn injected_assertion_failures_are_bounded_and_post_mutation_failures_end_off() {
-        let _env = PolarityEnvGuard::active_high();
 
         for failure_call in [0usize, 1, 3, 4, 5] {
             let fake = FakeGpioIo::inherited("out", true);
             fake.fail_call(failure_call);
-            let result = PsuGpioGate::assert_with_io(Some("gpio:907"), fake.clone());
+            let result = PsuGpioGate::assert_resolved_with_io(907, false, fake.clone());
             assert!(
                 result.is_err(),
                 "failure call {failure_call} must reject assert"
@@ -879,7 +836,7 @@ mod tests {
         // trace and terminal closeout must still prove OFF.
         let fake = FakeGpioIo::inherited("out", true);
         fake.fail_call(2);
-        let mut gate = PsuGpioGate::assert_with_io(Some("gpio:907"), fake.clone()).unwrap();
+        let mut gate = PsuGpioGate::assert_resolved_with_io(907, false, fake.clone()).unwrap();
         assert_eq!(gate.restore_value, None);
         gate.force_safe_off_verified().unwrap();
         drop(gate);
@@ -888,11 +845,10 @@ mod tests {
 
     #[test]
     fn injected_terminal_failures_are_retried_by_drop_without_inherited_restore() {
-        let _env = PolarityEnvGuard::active_high();
 
         for terminal_failure_offset in 0usize..=2 {
             let fake = FakeGpioIo::inherited("out", true);
-            let mut gate = PsuGpioGate::assert_with_io(Some("gpio:907"), fake.clone()).unwrap();
+            let mut gate = PsuGpioGate::assert_resolved_with_io(907, false, fake.clone()).unwrap();
             let first_terminal_call = fake.snapshot().0.len();
             fake.fail_call(first_terminal_call + terminal_failure_offset);
             assert!(gate.force_safe_off_verified().is_err());
@@ -905,7 +861,7 @@ mod tests {
         }
 
         let fake = FakeGpioIo::inherited("out", true);
-        let mut gate = PsuGpioGate::assert_with_io(Some("gpio:907"), fake.clone()).unwrap();
+        let mut gate = PsuGpioGate::assert_resolved_with_io(907, false, fake.clone()).unwrap();
         fake.override_next_read(true);
         assert!(gate.force_safe_off_verified().is_err());
         drop(gate);
@@ -913,6 +869,39 @@ mod tests {
             !fake.snapshot().2,
             "readback mismatch retry must finish OFF"
         );
+    }
+
+    #[test]
+    fn captured_active_low_polarity_survives_terminal_retry_and_drop() {
+        let fake = FakeGpioIo::inherited("out", false);
+        let mut gate = PsuGpioGate::assert_resolved_with_io(907, true, fake.clone()).unwrap();
+        assert!(!fake.snapshot().2, "active-low ON is low");
+        fake.fail_call(fake.snapshot().0.len());
+        assert!(gate.force_safe_off_verified().is_err());
+        assert_eq!(gate.terminal_off_retry, Some(true));
+        drop(gate);
+        assert!(fake.snapshot().2, "retained active-low owner must retry OFF high");
+        assert!(fake.snapshot().0.contains(&FakeOp::WriteDirection("high".into())));
+    }
+
+    #[test]
+    fn unknown_gpio907_polarity_refuses_before_export() {
+        // No production recipe is installed in this unit-test process.
+        // Use a child to isolate the original lab parser from other tests.
+        const CHILD: &str = "DCENT_PSU_POLARITY_TEST_CHILD";
+        if std::env::var(CHILD).as_deref() != Ok("1") {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "psu_gpio_gate::tests::unknown_gpio907_polarity_refuses_before_export"])
+                .env(CHILD, "1")
+                .env_remove("DCENT_AM2_PWR_CONTROL_ACTIVE_LOW")
+                .env_remove("DCENT_AM2_PWR_CONTROL_ACTIVE_HIGH")
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let fake = FakeGpioIo::inherited("out", true);
+        assert!(PsuGpioGate::assert_with_io(Some("gpio:907"), fake.clone()).is_err());
+        assert!(fake.snapshot().0.is_empty(), "unknown polarity must not export or write");
     }
 
     #[test]

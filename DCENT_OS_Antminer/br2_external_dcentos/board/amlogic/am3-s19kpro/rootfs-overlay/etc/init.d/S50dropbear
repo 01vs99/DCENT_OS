@@ -1,12 +1,7 @@
 #!/bin/sh
-# SPDX-FileCopyrightText: 2026 D-Central Technologies <dev@d-central.tech>
 # SPDX-License-Identifier: GPL-3.0-only
-#
-# S19k-specific Dropbear gate. Release images accept exactly the independently
-# revalidated post-install witness admission, one preprovisioned client key,
-# and one eagerly generated persistent Ed25519 host key. They never use -R.
-# Dev/lab images retain the shared Amlogic development posture.
-
+# S19k operator SSH: opt-out wins; release images require uploaded keys or
+# wizard credentials and the exact persistent owner. No custody receipt gate.
 NAME=dropbear
 DAEMON=/usr/sbin/dropbear
 PIDFILE=/var/run/dropbear.pid
@@ -15,87 +10,100 @@ RELEASE_MARKER=/etc/dcentos/release-image
 SSH_DISABLED=/data/dcent/.ssh-disabled
 AUTH_FILE=/data/dcent/auth.json
 AUTHORIZED_KEYS=/data/dcent/authorized_keys
-WITNESS_HELPER=/usr/sbin/dcent-s19k-postinstall-witness.py
 DATA_HELPER=/usr/sbin/dcent-s19k-data-mount
-WITNESS_HOST_KEY=/data/dcent/s19k-postinstall-witness/dropbear_ed25519_host_key
-
+PERSISTENT_DIR=/data/dcent
+HOST_KEY_DIR=/data/dcent/dropbear
+ROOT_SSH_DIR=/root/.ssh
+DROPBEARKEY=/usr/bin/dropbearkey
 DROPBEAR_ARGS=""
 [ -r "$DROPBEAR_DEFAULTS" ] && . "$DROPBEAR_DEFAULTS"
-
 is_release_image() {
-    [ -f "$RELEASE_MARKER" ]
+    [ -e "$RELEASE_MARKER" ] || [ -L "$RELEASE_MARKER" ]
 }
-
-witness_gate_open() {
-    [ -x "$DATA_HELPER" ] || return 1
-    "$DATA_HELPER" verify >/dev/null 2>&1 || return 1
-    [ -x "$WITNESS_HELPER" ] || return 1
-    [ -f "$WITNESS_HOST_KEY" ] && [ ! -L "$WITNESS_HOST_KEY" ] || return 1
-    "$WITNESS_HELPER" verify-ssh-gate >/dev/null 2>&1
+data_owner_admitted() {
+    [ -x "$DATA_HELPER" ] && "$DATA_HELPER" verify >/dev/null 2>&1
 }
-
+direct_credentials() {
+    [ -f "$1" ] && [ ! -L "$1" ] && [ -s "$1" ] &&
+        [ "$(stat -c '%h' "$1" 2>/dev/null)" = 1 ]
+}
 ssh_gate_state() {
     if [ -e "$SSH_DISABLED" ] || [ -L "$SSH_DISABLED" ]; then
         echo disabled-by-opt-out
-        return
-    fi
-    if is_release_image; then
-        if witness_gate_open; then
-            echo enabled-by-postinstall-witness
-        else
-            echo locked-postinstall-witness
-        fi
-        return
-    fi
-    if [ -s "$AUTHORIZED_KEYS" ]; then
+    elif is_release_image && ! data_owner_admitted; then
+        echo locked-data-owner
+    elif direct_credentials "$AUTHORIZED_KEYS"; then
         echo enabled-by-keys
-    elif [ -f "$AUTH_FILE" ]; then
+    elif direct_credentials "$AUTH_FILE"; then
         echo enabled-by-wizard
+    elif is_release_image; then
+        echo locked-release-image
     else
         echo enabled-by-default
     fi
 }
-
+prepare_persistent_namespace() {
+    data_owner_admitted || return 1
+    [ ! -L "$PERSISTENT_DIR" ] && [ ! -L "$HOST_KEY_DIR" ] &&
+        [ ! -L "$ROOT_SSH_DIR" ] || return 1
+    mkdir -p "$PERSISTENT_DIR" "$HOST_KEY_DIR" "$ROOT_SSH_DIR" || return 1
+    chmod 0700 "$PERSISTENT_DIR" "$HOST_KEY_DIR" "$ROOT_SSH_DIR" || return 1
+    _keys_view="$ROOT_SSH_DIR/authorized_keys"
+    if [ -L "$_keys_view" ]; then
+        [ "$(readlink "$_keys_view")" = "$AUTHORIZED_KEYS" ] || return 1
+    elif [ -e "$_keys_view" ]; then
+        # A foreign or old direct view is not silently replaced.
+        return 1
+    else
+        ln -s "$AUTHORIZED_KEYS" "$_keys_view" || return 1
+    fi
+}
+prepare_persistent_access() {
+    # Recheck immediately before persistent access changes.
+    prepare_persistent_namespace || return 1
+    HOST_KEY="$HOST_KEY_DIR/dropbear_ed25519_host_key"
+    [ ! -L "$HOST_KEY" ] || return 1
+    if [ ! -e "$HOST_KEY" ]; then
+        (umask 077; "$DROPBEARKEY" -t ed25519 -f "$HOST_KEY" >/dev/null 2>&1) || return 1
+    fi
+    direct_credentials "$HOST_KEY" || return 1
+    chmod 0600 "$HOST_KEY" || return 1
+    "$DROPBEARKEY" -y -f "$HOST_KEY" >/dev/null 2>&1 || return 1
+}
 start() {
     STATE=$(ssh_gate_state)
     case "$STATE" in
-        disabled-by-opt-out)
-            echo "Starting $NAME: BLOCKED (gate=$STATE)"
-            return 0
-            ;;
-        locked-postinstall-witness)
-            echo "Starting $NAME: BLOCKED (gate=$STATE; no TOFU fallback)"
-            return 0
-            ;;
+        disabled-by-opt-out|locked-data-owner|locked-release-image)
+            echo "Starting $NAME: BLOCKED (gate=$STATE; configure credentials in dashboard)"
+            return 0 ;;
     esac
-
-    printf 'Starting %s: ' "$NAME"
-    if [ "$STATE" = enabled-by-postinstall-witness ]; then
-        # Exact release posture: password authentication disabled, only the
-        # admitted persistent Ed25519 host key loaded, and no lazy generation.
-        start-stop-daemon -S -q -p "$PIDFILE" --exec "$DAEMON" -- \
-            -s -r "$WITNESS_HOST_KEY" \
-            && echo "OK (gate=$STATE; host-key=ed25519-eager)" \
-            || { echo "FAIL"; return 1; }
+    if is_release_image; then
+        prepare_persistent_access || {
+            echo "Starting $NAME: BLOCKED (persistent SSH state refused)" >&2
+            return 1
+        }
+        # Keys alone never enable password authentication. Dashboard Argon2id
+        # credentials are not an SSH password; the system account stays locked
+        # unless the operator independently configures it.
+        if [ "$STATE" = enabled-by-keys ]; then
+            start-stop-daemon -S -q -p "$PIDFILE" --exec "$DAEMON" -- -s -r "$HOST_KEY" || return 1
+        else
+            start-stop-daemon -S -q -p "$PIDFILE" --exec "$DAEMON" -- -r "$HOST_KEY" || return 1
+        fi
+        echo "Starting $NAME: OK (gate=$STATE; persistent Ed25519 host key)"
         return 0
     fi
-
-    # Development images preserve the shared Amlogic default/lazy-key flow.
     case " $DROPBEAR_ARGS " in
         *" -R "*) ;;
         *) DROPBEAR_ARGS="$DROPBEAR_ARGS -R" ;;
     esac
     # shellcheck disable=SC2086
-    start-stop-daemon -S -q -p "$PIDFILE" --exec "$DAEMON" -- $DROPBEAR_ARGS \
-        && echo "OK (gate=$STATE)" || { echo "FAIL"; return 1; }
+    start-stop-daemon -S -q -p "$PIDFILE" --exec "$DAEMON" -- $DROPBEAR_ARGS &&
+        echo "Starting $NAME: OK (gate=$STATE)" || return 1
 }
-
 stop() {
-    printf 'Stopping %s: ' "$NAME"
-    start-stop-daemon -K -q -p "$PIDFILE" 2>/dev/null \
-        && echo OK || echo "not running"
+    start-stop-daemon -K -q -p "$PIDFILE" 2>/dev/null || true
 }
-
 status() {
     STATE=$(ssh_gate_state)
     if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
@@ -105,14 +113,11 @@ status() {
     echo "$NAME: stopped (gate=$STATE)"
     return 3
 }
-
 case "${1:-}" in
+    prepare) prepare_persistent_namespace ;;
     start) start ;;
     stop) stop ;;
     restart|reload) stop; sleep 1; start ;;
     status) status ;;
-    *)
-        echo "Usage: $0 {start|stop|restart|status}" >&2
-        exit 2
-        ;;
+    *) echo "Usage: $0 {start|stop|restart|status}" >&2; exit 2 ;;
 esac

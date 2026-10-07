@@ -23,14 +23,10 @@
 //! - BraiinsOS lane: MEDIUM for telemetry, LOW-MEDIUM for exact thresholds.
 //! - Stock Bitmain: MEDIUM-LOW; per-chip isolation not evidenced.
 //!
-//! # Opt-in safety
+//! # Default protection
 //!
-//! This module is COMPILED but NOT INSTANTIATED into the running daemon by
-//! default. The integration site is gated on `[autotune.bad_chip].enabled =
-//! true` in `dcentrald.toml`; with that flag false (default), the existing
-//! autotuner stays master and no per-chip blacklisting happens. Live HW
-//! validation (Wave H, with operator per-action authorization) is the gate to
-//! enabling it in production.
+//! Supervision is enabled by default. Existing bounded actuation and sensor
+//! evidence checks remain in force; this setting grants no hardware ownership.
 //!
 //! # Load-bearing rules
 //!
@@ -165,10 +161,8 @@ pub enum HaltReason {
 /// Bad-chip supervisor configuration (TOML `[autotune.bad_chip]`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BadChipConfig {
-    /// **Default false.** Live-HW gated to `true` only after Wave H operator
-    /// authorization. With this flag false the supervisor is dormant and
-    /// `tick()` returns `NoOp` immediately.
-    #[serde(default)]
+    /// Enabled by default; explicit configuration can disable this observer.
+    #[serde(default = "default_supervisor_enabled")]
     pub enabled: bool,
     /// **Default false.** Separate from `enabled`: telemetry can run without
     /// moving frequency. When true (and `enabled` is true) the daemon applies
@@ -247,10 +241,12 @@ pub struct BadChipConfig {
     pub board_profile_step_fraction: f32,
 }
 
+fn default_supervisor_enabled() -> bool { true }
+
 impl Default for BadChipConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_supervisor_enabled(),
             actuate: false,
             degraded_threshold_pct: default_degraded_pct(),
             bad_threshold_pct: default_bad_pct(),
@@ -892,12 +888,21 @@ mod tests {
 
     // -- 1. Default-off contract --
     #[test]
-    fn supervisor_disabled_by_default_emits_no_actions() {
-        let mut sup = BadChipSupervisor::new(BadChipConfig::default(), vec![fp(0)]);
+    fn explicitly_disabled_supervisor_emits_no_actions() {
+        let mut sup = BadChipSupervisor::new(BadChipConfig { enabled: false, ..BadChipConfig::default() }, vec![fp(0)]);
         assert!(!sup.is_enabled());
         let snap = snapshot(0, vec![0, 0, 0, 0], None);
         // Even a chain of dead chips with the default config should produce no actions.
         assert!(sup.observe(&snap, 200.0).is_empty());
+    }
+
+    #[test]
+    fn bad_chip_supervisor_defaults_on_without_granting_actuation() {
+        let default = BadChipConfig::default();
+        let decoded: BadChipConfig = serde_json::from_str("{}").unwrap();
+        assert!(default.enabled && decoded.enabled);
+        assert!(!default.actuate && !decoded.actuate);
+        assert!(BadChipSupervisor::new(default, vec![fp(0)]).is_enabled());
     }
 
     // -- 2. Healthy stays Healthy --

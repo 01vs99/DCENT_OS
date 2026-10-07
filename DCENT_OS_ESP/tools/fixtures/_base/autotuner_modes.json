@@ -1,0 +1,24 @@
+{
+ "modes": [
+  {
+   "description": "Push frequency up until power or thermals cap it. Maximum hash power.",
+   "id": "max_hashrate",
+   "name": "Max hashrate"
+  },
+  {
+   "description": "Find the lowest J/TH sweet spot, typically 60-70 % of the max frequency.",
+   "id": "best_efficiency",
+   "name": "Best efficiency"
+  },
+  {
+   "description": "Hit a power budget and squeeze the best hashrate under that ceiling.",
+   "id": "target_watts",
+   "name": "Target watts"
+  },
+  {
+   "description": "Keep the chip at a chosen temperature — autotuner raises frequency until it's just warm enough.",
+   "id": "target_temp",
+   "name": "Target temperature"
+  }
+ ]
+}

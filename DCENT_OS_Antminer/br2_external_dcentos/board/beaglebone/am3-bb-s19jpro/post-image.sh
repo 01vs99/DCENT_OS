@@ -22,6 +22,17 @@ OUT_DIR="${BINARIES_DIR}/dcentos-${BOARD_NAME}-sdcard"
 ROOTFS_CPIO="${BINARIES_DIR}/rootfs.cpio.gz"
 MKIMAGE="${HOST_DIR:-}/bin/mkimage"
 
+ROOTFS_LIST="${BINARIES_DIR}/ROOTFS_FILELIST.txt"
+gzip -dc "$ROOTFS_CPIO" | cpio -it --quiet | sed 's#^\./##' | sort -u > "$ROOTFS_LIST"
+require_rootfs_path() {
+    if ! grep -qx "$1" "$ROOTFS_LIST"; then
+        echo "ERROR: BB rootfs service audit missing required path: $1" >&2
+        exit 1
+    fi
+}
+require_rootfs_path "etc/init.d/S40network"
+require_rootfs_path "etc/network/interfaces"
+
 if [ ! -x "$MKIMAGE" ]; then
     MKIMAGE="$(command -v mkimage 2>/dev/null || true)"
 fi

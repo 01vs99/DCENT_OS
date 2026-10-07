@@ -1255,6 +1255,14 @@ impl Autotuner {
     }
 
     /// Return power limit as a display string for the OLED carousel.
+    ///
+    /// Called only from the autotuner carousel page (`main.rs:6954`), which
+    /// sits entirely inside a `#[cfg(feature = "display-ssd1306")]` span
+    /// (P1-O4). A `display-none` build has no caller, so this method is
+    /// dead-code-warned there without this attribute (CE/EE review,
+    /// `EVIDENCE_LEDGER.md` `P1-O4-r1`, LOW). It stays a real, non-`#[cfg]`
+    /// method — only the warning is silenced on headless builds.
+    #[cfg_attr(not(feature = "display-ssd1306"), allow(dead_code))]
     pub fn power_limit_display(&self) -> String {
         format!("{:.0}W max", self.power_limit_w)
     }

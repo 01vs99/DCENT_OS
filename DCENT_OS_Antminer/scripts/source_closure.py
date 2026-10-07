@@ -74,9 +74,15 @@ AM2_S17_DONOR_SHA256 = (
 AMLOGIC_EXACT_MODEL_BY_TARGET = {
     "am3-s19jpro-aml": "s19jpro",
     "am3-s19jproplus": "s19jpro-plus",
+    # R10 board join 2026-09-12 (drift13 #6a): the A126 lane is package-only
+    # (board_desc AMLOGIC_PACKAGE_ONLY_ENABLEMENT, install admission Denied);
+    # it binds the exact s19jpro-a donor identity like every other Amlogic
+    # model and must appear here so the builder case stays exactly exhaustive.
+    "am3-s19jproa": "s19jpro-a",
     "am3-s19xp": "s19xp",
     "am3-s19jxp": "s19j-xp",
     "am3-s19kpro": "s19kpro",
+    "am3-s19kpro-nopic": "s19kpro",
     "am3-s21": "s21",
     "am3-s21pro": "s21pro",
     "am3-s21xp": "s21xp",
@@ -90,6 +96,10 @@ AMLOGIC_EXACT_INPUTS_BY_TARGET = {
     )
     for target, model in AMLOGIC_EXACT_MODEL_BY_TARGET.items()
 }
+AMLOGIC_EXACT_INPUTS_BY_TARGET["am3-s19kpro-nopic"] = tuple(
+    "" + suffix
+    for suffix in ("vmlinux.bin", "devicetree.dtb", "rootfs/etc/fw-info")
+)
 PREBUILT_RUST_INPUTS_BY_TARGET = {
     "s9": ("dcentos-init", "dcentrald"),
     # 2026-08-29 packaging-lane wave: the S9 SE / S9k research shells
@@ -259,9 +269,11 @@ BUILD_TARGET_POLICIES = {
                 + {
                     "am3-s19jpro-aml": "dcentos_am3_s19jpro_aml_defconfig",
                     "am3-s19jproplus": "dcentos_am3_s19jproplus_defconfig",
+                    "am3-s19jproa": "dcentos_am3_s19jproa_defconfig",
                     "am3-s19xp": "dcentos_am3_s19xp_defconfig",
                     "am3-s19jxp": "dcentos_am3_s19jxp_defconfig",
                     "am3-s19kpro": "dcentos_am3_s19kpro_defconfig",
+                    "am3-s19kpro-nopic": "dcentos_am3_s19kpro_nopic_defconfig",
                     "am3-s21": "dcentos_am3_s21_defconfig",
                     "am3-s21pro": "dcentos_am3_s21pro_defconfig",
                     "am3-s21xp": "dcentos_am3_s21xp_defconfig",
@@ -271,6 +283,68 @@ BUILD_TARGET_POLICIES = {
         }
         for target in AMLOGIC_EXACT_MODEL_BY_TARGET
     },
+}
+
+# Current native media consumes exact boot components, never the earlier
+# research-shell S9 donor substitution for C43 or a saved rootfs checkpoint.
+AM1_S9_NATIVE_INPUTS = (
+    "",
+    "",
+    "",
+    "",
+)
+C43_NATIVE_INPUTS = tuple(
+    "" + name
+    for name in ("BOOT.bin", "uImage", "devicetree.dtb")
+)
+BM1391_NATIVE_INPUTS = tuple(
+    "" + name
+    for name in ("BOOT.bin", "uImage", "devicetree.dtb")
+)
+BM1396_NATIVE_INPUTS = tuple(
+    "" + name
+    for name in ("BOOT.bin", "uImage", "devicetree.dtb")
+)
+BM1396_S17E_NATIVE_INPUTS = tuple(
+    "" + name
+    for name in ("BOOT.bin", "uImage", "devicetree.dtb")
+)
+for _target in ("am1-s9i", "am1-s9j", "am1-s15", "am1-t15", "am2-t17e", "am2-s17e"):
+    PREBUILT_RUST_INPUTS_BY_TARGET[_target] = ("dcentos-init", "dcentrald")
+    PREBUILT_RUST_VARIANT_BY_TARGET[_target] = "zynq"
+    BUILD_TARGET_POLICIES[_target] = dict(BUILD_TARGET_POLICIES["s9"])
+TARGET_BUILD_INPUTS.update({
+    "am1-s9i": AM1_S9_NATIVE_INPUTS,
+    "am1-s9j": AM1_S9_NATIVE_INPUTS,
+    "am1-s9se": C43_NATIVE_INPUTS,
+    "am1-s9k": C43_NATIVE_INPUTS,
+    "am1-s15": BM1391_NATIVE_INPUTS,
+    "am1-t15": BM1391_NATIVE_INPUTS,
+    "am2-t17e": BM1396_NATIVE_INPUTS,
+    "am2-s17e": BM1396_S17E_NATIVE_INPUTS,
+    "am2-s19pro": (AM2_S17_DONOR_RELATIVE_PATH,),
+    # This distinct producer packages only current signed userspace. Historical
+    # BB boot-media targets above still refuse their missing boot-input pins.
+    "am3-bb-s19jpro-payload": (),
+})
+for _target in ("am1-s9i", "am1-s9j", "am1-s9se", "am1-s9k", "am1-s15", "am1-t15",
+                "am2-s19pro", "am2-s17pro", "am2-s17plus", "am2-t17", "am2-t17plus", "am2-t17e", "am2-s17e"):
+    PREBUILT_RUST_INPUTS_BY_TARGET[_target] = ("dcentos-init", "dcentrald", "dcentos-discovery")
+PREBUILT_RUST_INPUTS_BY_TARGET["am3-bb-s19jpro-payload"] = ("dcentrald", "dcentos-discovery")
+for _target in ("am2-s19", "am2-t19", "am2-s19a", "am2-s19plus"):
+    # Current signed SD composition uses fresh AM2 base userspace and the
+    # exact held AM2 boot set; it grants no new NAND geometry or writer.
+    PREBUILT_RUST_INPUTS_BY_TARGET[_target] = ("dcentos-init", "dcentrald", "dcentos-discovery")
+    PREBUILT_RUST_VARIANT_BY_TARGET[_target] = "zynq"
+    BUILD_TARGET_POLICIES[_target] = dict(BUILD_TARGET_POLICIES["am2-s19jpro"])
+    TARGET_BUILD_INPUTS[_target] = (AM2_S17_DONOR_RELATIVE_PATH,)
+PREBUILT_RUST_VARIANT_BY_TARGET["am3-bb-s19jpro-payload"] = "zynq"
+BUILD_TARGET_POLICIES["am3-bb-s19jpro-payload"] = {
+    "arch": "armv7-unknown-linux-musleabihf",
+    "configs": (
+        "DCENT_OS_Antminer/br2_external_dcentos/configs/dcentos-common.fragment",
+        "DCENT_OS_Antminer/br2_external_dcentos/configs/dcentos_am3_bb_s19jpro_defconfig",
+    ),
 }
 
 BUILD_DRIVER_TARGETS = frozenset(BUILD_TARGET_POLICIES) | frozenset(
@@ -351,11 +425,14 @@ def source_file(root: pathlib.Path, path_text: str, label: str) -> Dict[str, Any
     }
 
 
-def discover_am2_s17_donor(root: pathlib.Path) -> Dict[str, Any]:
+def discover_am2_s17_donor(root: pathlib.Path, assets: pathlib.Path | None = None) -> Dict[str, Any]:
     """Admit one canonical held S17 donor and reject ambiguous lookalikes."""
 
     root = pathlib.Path(root).resolve(strict=True)
     expected = pathlib.PurePosixPath(AM2_S17_DONOR_RELATIVE_PATH)
+    if assets is not None:
+        root = assets.resolve(strict=True)
+        expected = pathlib.PurePosixPath(*expected.parts[1:])
     directory_path = root.joinpath(*expected.parent.parts)
     try:
         directory = ensure_inside(root, directory_path, "AM2 S17 donor directory")
@@ -390,6 +467,8 @@ def discover_am2_s17_donor(root: pathlib.Path) -> Dict[str, Any]:
             f"{expected.name}, found {candidate.name}"
         )
     evidence = source_file(root, str(candidate), "AM2 S17 Braiins donor")
+    if assets is not None:
+        evidence["path"] = AM2_S17_DONOR_RELATIVE_PATH
     if (
         evidence["size"] != AM2_S17_DONOR_SIZE
         or evidence["sha256"] != AM2_S17_DONOR_SHA256
@@ -445,14 +524,17 @@ def parse_build_input_manifest(
 
 
 def build_input_evidence(
-    root: pathlib.Path, manifest_text: str, target: str
+    root: pathlib.Path, manifest_text: str, target: str, assets: pathlib.Path | None = None
 ) -> Dict[str, Any]:
+    import held_assets
+    if assets is not None:
+        assets = held_assets.held_root(root, str(assets))
     target = validate_identity(target, "target")
     blocked = BLOCKED_BUILD_INPUT_TARGETS.get(target)
     if blocked is not None:
         fail(blocked)
-    if target in ("am2-s17pro", "am2-s17plus", "am2-t17", "am2-t17plus"):
-        donor = discover_am2_s17_donor(root)
+    if AM2_S17_DONOR_RELATIVE_PATH in TARGET_BUILD_INPUTS.get(target, ()):
+        donor = discover_am2_s17_donor(root, assets)
         if donor["path"] != AM2_S17_DONOR_RELATIVE_PATH:
             fail(f"{target} donor discovery did not resolve its canonical path")
 
@@ -470,7 +552,9 @@ def build_input_evidence(
             fail(
                 f"target {target} requires an input absent from the manifest: {relative}"
             )
-        evidence = source_file(root, str(root / relative), "out-of-band build input")
+        input_root, input_relative = held_assets.input_location(root, relative, assets)
+        evidence = source_file(input_root, str(input_root / input_relative), "out-of-band build input")
+        evidence["path"] = relative
         if evidence["sha256"] != expected:
             fail(
                 f"out-of-band build input SHA256 mismatch for {relative}: "
@@ -1618,10 +1702,14 @@ def build_prebuilt_rust_inputs(
             seen_paths.add(path)
         entries.append(entry)
     entries.sort(key=lambda item: item["name"].encode("utf-8"))
-    if tuple(item["name"] for item in entries) != tuple(expected_names):
+    # A set admission: entries are sorted for manifest determinism, but the
+    # expected tuple's order is documentation, not semantics (the table's
+    # 3-name rows predate any lane that retained three binaries — the first
+    # such lane, drop1-20260919-n7k05sqv's am1-s9i, exposed the order bug).
+    if [item["name"] for item in entries] != sorted(expected_names):
         fail(
             f"retained prebuilt Rust input set for {target} must be exactly "
-            f"{', '.join(expected_names)}"
+            f"{', '.join(sorted(expected_names))}"
         )
     expected_sidecars = {
         item[role]["path"] for item in entries for role in ("binary", "receipt")
@@ -1752,7 +1840,10 @@ def validate_prebuilt_rust_inputs_schema(
         for key, expected_value in expected.items():
             if entry[key] != expected_value:
                 fail(f"{label}.{key} is invalid")
-    if tuple(observed_names) != tuple(expected_names):
+    # Mirrors the produce-side set admission: expected tuples are stored in
+    # table order while the manifest emits sorted entries (order determinism
+    # is still enforced — reordered manifests fail this comparison).
+    if tuple(observed_names) != tuple(sorted(expected_names)):
         fail(f"source-closure prebuilt Rust input set for {target} is invalid")
     if len(set(observed_names)) != len(observed_names):
         fail("source-closure prebuilt Rust input names contain duplicates")
@@ -2240,7 +2331,7 @@ def verify_manifest(args: argparse.Namespace) -> None:
 
 def verify_build_inputs(args: argparse.Namespace) -> None:
     root = pathlib.Path(args.repo_root).resolve(strict=True)
-    evidence = build_input_evidence(root, args.build_input_manifest, args.target)
+    evidence = build_input_evidence(root, args.build_input_manifest, args.target, args.held_assets)
     print(
         "out-of-band build inputs verified: "
         f"target={args.target} files={len(evidence['files'])} "
@@ -2313,8 +2404,13 @@ def verify_portable_manifest(args: argparse.Namespace) -> None:
     if os.name == "posix":
         os.chmod(parent, 0o700)
     try:
+        _projected_path, projected_raw = read_regular_nonsymlink(
+            args.source_snapshot_projection,
+            "retained source-snapshot projection",
+        )
         created = source_snapshot.create_snapshot(
-            pathlib.Path(args.repo_root), commit, parent
+            pathlib.Path(args.repo_root), commit, parent,
+            profile=source_snapshot.descriptor_profile(json.loads(projected_raw)),
         )
         try:
             materialized = source_snapshot.verify_snapshot(created.snapshot, commit)
@@ -2457,6 +2553,7 @@ def parser() -> argparse.ArgumentParser:
     verify_inputs.add_argument("--repo-root", required=True)
     verify_inputs.add_argument("--build-input-manifest", required=True)
     verify_inputs.add_argument("--target", required=True)
+    verify_inputs.add_argument("--held-assets", type=pathlib.Path)
     verify_inputs.set_defaults(function=verify_build_inputs)
     query = commands.add_parser(
         "query-artifact", help="print one schema-validated artifact field"
@@ -2468,9 +2565,84 @@ def parser() -> argparse.ArgumentParser:
     return top
 
 
+def host_path_text(value: str) -> str:
+    """Rewrite Git-Bash (MSYS) drive paths and MSYS long-path prefixes.
+
+    MSYS automatic argument conversion is per-argument and inconsistent on
+    very long release-stage command lines: producer run
+    drop1-20260917-gnscaudk received ``--output`` completely unconverted
+    (Windows Python then wrote the receipt into a shadow ``D:\\d\\...``
+    tree via drive-relative interpretation + mkdir(parents=True)), while
+    the retained prebuilt-Rust pair arrived in mixed forms and failed the
+    one-flat-directory admission. Normalizing every host-path argument in
+    one place makes the shell conversion behavior irrelevant. POSIX and
+    native inputs are returned unchanged; on non-Windows hosts this is
+    the identity.
+    """
+    if os.name != "nt" or not isinstance(value, str):
+        return value
+    text = value
+    if text.startswith("\\\\?\\UNC\\"):
+        text = "\\\\" + text[8:]
+    elif text.startswith("//?/UNC/"):
+        text = "//" + text[8:]
+    else:
+        for prefix in ("\\\\?\\", "//?/"):
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+                break
+    if (
+        len(text) >= 2
+        and text[0] == "/"
+        and text[1].isascii()
+        and text[1].isalpha()
+        and (len(text) == 2 or text[2] == "/")
+    ):
+        return text[1].upper() + ":/" + text[3:]
+    return text
+
+
+
+def normalize_host_path_args(args: argparse.Namespace) -> argparse.Namespace:
+    for field in (
+        "repo_root",
+        "source_snapshot",
+        "release_invocation",
+        "cargo_lock",
+        "cargo_build_script",
+        "buildroot_repository",
+        "external_tree",
+        "container_definition",
+        "build_input_snapshot",
+        "build_input_manifest",
+        "output",
+        "artifact_dir",
+        "signature",
+        "public_key",
+        "manifest",
+        "source_snapshot_projection",
+        "release_invocation_projection",
+        "build_input_projection",
+    ):
+        value = getattr(args, field, None)
+        if isinstance(value, str):
+            setattr(args, field, host_path_text(value))
+    for field in ("buildroot_config", "artifact"):
+        values = getattr(args, field, None)
+        if isinstance(values, list):
+            setattr(args, field, [host_path_text(item) for item in values])
+    triples = getattr(args, "prebuilt_rust_input", None)
+    if isinstance(triples, list):
+        args.prebuilt_rust_input = [
+            [name, host_path_text(binary), host_path_text(receipt)]
+            for name, binary, receipt in triples
+        ]
+    return args
+
+
 def main() -> int:
     try:
-        args = parser().parse_args()
+        args = normalize_host_path_args(parser().parse_args())
         args.function(args)
         return 0
     except (ClosureError, KeyError, TypeError, json.JSONDecodeError, OSError) as error:

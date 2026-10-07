@@ -16704,8 +16704,7 @@ B3 5D 1B 45 6F A0 34 33 F6 96 9E 84 1B 98 00 00 00 20 64 C2";
 
     #[test]
     fn s19k_plan_post_clean_uart_replace_is_identity_unless_env_gates() {
-        let protocol =
-            include_str!("../../../../../");
+        let protocol = include_str!("../tests/fixtures/bm1366_protocol_reference.md");
         assert!(admit_s19k_held_protocol_has_no_job_abort_opcode(protocol).is_ok());
         let session = s19k_plan_post_clean_uart_replace(false, true, true, 4, 0, 0);
         assert!(!session.chain_inactive);

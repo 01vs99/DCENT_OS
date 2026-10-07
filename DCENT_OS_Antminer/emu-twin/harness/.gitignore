@@ -1,0 +1,3 @@
+# Scenario evidence JSON files are run artifacts, not source (task contract:
+# "JSON evidence file ... written to harness/evidence/ (gitignored)").
+evidence/

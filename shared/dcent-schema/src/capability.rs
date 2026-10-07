@@ -41,6 +41,14 @@ pub const INSTALL_CAPABILITY_VALUES: &[&str] = &[
     "http-ota-or-usb-serial",
     "manifest-board-match",
     "stock-bmu-root-flasher",
+    // Typed evidence-gap preconditions (amlogic-t21 / am3-bb NAND
+    // first-install facts). Each names a contract that must be proven before
+    // the corresponding writer may exist.
+    "t21-controller-specific-storage-map",
+    "t21-recovery-flag-offset",
+    "t21-write-readback-proof",
+    "t21-rollback-witness",
+    "bb-nand-first-install-capsule",
 ];
 
 pub const PLANNER_OUTCOME_VALUES: &[&str] =
@@ -51,6 +59,9 @@ pub const PROOF_SCOPE_VALUES: &[&str] = &[
     "exact_target_lab_only",
     "local_artifact_only",
     "passthrough_only",
+    // Weakest scope: offline/desk evidence only, asserts nothing about any
+    // device (amlogic-t21 evidence-gap fact).
+    "desk_evidence_only",
     "physical_media_required",
     "upload_only_boot_pending",
 ];
@@ -168,6 +179,19 @@ pub enum InstallCapability {
     ManifestBoardMatch,
     #[serde(rename = "stock-bmu-root-flasher")]
     StockBmuRootFlasher,
+    // Typed evidence-gap preconditions (amlogic-t21 / am3-bb NAND
+    // first-install facts). Each names a contract that must be proven before
+    // the corresponding writer may exist.
+    #[serde(rename = "t21-controller-specific-storage-map")]
+    T21ControllerSpecificStorageMap,
+    #[serde(rename = "t21-recovery-flag-offset")]
+    T21RecoveryFlagOffset,
+    #[serde(rename = "t21-write-readback-proof")]
+    T21WriteReadbackProof,
+    #[serde(rename = "t21-rollback-witness")]
+    T21RollbackWitness,
+    #[serde(rename = "bb-nand-first-install-capsule")]
+    BbNandFirstInstallCapsule,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,6 +216,10 @@ pub enum ProofScope {
     LocalArtifactOnly,
     #[serde(rename = "passthrough_only")]
     PassthroughOnly,
+    // Weakest scope: the route carries offline/desk evidence only and
+    // asserts nothing about any device (amlogic-t21 evidence-gap fact).
+    #[serde(rename = "desk_evidence_only")]
+    DeskEvidenceOnly,
     #[serde(rename = "physical_media_required")]
     PhysicalMediaRequired,
     #[serde(rename = "upload_only_boot_pending")]

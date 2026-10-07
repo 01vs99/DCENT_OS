@@ -530,6 +530,11 @@ fn build_submission(
     let mesh_payout = base_worker_address(&worker);
 
     let base_config = DcentAxeConfig {
+        // XPSAFE-8: fan population is per-unit physical truth that no
+        // migration source or setup form knows. Default to the reference
+        // both-headers build; the operator declares otherwise via
+        // `fansPopulated` on /api/system.
+        fans_populated: dcentaxe_hal::board::FanPopulation::Both,
         wifi_ssid: ssid,
         wifi_password: password,
         stratum: dcentaxe_stratum::StratumConfig {

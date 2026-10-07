@@ -124,8 +124,40 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def host_path_text(value: str) -> str:
+    """Rewrite Git-Bash (MSYS) drive paths (/d/dir) and long-path prefixes.
+
+    MSYS automatic argument conversion is per-argument and inconsistent on
+    long release command lines (see runs drop1-20260916-cyg3sjwi and
+    drop1-20260917-gnscaudk/c1e73bep). Normalizing at the lexical layer
+    makes the shell conversion behavior irrelevant. POSIX and native
+    inputs are returned unchanged; on non-Windows hosts this is identity.
+    """
+    if os.name != "nt" or not isinstance(value, str):
+        return value
+    text = value
+    if text.startswith("\\\\?\\UNC\\"):
+        text = "\\\\" + text[8:]
+    elif text.startswith("//?/UNC/"):
+        text = "//" + text[8:]
+    else:
+        for prefix in ("\\\\?\\", "//?/"):
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+                break
+    if (
+        len(text) >= 2
+        and text[0] == "/"
+        and text[1].isascii()
+        and text[1].isalpha()
+        and (len(text) == 2 or text[2] == "/")
+    ):
+        return text[1].upper() + ":/" + text[3:]
+    return text
+
+
 def lexical_absolute(value: pathlib.Path) -> pathlib.Path:
-    return pathlib.Path(os.path.abspath(os.fspath(value)))
+    return pathlib.Path(os.path.abspath(host_path_text(os.fspath(value))))
 
 
 def _is_digest(value: object) -> bool:
@@ -1491,6 +1523,26 @@ def _validate_capability_record(value: object) -> Dict[str, Any]:
     return capability
 
 
+def _same_recorded_path(recorded: str, actual: str) -> bool:
+    """Path identity, not separator spelling.
+
+    Bash passes POSIX forms, the python child records them after Path()
+    normalization (backslashes on Windows); both spellings must verify as
+    the same filesystem object or the custody binding is broken.
+    """
+    if recorded == actual:
+        return True
+    try:
+        recorded_stat = os.stat(recorded)
+        actual_stat = os.stat(actual)
+    except OSError:
+        return False
+    return (recorded_stat.st_dev, recorded_stat.st_ino) == (
+        actual_stat.st_dev,
+        actual_stat.st_ino,
+    )
+
+
 def _validate_capability_binding(
     value: object,
     stage: pathlib.Path,
@@ -1504,7 +1556,10 @@ def _validate_capability_binding(
         "stage_path": str(stage),
     }
     for key, expected_value in expected.items():
-        if capability[key] != expected_value:
+        if key in ("invocation_stage", "stage_path"):
+            if not _same_recorded_path(capability[key], expected_value):
+                fail(f"result-stage capability {key} binding does not match")
+        elif capability[key] != expected_value:
             fail(f"result-stage capability {key} binding does not match")
     expected_name = f"{STAGE_PREFIX}{binding['result_name']}-{capability['stage_id']}"
     if stage.name != expected_name:
@@ -1550,7 +1605,10 @@ def _validate_capability(
         "stage_path": str(stage),
     }
     for key, expected_value in expected.items():
-        if capability[key] != expected_value:
+        if key in ("invocation_stage", "stage_path"):
+            if not _same_recorded_path(capability[key], expected_value):
+                fail(f"result-stage capability {key} binding does not match")
+        elif capability[key] != expected_value:
             fail(f"result-stage capability {key} binding does not match")
     if capability["schema"] == CAPABILITY_SCHEMA:
         stage_metadata = stage_metadata or os.lstat(stage)
@@ -3490,9 +3548,23 @@ def parser() -> argparse.ArgumentParser:
     return top
 
 
+def normalize_host_path_args(args: argparse.Namespace) -> argparse.Namespace:
+    for field in (
+        "stage_parent",
+        "invocation_stage",
+        "result_output",
+        "stage",
+        "capability",
+    ):
+        value = getattr(args, field, None)
+        if isinstance(value, str):
+            setattr(args, field, host_path_text(value))
+    return args
+
+
 def main() -> int:
     try:
-        args = parser().parse_args()
+        args = normalize_host_path_args(parser().parse_args())
         if args.command == "create":
             created = create_result_stage(
                 pathlib.Path(args.stage_parent),

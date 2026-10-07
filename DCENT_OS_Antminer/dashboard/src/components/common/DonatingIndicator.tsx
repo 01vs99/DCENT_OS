@@ -24,7 +24,9 @@ const POLL_INTERVAL_MS = 5_000;
 export function DonatingIndicator({ cycleDurationS = 3600 }: DonatingIndicatorProps) {
   const status = useMinerStore(s => s.status);
   const donating = status?.pool?.donating === true;
-  const [percent, setPercent] = useState(2);
+  // 0 = firmware 0% default (C6, 2026-09-01); only an opted-in config
+  // raises it. The chip only renders while `donating` is true anyway.
+  const [percent, setPercent] = useState(0);
   const [configuredCycleS, setConfiguredCycleS] = useState(cycleDurationS);
   const [route, setRoute] = useState<PoolsDonationStatus | null>(null);
 
@@ -39,7 +41,7 @@ export function DonatingIndicator({ cycleDurationS = 3600 }: DonatingIndicatorPr
     api.getDonationConfig()
       .then(config => {
         if (cancelled) return;
-        const pct = typeof config.percent === 'number' ? config.percent : 2;
+        const pct = typeof config.percent === 'number' ? config.percent : 0;
         const cycle = typeof config.cycle_duration_s === 'number'
           ? config.cycle_duration_s
           : cycleDurationS;
@@ -47,7 +49,8 @@ export function DonatingIndicator({ cycleDurationS = 3600 }: DonatingIndicatorPr
         setConfiguredCycleS(Math.max(60, Math.min(86400, cycle)));
       })
       .catch(() => {
-        // The live chip can still explain the default 2% donation window.
+        // The chip only shows while actually donating; on fetch failure
+        // keep the neutral 0% placeholder (firmware default).
       });
     return () => { cancelled = true; };
   }, [cycleDurationS]);

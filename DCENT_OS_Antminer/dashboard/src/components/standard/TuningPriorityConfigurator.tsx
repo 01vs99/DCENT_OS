@@ -3,6 +3,7 @@ import { api } from '../../api/client';
 import { useMinerStore } from '../../store/miner';
 import { wattsToBtu } from '../../utils/thermal';
 import { getLiveDisplayWallWatts } from '../../utils/power';
+import { heaterTargetFeedback } from '../../utils/heaterTarget';
 import { ActionButton } from '../common/ActionButton';
 import { Tooltip } from '../common/Tooltip';
 
@@ -170,16 +171,22 @@ export function TuningPriorityConfigurator() {
     try {
       const meta = PRIORITY_META.find(p => p.id === priority)!;
       // 1) Real unit power target.
-      await api.setHeaterTarget({ watts });
+      const result = await api.setHeaterTarget({ watts });
+      const feedback = heaterTargetFeedback(result);
+      if (feedback.tone !== 'success') {
+        addAlert('warning', feedback.message);
+        return;
+      }
       // 2) Real fan mode (bounds noise to the chosen profile).
       try {
         await api.setFan(predicted.fanMode);
       } catch {
-        /* power target still applied; fan mode is best-effort */
+        addAlert('warning', 'Power policy adopted; fan-mode change was not confirmed.');
+        return;
       }
       addAlert(
         'info',
-        `${meta.label} applied: ${watts.toLocaleString()} W unit target · ${predicted.fanMode} fan. The autotuner now converges per-chain frequency/voltage to this envelope.`,
+        `${meta.label}: ${watts.toLocaleString()} W requested; the autotuner acknowledged the policy. Check live power and fan telemetry for the achieved result.`,
       );
     } catch {
       addAlert('warning', 'Failed to apply the power target to the daemon');
@@ -427,7 +434,7 @@ export function TuningPriorityConfigurator() {
               onClick={apply}
               variant="primary"
               disabled={applying || !hasBaseline}
-              confirm={`Apply a ${Math.round(targetWatts).toLocaleString()} W unit power target and ${predicted.fanMode} fan mode? The autotuner converges per-chain frequency/voltage to this envelope. HAL voltage/thermal hard-stops still apply.`}
+              confirm={`Request a ${Math.round(targetWatts).toLocaleString()} W unit power target? The ${predicted.fanMode} fan request follows only after the autotuner acknowledges power control. Check live telemetry for the achieved result.`}
             />
           </div>
         </div>

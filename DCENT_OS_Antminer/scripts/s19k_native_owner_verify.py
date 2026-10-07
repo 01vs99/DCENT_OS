@@ -49,6 +49,7 @@ POLICY_SOURCE = (
 )
 HAL_SOURCE = "DCENT_OS_Antminer/dcentrald/dcentrald-hal/src/platform/amlogic/mod.rs"
 SERIAL_SOURCE = "DCENT_OS_Antminer/dcentrald/dcentrald/src/serial_mining.rs"
+NATIVE_IDENTITY_SOURCE = "DCENT_OS_Antminer/dcentrald/dcentrald/src/serial_mining/s19k_native_identity.rs"
 RUST_TOOLCHAIN_SOURCE = "DCENT_OS_Antminer/dcentrald/rust-toolchain.toml"
 CARGO_CONFIG_SOURCE = "DCENT_OS_Antminer/dcentrald/.cargo/config.toml"
 CARGO_LOCK_SOURCE = "DCENT_OS_Antminer/dcentrald/Cargo.lock"
@@ -293,7 +294,7 @@ def _audit_private_owner(serial: str) -> list[dict[str, Any]]:
         (
             "pre_serial: Option<S19kNativePreSerialAdmission>",
             "_dispatch: crate::SerialRuntimeDispatchAdmission",
-            "_identity: S19kLiveIdentityReceipt",
+            "_identity: S19kNativeIdentityReceipt",
             "_pre_cooling: S19kNativeCoolingAdmission",
             "_powered_cooling: S19kNativeCoolingAdmission",
             "_post_cooling: S19kNativeCoolingAdmission",
@@ -304,7 +305,11 @@ def _audit_private_owner(serial: str) -> list[dict[str, Any]]:
             "_terminal: S19kNativeTerminalCustodyAdmission",
             "domains.route == ExactSerialRoute::S19kNative",
             "dispatch.identity() == dcentrald_common::AsicProtocolIdentity::Bm1366",
-            'platform.board_target() == "am3-s19k"',
+            "bm1366_dispatch_admitted_serial_platform(",
+            "dispatch.board_target() == platform.board_target()",
+            "dispatch.board_target() == platform_profile.board_target",
+            "platform_profile.expected_chips_per_uart",
+            "== dcentrald_hal::platform::amlogic::S19K_NATIVE_EXPECTED_CHIPS_PER_UART",
             "identity.board_count == identity.profile.board_count()",
             "identity.physical_addresses == identity.profile.physical_addresses()",
             "identity.board_names == identity.profile.board_names()",
@@ -366,7 +371,7 @@ def _audit_hal(hal: str) -> dict[str, list[dict[str, Any]]]:
             "service.psu_enable_operation_available = true;",
             "Result<Arc<dyn FanAccess>>",
             "power: ApwEnableReceipt",
-            "power.s19k_native_generation.as_ref()",
+            "power.native_generation.as_ref()",
             "Arc::ptr_eq(power_generation, &self.generation)",
             "for route in &self.routes",
             "set_amlogic_board_reset_checked(route.logical_chain, false)",
@@ -405,13 +410,14 @@ def _audit_hal(hal: str) -> dict[str, list[dict[str, Any]]]:
             "plug_gpio: 439",
             "reset_gpio: 454",
             "pub const S19K_NATIVE_EXPECTED_CHIPS_PER_UART: u8 = 77;",
-            "disable_psu_checked_for_polarity(true)",
+            'amlogic_gpio437::resolve_drive_recipe("am3-s19k")',
+            "disable_psu_checked_for_recipe(recipe)",
         ),
         "reviewed HAL physical contract",
     )
     return {
         "gpio437": [
-            _fact(HAL_SOURCE, hal, "fn psu_is_active_low(self) -> bool", "profile-frozen GPIO437 polarity"),
+            _fact(HAL_SOURCE, hal, "pub fn gpio437_recipe(&self)", "population-bound GPIO437 drive recipe"),
             _fact(HAL_SOURCE, hal, "pub fn disable_s19k_track1_psu_checked()", "explicit S19k raw-1 SafeOff"),
         ],
         "resets": [
@@ -470,6 +476,16 @@ def _audit_serial(serial: str) -> dict[str, list[dict[str, Any]]]:
         ),
         "native serial owner path",
     )
+    _require_all(
+        serial,
+        (
+            "fn s19k_native_request_from_dispatch(",
+            'admission.board_target() == "am3-s19k"',
+            "admission.identity() == dcentrald_common::AsicProtocolIdentity::Bm1366",
+            "!self.s19k_native_cold_start_requested()",
+        ),
+        "configured native request retains exact dispatch binding",
+    )
     constructor_flags = re.findall(
         r"Ok\(SerialWorkTransport::Multi\(MultiTtyTransport\s*\{.*?"
         r"native_exact_mapping:\s*(true|false),",
@@ -495,7 +511,8 @@ def _audit_serial(serial: str) -> dict[str, list[dict[str, Any]]]:
             ".prepare_s19k_native_enable(",
             "assert_all_resets_checked()",
             "shutdown raced native S19k reset assertion",
-            "psu_enable_operation.enable_psu()",
+            "let voltage = f64::from(self.config.mining.voltage_mv) / 1000.0;",
+            "psu_enable_operation.enable_psu_at_voltage(voltage)",
             "S19kNativeCoolingStage::PostPower",
             "shutdown raced native S19k powered cooling",
             "release_mapped_resets_checked(asserted, enable_receipt)",
@@ -655,6 +672,26 @@ def audit_source_corpus(corpus: Mapping[str, bytes]) -> dict[str, Any]:
         name: {"status": "joined", "evidence": []}
         for name in REQUIRED_OWNER_CAPABILITIES
     }
+    native_identity = re.sub(r"\s+", " ", text[NATIVE_IDENTITY_SOURCE].split("#[cfg(test)]", 1)[0])
+    _require_all(
+        native_identity,
+        (
+            "platform.read_identity_pages(service,",
+            "names[slot] = Some(decode_deployed_eeprom(page)?.board_name)",
+            "platform.bind_population_polarity(service, names.each_ref().map(|name| name.as_deref()))?",
+            "let identity = decode_deployed_eeprom(page)",
+            "identity.region_1_crc5 == Crc5Check::Match",
+            "S19kNativeBoardModel::parse(&identity.board_name)",
+            "observed_protocol_from_deployed_page(page) == Some(AsicProtocolIdentity::Bm1366)",
+            "page.is_some() == populated[slot]",
+        ),
+        "native EEPROM identity producer",
+    )
+    _require_all(
+        serial,
+        ("s19k_native_identity::capture(&mapped, &service)",),
+        "native identity startup integration",
+    )
     for name, facts in {**_audit_hal(hal), **_audit_serial(serial)}.items():
         capabilities[name]["evidence"].extend(facts)
     capabilities["identity"]["evidence"].insert(

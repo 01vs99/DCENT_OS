@@ -188,6 +188,27 @@ impl HashboardIdentityRow {
         self.authority == IdentityAuthority::EpicTranscribed
     }
 
+    /// The declared cooling medium for this hashboard SKU, resolved through
+    /// the **hashboard-code discriminator** (B11,
+    /// [`crate::hydro_fleet::cooling_medium_for_hashboard_code`]).
+    ///
+    /// This is the layer the `board_desc.rs` `cooling_medium` doc comment
+    /// points at: cooling medium is a hashboard/chassis facet, never a
+    /// control-board facet, and `BoardDesc::cooling_medium` stays `None`
+    /// for every control-board row precisely so that THIS lookup — driven
+    /// by the deployed hashboard's code — is the only thing that can ever
+    /// resolve a medium.
+    ///
+    /// Fail-closed exactly like the discriminator: SKUs whose prefix is not
+    /// in the pinned table resolve `None` (undeclared ⇒ fans stay managed,
+    /// no bypass). The method adds no serialized field — the row's field
+    /// set is deliberately unchanged.
+    pub fn declared_cooling_medium(
+        &self,
+    ) -> Option<dcentrald_common::cooling_medium::CoolingMedium> {
+        crate::hydro_fleet::cooling_medium_for_hashboard_code(&self.model_id)
+    }
+
     /// Resolve this board's chain address stride through the DCENT SSOT.
     ///
     /// Delegates to [`crate::hashboard_topology::HashboardDescriptor::resolved_addr_interval`]
@@ -1075,6 +1096,49 @@ mod tests {
                 c.sku
             );
             assert_eq!(row.authority, IdentityAuthority::DcentCatalog, "{}", c.sku);
+        }
+    }
+
+    /// B11: the hashboard-DB layer answers the cooling-medium question the
+    /// BoardDesc layer deliberately cannot (one control board, three media).
+    /// Air SKUs resolve `Air`; the two hydro/immersion rows in this roster
+    /// resolve their media and genuinely earn the fan bypass; every
+    /// non-pinned prefix (the NB*/TS* records) stays undeclared.
+    #[test]
+    fn declared_cooling_medium_resolves_through_the_hashboard_code() {
+        use dcentrald_common::cooling_medium::{fan_bypass_permitted, CoolingMedium};
+        for sku in ["BHB68603", "A3HB70501", "BHB42601"] {
+            assert_eq!(
+                hashboard_identity(sku).unwrap().declared_cooling_medium(),
+                Some(CoolingMedium::Air),
+                "{sku}"
+            );
+        }
+        assert_eq!(
+            hashboard_identity("H6HB70801").unwrap().declared_cooling_medium(),
+            Some(CoolingMedium::Hydro)
+        );
+        assert_eq!(
+            hashboard_identity("M1HB70602")
+                .unwrap()
+                .declared_cooling_medium(),
+            Some(CoolingMedium::Immersion)
+        );
+        // The two fanless rows genuinely carry no fan actuator…
+        for (sku, medium) in [
+            ("H6HB70801", CoolingMedium::Hydro),
+            ("M1HB70602", CoolingMedium::Immersion),
+        ] {
+            let m = hashboard_identity(sku).unwrap().declared_cooling_medium();
+            assert!(fan_bypass_permitted(m), "{sku}");
+            assert!(!medium.has_fan_actuator(), "{sku}");
+        }
+        // …while the NB*/TS* jig records (prefix outside the pinned
+        // discriminator) stay undeclared: fans managed, no bypass.
+        for sku in ["NBP1901", "NBS1902", "TS007"] {
+            let m = hashboard_identity(sku).unwrap().declared_cooling_medium();
+            assert_eq!(m, None, "{sku}");
+            assert!(!fan_bypass_permitted(m), "{sku}");
         }
     }
 

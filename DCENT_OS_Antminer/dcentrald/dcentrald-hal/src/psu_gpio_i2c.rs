@@ -214,7 +214,7 @@ pub const LOKI_INTER_TXN_GAP_MS_MAX: u64 = 500;
 /// proven 8 ms default. Clamps to `[MIN..=MAX]` so a malformed env
 /// value can't accidentally disable the gap.
 pub fn loki_inter_txn_gap_ms() -> u64 {
-    std::env::var("DCENT_AM2_PSU_LOKI_INTER_TXN_GAP_MS")
+    dcentrald_common::lab_env::var("DCENT_AM2_PSU_LOKI_INTER_TXN_GAP_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map(|n| n.clamp(LOKI_INTER_TXN_GAP_MS_MIN, LOKI_INTER_TXN_GAP_MS_MAX))
@@ -248,7 +248,7 @@ pub const LOKI_INTER_TXN_GAP_MS: u64 = LOKI_INTER_TXN_GAP_MS_DEFAULT;
 /// an odd selection) — the operator's A/B harness owns that decision; we
 /// only parse what they set.
 fn loki_reply_register() -> u8 {
-    std::env::var("DCENT_AM2_LOKI_REPLY_REG")
+    dcentrald_common::lab_env::var("DCENT_AM2_LOKI_REPLY_REG")
         .ok()
         .and_then(|v| {
             u8::from_str_radix(
@@ -291,7 +291,7 @@ fn loki_reply_register() -> u8 {
 /// Default `false` → behaviour is byte-identical to today ( write +
 ///  read). Operator A/B: `DCENT_AM2_LOKI_BOSMINER_BULK=1`.
 fn loki_bosminer_bulk_mode() -> bool {
-    std::env::var("DCENT_AM2_LOKI_BOSMINER_BULK")
+    dcentrald_common::lab_env::var("DCENT_AM2_LOKI_BOSMINER_BULK")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -351,7 +351,7 @@ fn require_loki_reply_register_ack(
 /// ENV-TUNABLE for live A/B without recompiling:
 ///   `DCENT_AM2_LOKI_POST_WRITE_SETTLE_MS=350` (default 350 ms).
 fn loki_post_write_settle_ms() -> u64 {
-    std::env::var("DCENT_AM2_LOKI_POST_WRITE_SETTLE_MS")
+    dcentrald_common::lab_env::var("DCENT_AM2_LOKI_POST_WRITE_SETTLE_MS")
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(350)
@@ -412,7 +412,7 @@ pub struct GpioBitBangI2c {
 /// Invalid values (zero, non-numeric, > 100 ms) fall back to the default
 /// with a warning.
 fn resolve_half_period_us() -> u64 {
-    if let Ok(raw) = std::env::var("DCENT_AM2_PSU_BITBANG_HALF_PERIOD_US") {
+    if let Ok(raw) = dcentrald_common::lab_env::var("DCENT_AM2_PSU_BITBANG_HALF_PERIOD_US") {
         match raw.trim().parse::<u64>() {
             Ok(n) if n > 0 && n <= 100_000 => {
                 tracing::info!(

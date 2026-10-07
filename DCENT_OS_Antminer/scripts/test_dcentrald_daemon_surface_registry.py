@@ -131,6 +131,11 @@ FEATURE_PROFILES = [
         "authority": "Production orchestration surface; simulator and MQTT TLS passthrough remain disabled.",
     },
     {
+        "profile": "lab",
+        "features": ["lab"],
+        "authority": "Compile-time laboratory hardware overrides require explicit --lab-runtime admission; the compiled capability cannot authorize signed Beta/Stable images.",
+    },
+    {
         "profile": "sim-hal",
         "features": ["sim-hal"],
         "authority": "Host-only emulation routed through dependency simulator features; Buildroot/release profiles must not enable it.",
@@ -142,7 +147,7 @@ FEATURE_PROFILES = [
     },
     {
         "profile": "all-features",
-        "features": ["mqtt-tls", "sim-hal"],
+        "features": ["lab", "mqtt-tls", "sim-hal"],
         "authority": "Compilation/test union only; it is not a shipped runtime profile or hardware receipt.",
     },
 ]
@@ -150,7 +155,7 @@ FEATURE_PROFILES = [
 KNOWN_EXTERNAL_BLOCKERS = [
     "The source and host-test census does not prove either binary was staged into a specific image, launched by PID 1, reachable through the deployed firewall, or matched to the intended physical controller.",
     "The default daemon contains real device, power, thermal, work, and process-control authority; this registry never invokes those paths and cannot prove their electrical or mechanical outcome.",
-    "Twenty unsafe blocks are confined to serial-mining process/identity syscalls and AM3 BeagleBone retained-GPIO cutoff code, but host compilation does not validate target libc, kernel, fd, or scheduling behavior.",
+    "The exact unsafe census includes production process/device boundaries and private host-only local-PTY fixtures; source accounting and host compilation do not validate target libc, kernel, fd, scheduling, or physical hardware behavior.",
     "Configuration reads are now bounded, no-follow, nonblocking on Unix, opened-handle regular-file checked, and exact-NotFound classified, but parent-directory trust and non-Unix replacement races remain external assumptions.",
     "A safe parsed configuration does not establish honest platform markers, BoardDesc correctness, attached ASIC identity, UART routing, EEPROM population, PSU variant, cooling topology, or exclusive fabric custody.",
     "CLI one-shots intentionally precede normal configuration and runtime admission; invoking fan, SafeOff, handoff, or recovery verbs remains explicit operator authority requiring target-specific procedures.",
@@ -387,6 +392,9 @@ def build_registry() -> dict[str, object]:
             "help_precedes_hardware": True,
         },
         "runtime_dispatch_kinds": [
+            "Bm1396Native",
+            "Bm1391Native",
+            "C43Native",
             "Am3BeagleBone",
             "StratumProxy",
             "Tap",
@@ -457,6 +465,12 @@ class DcentraldDaemonSurfaceRegistryTests(unittest.TestCase):
 
     def test_manifest_binaries_dependencies_features_and_workspace_are_exact(self) -> None:
         self.assertEqual(self.registry["package"], self.actual["package"])
+        features = self.registry["package"]["features"]
+        profiles = {row["profile"]: row for row in self.registry["feature_profiles"]}
+        self.assertEqual(set(profiles), set(features) | {"all-features"})
+        self.assertEqual(profiles["all-features"]["features"], sorted(set(features) - {"default"}))
+        self.assertEqual(features["default"], [])
+        self.assertNotIn("recovery-tool", features)
         workspace = toml_section(
             WORKSPACE_MANIFEST_PATH.read_text(encoding="utf-8"), "workspace"
         )
@@ -497,14 +511,20 @@ class DcentraldDaemonSurfaceRegistryTests(unittest.TestCase):
         self.assertEqual(self.registry["unsafe_surface"], self.actual["unsafe_surface"])
         self.assertIn("#![deny(unsafe_op_in_unsafe_fn)]", self.main)
         self.assertIn("#![forbid(unsafe_code)]", self.discovery)
-        self.assertEqual(self.registry["source_totals"]["unsafe_blocks"], 54)
+        # Lexical census includes exact private host-test sources; this does
+        # not execute those blocks or confer hardware/production admission.
+        self.assertEqual(self.registry["source_totals"]["unsafe_blocks"], 89)
         self.assertEqual(
             self.registry["unsafe_surface"]["files"],
             {
                 "DCENT_OS_Antminer/dcentrald/dcentrald/src/am3_bb_mining.rs": 9,
+                "DCENT_OS_Antminer/dcentrald/dcentrald/src/am3_bb_pre_power_run_tests.rs": 3,
                 "DCENT_OS_Antminer/dcentrald/dcentrald/src/fpga.rs": 2,
                 "DCENT_OS_Antminer/dcentrald/dcentrald/src/s19k_endurance.rs": 6,
-                "DCENT_OS_Antminer/dcentrald/dcentrald/src/serial_mining.rs": 37,
+                "DCENT_OS_Antminer/dcentrald/dcentrald/src/serial_mining.rs": 58,
+                "DCENT_OS_Antminer/dcentrald/dcentrald/src/serial_mining/classic_aml_proof.rs": 1,
+                "DCENT_OS_Antminer/dcentrald/dcentrald/src/serial_mining/classic_aml_runtime.rs": 4,
+                "DCENT_OS_Antminer/dcentrald/dcentrald/src/serial_mining/modern_native_population_tests.rs": 6,
             },
         )
 
@@ -560,9 +580,8 @@ class DcentraldDaemonSurfaceRegistryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["--update"]:
-        REGISTRY_PATH.write_text(
-            json.dumps(build_registry(), indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
+        REGISTRY_PATH.write_bytes(
+            (json.dumps(build_registry(), indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
         )
     else:
         unittest.main()

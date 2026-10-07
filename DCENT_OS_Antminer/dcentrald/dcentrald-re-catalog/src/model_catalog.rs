@@ -79,8 +79,24 @@ pub static ANTMINER_MODELS: &[ModelEvidence] = &[
     model!("s19pro", 0x1398, 3, Some(114), 115_740, 7, Some(675), Some(13_000), Some(14_200), Exact, &[MASTER_MODELS, MASTER_PLL, S19_JIG, ""]),
     model!("s19a", 0x1398, 3, Some(114), 115_740, 7, None, None, None, Exact, &[MASTER_MODELS]),
     model!("s19apro", 0x1398, 3, Some(114), 115_740, 7, None, None, None, Exact, &[MASTER_MODELS]),
-    model!("s19i", 0x1398, 3, Some(114), 115_740, 7, None, None, None, Exact, &[MASTER_MODELS]),
-    model!("s19j", 0x1398, 3, None, 115_740, 7, None, None, None, Structural, &[MASTER_MODELS]),
+    // Gauntlet B5b (2026-09-02) — identity corrected from the refuted
+    // "0x1398 Exact" row (which claimed S19 Pro geometry): Bitmain's own
+    // s19i-20210427 stock topol states machine NBS2003 = BM1360
+    // (asic_addr "0x1360"), 80 ASICs/chain (8x10 grid), 40 dom x2, interval 3,
+    // 156+624 cores. Downgraded Exact -> Structural: the identity+geometry are
+    // stock-exact, but NO BM1360 protocol detail is held (baud/response body
+    // below remain the inherited placeholders, not evidence — B-lane Ghidra
+    // owns the stripped s19i bmminer). Adjudication: PHASE_A_EVIDENCE_REPORT.md
+    // §2.3/§3.5; roster evidence note row 29 (BETA_ROSTER.md).
+    model!("s19i", 0x1360, 3, Some(80), 115_740, 7, None, None, None, Structural, &[MASTER_MODELS, ""]),
+    // Gauntlet B5b (2026-09-02) — identity corrected from the refuted
+    // "0x1398 Structural" row: Bitmain's own S19j-merge topology DB states
+    // BHB42701 = BM1362 (asic_addr "0x1362"), 108 ASICs/chain (12x9 grid),
+    // 36 dom x3, interval 2. Sources: the stock tree (below) and the pinned
+    // transcription `dcentrald-silicon-profiles/src/s19_family_stock_topol.rs`
+    // (topol sha256 61a6404b...). Same BM1362 probe-baud/response family as
+    // the sibling s19jpro row. Adjudication: PHASE_A_EVIDENCE_REPORT.md §3.6.
+    model!("s19j", 0x1362, 3, Some(108), 115_200, 9, None, None, None, Exact, &[MASTER_MODELS, ""]),
     model!("s19jpro", 0x1362, 3, Some(126), 115_200, 9, Some(545), None, None, Exact, &[MASTER_MODELS, MASTER_PLL, ""]),
     model!("s19jplus", 0x1362, 3, Some(110), 115_200, 9, None, None, None, Exact, &[MASTER_MODELS]),
     model!("s19xp", 0x1366, 3, Some(110), 115_200, 9, Some(675), Some(13_400), Some(14_200), Exact, &[MASTER_MODELS, MASTER_PLL, ""]),

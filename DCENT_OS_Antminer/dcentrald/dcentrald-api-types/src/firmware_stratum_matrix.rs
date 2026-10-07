@@ -237,11 +237,12 @@ pub const FIRMWARE_CAPABILITIES: &[FirmwareCapabilities] = &[
         version_rolling_mask: 0x1FFF_E000,
         suggest_difficulty: StratumSupport::Default,
         dev_fee_in_factory: false,
-        // Donation is opt-in: default-on at 2 %, fully disableable. We
-        // surface this as `dev_fee_runtime = true` because the binary
-        // does carry the donation routing path, but the matrix
-        // distinguishes us from VNish via the much-lower default pct
-        // and the user-visible toggle.
+        // Donation is strictly opt-in: DISABLED and 0 % by default
+        // (operator decision 2026-09-01). We keep
+        // `dev_fee_runtime = true` because the binary does carry the
+        // (dormant, opt-in-only) donation routing path, but unlike every
+        // fee-bearing competitor row nothing is taken unless the operator
+        // explicitly turns it on (1-5 %, always visible, one tap off).
         dev_fee_runtime: true,
         dev_fee_runtime_pct_low: 0.0,
         dev_fee_runtime_pct_high: 5.0,

@@ -1,7 +1,14 @@
 # DCENT_OS dcentrald config for Antminer S21 (Amlogic A113D)
-# Unit: 203.0.113.135, BraiinsOS 25.11, 1x108 BM1368 (chain 2 only)
-# Platform: Amlogic A113D (aarch64), NoPic (TAS5782M DAC, kernel-managed)
-# PSU: GPIO 437 PWR_EN active HIGH (1=ON, 0=OFF) plus APW I2C/PMBus at bus 1 addr 0x1f
+# Exact base-S21 production carrier: physical slots 1/2/3 -> ttyS3/ttyS2/ttyS1.
+# GPIO437 PSU_nEN is raw 0=ON, 1=OFF. The APW owner uses software I2C on
+# GPIO476/477, address 0x10; kernel address 0x1f is an unrelated LED expander.
+# Read the actual APW version and admit its production 75/76/77 profile before
+# setting [mining].voltage_mv. No fixed PSU override or factory-jig voltage law.
+# R13 evidence: internal engineering notes
+# Held live partial population: BHB68603, 108 BM1368 on physical slot2.
+# Fresh native runtime selects the actual plugged slots, each with 108 chips;
+# serial_device below is a legacy launch hint, not a one-board population limit.
+# Hashboard PIC presence does not imply PIC voltage ownership on this carrier.
 #
 # Fresh images stay dashboard-ready and idle until mining is explicitly enabled.
 
@@ -31,11 +38,6 @@ serial_chip_type = "BM1368"
 mode = "bypass"
 target_watts = 1500
 
-[power.psu_override]
-enabled = true
-model = "APW12"
-voltage_v = 14.0
-
 [thermal]
 target_temp_c = 60
 hot_temp_c = 70
@@ -44,6 +46,9 @@ fan_min_pwm = 10
 fan_max_pwm = 30
 
 [api]
+# Read-only LAN monitoring; remote control requires a separate explicit opt-in.
+cgminer_bind_lan = true
+cgminer_lan_writes = false
 cgminer_port = 4028
 http_port = 8080
 websocket = true
@@ -51,22 +56,20 @@ auth_enabled = false
 auth_password = ""
 
 [donation]
+# DCENT_OS ships with ZERO mandatory fee. Optional transparent donation:
+# set enabled = true and percent 1-5 (time-sliced, always visible, one tap
+# off). Fund development: https://d-central.tech/fund/
 enabled = false
-percent = 2.0
+percent = 0.0
 pool_url = ""
 worker = ""
 password = "x"
 cycle_duration_s = 3600
 
 [watchdog]
-# Autonomous crash-recovery for the NoPic Amlogic family. Unlike am2/S9 there is
-# NO PIC/dsPIC hardware heartbeat backstop, so a silent (non-panicking) daemon
-# hang would otherwise leave the boards energized indefinitely (thermal risk on a
-# home space heater). The kicker opens /dev/watchdog AFTER hardware init (the
-# bring-up window can't trip it) and degrades gracefully (warns + continues) if
-# the SoC watchdog is unavailable or the timeout can't be set. Matches the proven
-# zynq/am1 production config; restores the struct default (enabled=true) these
-# overlays previously overrode.
+# Retained watchdog custody covers the GPIO PSU owner and separate kernel
+# thermal bus. The production APW watchdog is also serviced by that PSU owner.
+# Runtime admission requires its platform-specific power-cut path.
 enabled = true
 timeout_s = 30
 kick_interval_s = 5
@@ -78,7 +81,15 @@ enabled = true
 active = "standard"
 
 [autotuner]
-enabled = false
+# Autotune is ON by default (operator decision 2026-09-01). Safety contract:
+# the tuner REFUSES to tune blind - every frequency/voltage step validates
+# against the variant BoardDesc cut-ladder + published envelope BEFORE
+# execution; variants with unknown/missing envelope datums surface
+# NOT TUNABLE instead of tuning. First boot parks at the safe-stock
+# profile until health + fans + temp-in-envelope (+ ExperimentalOptIn
+# operator ack) pass. Voltage autotune on am2 stays behind the
+# DCENT_AM2_VOLTAGE_AUTOTUNE live-safety fence.
+enabled = true
 min_freq_mhz = 200
 max_freq_mhz = 500
 

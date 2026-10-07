@@ -1,0 +1,31 @@
+{
+ "capturedAtUnixMs": 1788420180232,
+ "capturedAtIso": "2026-09-03T07:23:00.232Z",
+ "capturedFrom": "bench BitAxe Hex Supra (board 702, 6x BM1368) — READ-ONLY GETs, 2026-09-03",
+ "firmware": "DCENT_axe 0.3.0 (c880a4ce63)",
+ "endpoints": [
+  "system_info",
+  "system",
+  "pools",
+  "presets",
+  "autotuner_modes",
+  "schedule",
+  "achievements",
+  "swarm",
+  "auth_status",
+  "mining_block",
+  "system_statistics",
+  "config_shared",
+  "system_self-test_status"
+ ],
+ "scrubbed": [
+  "wifi ssid -> \"MOCK-WIFI-SSID\"",
+  "mac address (colon + packed forms) -> \"02:00:00:00:00:01\" / \"020000000001\"",
+  "hostname / mdns hostname -> \"dcentaxe-mock\"",
+  "lan ipv4 (incl. swarm apiUrl/mcpUrl) -> \"192.0.2.42\" (RFC 5737 TEST-NET-1)",
+  "pool worker / wallet -> \"bc1pMOCK…MOCK\"",
+  "donation worker -> \"MOCK_WORKER\"",
+  "coinbase scriptHex payloads -> deadbeef pattern (script-type prefix kept)"
+ ],
+ "note": "Time-valued fields are re-based to wall clock by axe_mock_server.mjs; run it with --freeze-time to serve these bytes verbatim."
+}

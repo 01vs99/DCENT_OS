@@ -39,6 +39,12 @@ use crate::telemetry::{
 };
 use crate::thermal_comp::ThermalCompensator;
 use crate::voltage_search::VoltageSearchState;
+// C3a (2026-09-01): variant envelope + cut-ladder guard + first-boot
+// safe-stock start gate — the fail-closed substrate under the operator's
+// "autotune default-ON everywhere" decision. See `tune_guard.rs`.
+use crate::tune_guard::{
+    FirstBootGateSnapshot, FreqStepKind, TuneGuard,
+};
 use crate::AutoTunerError;
 use crate::FreqCommand;
 // W13.C3 (2026-05-10): per-SKU PVT envelope clamp.
@@ -192,6 +198,21 @@ pub struct AutotunerRuntimeStatus {
     /// Live night-power policy the tuner is actually using.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub night_power: Option<crate::config::NightPowerPolicy>,
+    /// C3a: surfaced NotTunable reason — the variant refused to tune
+    /// (unknown/missing envelope datums, invalid cut-ladder, fan rung on a
+    /// fanless medium). `None` on tunable variants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_tunable_reason: Option<String>,
+    /// C3a: first-boot safe-stock park reason currently holding the tuner
+    /// in `Idle` (health snapshot / fans / temp-in-envelope / Experimental
+    /// ack). `None` once the gate has opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_gate_park_reason: Option<String>,
+    /// C3a: per-run convergence evidence (rung counts, refusals + reasons,
+    /// last step, envelope version). The efficiency figure inside is an
+    /// ESTIMATE — see `telemetry::ConvergenceSnapshot`'s honesty contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub convergence: Option<crate::telemetry::ConvergenceSnapshot>,
 }
 
 impl Default for AutotunerRuntimeStatus {
@@ -224,6 +245,9 @@ impl Default for AutotunerRuntimeStatus {
             last_update_s: 0,
             message: "Autotuner runtime unavailable".to_string(),
             night_power: None,
+            not_tunable_reason: None,
+            start_gate_park_reason: None,
+            convergence: None,
         }
     }
 }
@@ -625,6 +649,33 @@ pub struct AutoTuner {
     last_power_sample: Option<crate::PowerAuthoritySample>,
     /// Last Power-mode setpoint after night + immersion resolution.
     last_resolved_power_target_watts: Option<u32>,
+    /// True only after the latest Power-mode frequency batch and barrier were
+    /// acknowledged by the dispatcher. Policy adoption alone is insufficient.
+    last_power_dispatch_confirmed: bool,
+    /// C3a: variant envelope + cut-ladder guard. Constructed in [`Self::new`]
+    /// from the constructor's (chip, controller) pair and re-resolved in
+    /// [`Self::run`] once the chain map, per-chain SKUs, and the
+    /// daemon-installed BoardDesc cooling medium/ladder are known. A guard
+    /// carrying a [`NotTunableReason`] parks the whole run — the tuner never
+    /// emits a mutating step for a variant whose envelope datums are
+    /// unknown/missing (never tune blind).
+    variant_guard: TuneGuard,
+    /// C3a: BoardDesc-declared cooling medium + cut-ladder, installed by the
+    /// daemon before `run()`. Defaults (None + canonical forced-air ladder)
+    /// match every registered row today; a fanless medium keeps fanless
+    /// cut-ladder semantics (see `tune_guard.rs`).
+    variant_cooling_medium: Option<dcentrald_common::cooling_medium::CoolingMedium>,
+    variant_cut_ladder: &'static [dcentrald_common::cooling_medium::CutRung],
+    /// C3a: first-boot safe-stock start gate. When installed, `run()` parks
+    /// in `Idle` with a visible reason until the daemon-published gate
+    /// snapshot passes (health snapshot OK + fans OK + temp in envelope +
+    /// ExperimentalOptIn ack). Absent receiver ⇒ park with the explicit
+    /// "gate not wired" reason (fail-closed; production spawn sites MUST
+    /// install it).
+    first_boot_gate_rx: Option<tokio::sync::watch::Receiver<FirstBootGateSnapshot>>,
+    /// C3a: park reason currently holding the tuner in Idle (mirrored into
+    /// `AutotunerRuntimeStatus::start_gate_park_reason` for the dashboard).
+    start_gate_park_reason: Option<&'static str>,
     /// Test-only local hour so Power-mode night resolution is deterministic.
     #[cfg(any(test, feature = "test-helpers"))]
     night_hour_override: Option<u8>,
@@ -1002,8 +1053,12 @@ impl AutoTuner {
     /// Safety clamps applied:
     /// - **Frequency**: `[config.min_freq_mhz, config.max_freq_mhz]`.
     /// - **Voltage**: `[config.min_voltage_mv, MAX_CHAIN_VOLTAGE_MV]`
-    ///   where `MAX_CHAIN_VOLTAGE_MV = 9440` for BM1387 (S9, chain
-    ///   rail 9.44V max)
+    ///   where `MAX_CHAIN_VOLTAGE_MV = 9400` for BM1387 (S9 chain rail;
+    ///   9400 mV = PIC DAC 6, the codebase's safe operating ceiling per
+    ///    §1.3
+    ///   DAC table and `dcentrald-common/src/voltage_rail.rs:429-435` —
+    ///   DAC 0 = 9.44 V is absolute-max overvolt stock never uses; c3a-2
+    ///   DCENT_EE merge condition, must agree with the guard band)
     ///   and `14500` (the project load-bearing hard cap) for chain-rail
     ///   SHA-256 (BM1397/8/BM1362/6/8/70).
     /// - **fw=0x86 dsPIC refusal**: per
@@ -1030,8 +1085,12 @@ impl AutoTuner {
 
         // Voltage clamp envelope per chip family.
         let max_chain_voltage_mv: u16 = match chip_id {
-            // BM1387: S9 chain rail; PIC DAC=0 = 9.44V.
-            0x1387 => 9440,
+            // BM1387: S9 chain rail; 9400 mV = PIC DAC 6, the safe
+            // operating ceiling (S9_STOCK_ELECTRICAL_ANALYSIS.md §1.3;
+            // voltage_rail.rs PIC16_MIN_SAFE_DAC / STOCK_PIC16_INIT_MV).
+            // Moves together with the guard band (tune_guard.rs 0x1387 arm)
+            // — the W15-A clamp and the guard must agree (c3a-2).
+            0x1387 => 9400,
             // SHA-256 BM139x/BM136x: chain-rail typical 13.4..14.4V.
             // Clamp at the project load-bearing hard cap (14500 mV) so a
             // malformed preset can't push voltage beyond it — production cold
@@ -1312,6 +1371,26 @@ impl AutoTuner {
             // sensor safety) on top of this — so a profile target
             // above the fan-clamped ceiling will be derated by the
             // dispatcher, not bypassed.
+            //
+            // C3a: the variant guard validates the step BEFORE dispatch
+            // (refuse-not-tune-blind); a refused step skips the chain this
+            // tick and is counted in the guard telemetry.
+            self.variant_guard.record_step(format!(
+                "SiliconProfile SetChainFreq chain {chain_id} -> {target_freq_mhz} MHz"
+            ));
+            if let Err(refusal) = self.variant_guard.check_freq_step(
+                chain_id,
+                target_freq_mhz,
+                FreqStepKind::TuneStep,
+            ) {
+                warn!(
+                    chain_id,
+                    target_freq_mhz,
+                    refusal = %refusal,
+                    "Silicon-profile freq target REFUSED by variant guard — not dispatched"
+                );
+                continue;
+            }
             let (freq_ack_tx, freq_ack_rx) = tokio::sync::oneshot::channel();
             if let Err(e) = freq_cmd_tx
                 .send(FreqCommand::SetChainFreq {
@@ -1363,6 +1442,21 @@ impl AutoTuner {
             // chip-rail rows, fw=0x86 chains, and unknown chip
             // families. See `derive_silicon_profile_target`.
             if let Some(target_mv) = target_voltage_mv {
+                // C3a: axis-aware variant guard BEFORE the SetVoltage
+                // dispatch (refuse-not-tune-blind).
+                self.variant_guard.record_step(format!(
+                    "SiliconProfile SetVoltage chain {chain_id} -> {target_mv} mV"
+                ));
+                if let Err(refusal) =
+                    self.variant_guard.check_voltage_step(chain_id, target_mv)
+                {
+                    warn!(
+                        chain_id,
+                        target_mv,
+                        refusal = %refusal,
+                        "Silicon-profile voltage target REFUSED by variant guard — not dispatched"
+                    );
+                } else {
                 let (v_ack_tx, v_ack_rx) = tokio::sync::oneshot::channel();
                 if let Err(e) = freq_cmd_tx
                     .send(FreqCommand::SetVoltage {
@@ -1396,6 +1490,7 @@ impl AutoTuner {
                             warn!(chain_id, "Silicon profile: SetVoltage ack channel dropped");
                         }
                     }
+                }
                 }
             }
 
@@ -1513,6 +1608,31 @@ impl AutoTuner {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn last_resolved_power_target_watts_for_test(&self) -> Option<u32> {
         self.last_resolved_power_target_watts
+    }
+
+
+    /// C3a test helper: validate a frequency step against the tuner's
+    /// current variant guard instance (post-resolution state).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) fn variant_guard_check_freq_for_test(
+        &self,
+        chain_id: u8,
+        freq_mhz: u16,
+    ) -> std::result::Result<(), String> {
+        self.variant_guard
+            .check_freq_step(chain_id, freq_mhz, FreqStepKind::TuneStep)
+            .map(|_| ())
+            .map_err(|refusal| refusal.to_string())
+    }
+
+    /// C3a test helper: install an OPEN first-boot start gate (all
+    /// conditions passing). Production spawn sites install a daemon-fed
+    /// watch instead.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) fn set_first_boot_gate_open_for_test(&mut self) {
+        let (_tx, rx) =
+            tokio::sync::watch::channel(crate::tune_guard::FirstBootGateSnapshot::all_pass());
+        self.set_first_boot_gate(rx);
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
@@ -1720,10 +1840,22 @@ impl AutoTuner {
         }
 
         self.apply_target_mode(&chain_infos, freq_cmd_tx).await;
+        // A batch can apply some chips before a later chip or barrier fails.
+        // Publish the acknowledged frequencies even when the whole request
+        // cannot report success; subsequent monitoring must use those values.
         Self::sync_monitors_from_profiles(monitors, &self.profiles);
         self.active_runtime_limiting_factor =
             Self::compute_active_runtime_limiting_factor(monitors);
         self.live_avg_frequency_mhz = Self::monitor_avg_freq_mhz(monitors);
+        if matches!(self.config.target_mode, TuneTarget::Power) && !self.last_power_dispatch_confirmed {
+            self.publish_runtime_status("Power policy saved; dispatcher application unconfirmed", None);
+            return crate::AutoTunerCommandResult {
+                status: crate::AutoTunerCommandStatus::Deferred,
+                applied_runtime: false,
+                mode,
+                message: "power policy adopted but its frequency batch was not confirmed by the dispatcher".into(),
+            };
+        }
         self.publish_runtime_status("Autotuner target mode applied live", None);
 
         crate::AutoTunerCommandResult {
@@ -1753,7 +1885,7 @@ impl AutoTuner {
         let capabilities = crate::autotuner_capabilities_for_chip_with_voltage_autotune(
             chip_id,
             &voltage_control,
-            std::env::var(crate::config::AM2_VOLTAGE_AUTOTUNE_ENV)
+            dcentrald_common::lab_env::var(crate::config::AM2_VOLTAGE_AUTOTUNE_ENV)
                 .ok()
                 .as_deref(),
         );
@@ -1807,6 +1939,27 @@ impl AutoTuner {
             watt_target: None,
             last_power_sample: None,
             last_resolved_power_target_watts: None,
+            last_power_dispatch_confirmed: false,
+            // C3a: initial guard from the constructor pair (BM1387+pic16
+            // resolves the documented S9 band; BM1362 resolves only after
+            // `set_chain_sku`; everything else refuses — re-resolved in
+            // `run()` with the full chain/SKU/BoardDesc context).
+            variant_guard: TuneGuard::new(crate::tune_guard::resolve_variant_envelope(
+                chip_id,
+                &voltage_control,
+                None,
+                crate::config::am2_voltage_autotune_enabled(
+                    dcentrald_common::lab_env::var(crate::config::AM2_VOLTAGE_AUTOTUNE_ENV)
+                        .ok()
+                        .as_deref(),
+                ),
+                None,
+                crate::tune_guard::default_variant_ladder(),
+            )),
+            variant_cooling_medium: None,
+            variant_cut_ladder: crate::tune_guard::default_variant_ladder(),
+            first_boot_gate_rx: None,
+            start_gate_park_reason: None,
             #[cfg(any(test, feature = "test-helpers"))]
             night_hour_override: None,
         }
@@ -1826,6 +1979,102 @@ impl AutoTuner {
     ///   unresolved. Install preflight independently blocks those rows.
     pub fn set_chain_sku(&mut self, chain_id: u8, sku: Bm1362HashboardSku) {
         self.chain_skus.insert(chain_id, sku);
+        // C3a: a newly classified SKU can be the datum that makes the
+        // variant tunable (BM1362 refuses without one) — re-resolve.
+        self.reresolve_variant_guard();
+    }
+
+    /// C3a: install the BoardDesc-declared cooling medium + cut-ladder for
+    /// this variant. The daemon SHOULD call this before `run()`; defaults
+    /// (undeclared medium + canonical forced-air ladder) match every
+    /// registered BoardDesc row today and keep the conservative
+    /// fans-stay-managed semantics of `cooling_medium`'s contract.
+    pub fn set_variant_cooling(
+        &mut self,
+        medium: Option<dcentrald_common::cooling_medium::CoolingMedium>,
+        ladder: &'static [dcentrald_common::cooling_medium::CutRung],
+    ) {
+        self.variant_cooling_medium = medium;
+        self.variant_cut_ladder = ladder;
+        self.reresolve_variant_guard();
+    }
+
+    /// C3a: install the first-boot safe-stock start gate receiver. The
+    /// daemon publishes `FirstBootGateSnapshot`s on the watch; `run()` parks
+    /// in `Idle` with the surfaced park reason until the gate passes.
+    pub fn set_first_boot_gate(
+        &mut self,
+        rx: tokio::sync::watch::Receiver<FirstBootGateSnapshot>,
+    ) {
+        self.first_boot_gate_rx = Some(rx);
+    }
+
+    /// C3a: re-resolve the variant guard from the current chain/SKU/cooling
+    /// context. Called whenever a guard input changes (`set_chain_sku`,
+    /// `set_variant_cooling`) and once inside `run()` after the chain maps
+    /// are built.
+    fn reresolve_variant_guard(&mut self) {
+        let uniform_sku = Self::uniform_chain_sku(&self.chain_skus, &self.target_chain_ids);
+        self.variant_guard = TuneGuard::new(crate::tune_guard::resolve_variant_envelope(
+            self.chip_id,
+            &self.capabilities.voltage_control,
+            uniform_sku,
+            crate::config::am2_voltage_autotune_enabled(
+                dcentrald_common::lab_env::var(crate::config::AM2_VOLTAGE_AUTOTUNE_ENV)
+                    .ok()
+                    .as_deref(),
+            ),
+            self.variant_cooling_medium,
+            self.variant_cut_ladder,
+        ));
+    }
+
+    /// Uniform per-chain SKU for BM1362 guard resolution — mirrors
+    /// `pvt_envelope::uniform_bm1362_sku_for_bindings` semantics (non-empty,
+    /// all-same, PVT-bearing; never guess on mixed/unclassified sets).
+    ///
+    /// C3a fix lane (DCENT_EE finding 2 — partial-SKU-coverage seam): the
+    /// registered SKUs must additionally COVER EVERY target chain before the
+    /// variant may resolve tunable. A chain whose EEPROM classification
+    /// failed is simply absent from `chain_skus` (population site:
+    /// `daemon.rs` `autotuner_chain_skus`, built per-chain from EEPROM
+    /// preambles) — certifying uniformity over the registered subset would
+    /// let the unclassified chain tune under another chain's envelope with
+    /// its per-chain PVT gate open. Fail-closed: partial coverage ⇒ `None`
+    /// ⇒ `Bm1362SkuUnclassified` ⇒ NotTunable park. With `target_chain_ids`
+    /// still empty (the pre-`run()` re-resolutions from `set_chain_sku` /
+    /// `set_variant_cooling`) the coverage requirement is vacuous — the
+    /// `run()`-entry re-resolution over the full chain map is the
+    /// certifying one.
+    fn uniform_chain_sku(
+        chain_skus: &HashMap<u8, Bm1362HashboardSku>,
+        target_chain_ids: &std::collections::BTreeSet<u8>,
+    ) -> Option<Bm1362HashboardSku> {
+        if target_chain_ids
+            .iter()
+            .any(|chain_id| !chain_skus.contains_key(chain_id))
+        {
+            return None;
+        }
+        let mut resolved: Option<Bm1362HashboardSku> = None;
+        for &sku in chain_skus.values() {
+            if crate::pvt_envelope::pvt_envelope(sku).is_empty() {
+                return None;
+            }
+            match resolved {
+                None => resolved = Some(sku),
+                Some(existing) if existing == sku => {}
+                Some(_) => return None,
+            }
+        }
+        resolved
+    }
+
+    /// C3a: read-only accessor for the current guard telemetry (envelope
+    /// version/source, refusal counters) — consumed by the convergence
+    /// snapshot and tests.
+    pub fn variant_guard_telemetry(&self) -> crate::tune_guard::GuardTelemetry {
+        self.variant_guard.telemetry()
     }
 
     /// W13.C3: read-only accessor — returns the SKU registered for a
@@ -2415,7 +2664,14 @@ impl AutoTuner {
         let failed_chain_ids = self.failed_chain_ids();
         let display_state = match self.state {
             TunerState::Tuned | TunerState::PartiallyTuned | TunerState::Failed => {
-                self.steady_state()
+                // C3a: a variant-level NotTunable refusal must never be
+                // re-labeled by the profiles/failed-chain heuristic (an
+                // empty NotTunable park would otherwise display "Tuned").
+                if self.variant_guard.envelope().is_err() {
+                    TunerState::Failed
+                } else {
+                    self.steady_state()
+                }
             }
             other => other,
         };
@@ -2465,6 +2721,59 @@ impl AutoTuner {
             last_update_s: now_unix_s(),
             message: message.to_string(),
             night_power: Some(self.config.night_power.clone()),
+            not_tunable_reason: self
+                .variant_guard
+                .envelope()
+                .err()
+                .map(|reason| reason.to_string()),
+            start_gate_park_reason: self.start_gate_park_reason.map(str::to_string),
+            convergence: Some(self.build_convergence_snapshot()),
+        }
+    }
+
+    /// C3a: assemble the per-run convergence evidence snapshot from the
+    /// current profiles/failed-chain state and the variant guard telemetry.
+    ///
+    /// Honesty: `estimated_efficiency_jth` is the model-derived projection
+    /// from the tuning profile (`PowerModel`-based), never a measured
+    /// wall-meter figure — `efficiency_jth_estimated` is pinned `true`
+    /// whenever it is present. See `telemetry::ConvergenceSnapshot`.
+    fn build_convergence_snapshot(&self) -> crate::telemetry::ConvergenceSnapshot {
+        let guard = self.variant_guard.telemetry();
+        let mut rung_counts = crate::telemetry::ConvergenceRungCounts::default();
+        match guard.tunable {
+            true => {
+                rung_counts.tunable = self.profiles.len() as u32;
+                rung_counts.not_tuned = self.failed_chain_ids.len() as u32;
+            }
+            false => {
+                // Variant-level refusal: every target chain is NotTunable.
+                rung_counts.not_tunable = self.target_chain_ids.len() as u32;
+            }
+        }
+        rung_counts.refused = guard.refused_steps;
+        let mut refusal_reasons: Vec<String> = Vec::new();
+        if let Some(reason) = &guard.last_refusal {
+            refusal_reasons.push(reason.clone());
+        }
+        let estimated_efficiency_jth = self.profiles.values().find_map(|p| {
+            (p.estimated_efficiency_jth > 0.0).then_some(p.estimated_efficiency_jth)
+        });
+        crate::telemetry::ConvergenceSnapshot {
+            state: self.state.to_string(),
+            started_at: self.telemetry.current_run_started_at().unwrap_or(0),
+            rung_counts,
+            not_tunable_reason: self
+                .variant_guard
+                .envelope()
+                .err()
+                .map(|reason| reason.to_string()),
+            refusal_reasons,
+            last_step: guard.last_step,
+            envelope_version: guard.envelope_version,
+            envelope_source: guard.envelope_source,
+            efficiency_jth_estimated: estimated_efficiency_jth.is_some(),
+            estimated_efficiency_jth,
         }
     }
 
@@ -2834,7 +3143,16 @@ impl AutoTuner {
         chain_id: u8,
         freq_cmd_tx: &mpsc::Sender<FreqCommand>,
     ) -> crate::Result<()> {
-        Self::set_chain_freq_checked(freq_cmd_tx, chain_id, self.nominal_mhz).await?;
+        // C3a: nominal restores take the NominalRestore guard path (allowed
+        // through with a counted warning when nominal sits above the
+        // envelope ceiling — returning to stock is not tuning).
+        Self::guarded_nominal_freq_step(
+            &self.variant_guard,
+            freq_cmd_tx,
+            chain_id,
+            self.nominal_mhz,
+        )
+        .await?;
         Self::send_freq_cmd_checked(
             freq_cmd_tx,
             FreqCommand::UpdateWorkTime {
@@ -2904,6 +3222,99 @@ impl AutoTuner {
         }
 
         unreachable!("voltage apply retry loop must return or continue")
+    }
+
+    // ------------------------------------------------------------------
+    // C3a guarded emission wrappers: every mutating tuning step validates
+    // against the variant guard BEFORE it reaches the dispatcher. A refused
+    // step returns an error carrying the refusal reason (the callers'
+    // existing error paths then mark the chain failed / restore nominal),
+    // and the guard's refusal counters feed the convergence telemetry.
+    // ------------------------------------------------------------------
+
+    fn guard_refusal_error(refusal: &crate::tune_guard::TuneStepRefusal) -> crate::AutoTunerError {
+        crate::AutoTunerError::Config(format!("tune step refused by variant guard: {refusal}"))
+    }
+
+    /// Guarded per-chip frequency step (tuner-driven; nominal restores use
+    /// [`Self::guarded_nominal_freq_step`]).
+    async fn guarded_set_chip_freq(
+        variant_guard: &TuneGuard,
+        freq_cmd_tx: &mpsc::Sender<FreqCommand>,
+        chain_id: u8,
+        chip_index: u8,
+        freq_mhz: u16,
+    ) -> crate::Result<u16> {
+        variant_guard.record_step(format!(
+            "SetChipFreq chain {chain_id} chip {chip_index} -> {freq_mhz} MHz"
+        ));
+        if let Err(refusal) = variant_guard
+            .check_freq_step(chain_id, freq_mhz, FreqStepKind::TuneStep)
+        {
+            warn!(
+                chain_id,
+                chip_index,
+                freq_mhz,
+                refusal = %refusal,
+                "TUNE STEP REFUSED by variant envelope guard — not executed"
+            );
+            return Err(Self::guard_refusal_error(&refusal));
+        }
+        Self::set_chip_freq_checked(freq_cmd_tx, chain_id, chip_index, freq_mhz).await
+    }
+
+
+    /// Guard check for a nominal-restore frequency step. Returning to the
+    /// variant's stock nominal is not tuning: it is ALLOWED through (with a
+    /// counted warning) even when nominal sits above the envelope ceiling —
+    /// stranding a chain at a probed frequency would be the less safe
+    /// outcome. See `tune_guard::FreqStepKind::NominalRestore`.
+    async fn guarded_nominal_freq_step(
+        variant_guard: &TuneGuard,
+        freq_cmd_tx: &mpsc::Sender<FreqCommand>,
+        chain_id: u8,
+        freq_mhz: u16,
+    ) -> crate::Result<()> {
+        variant_guard.record_step(format!(
+            "NominalRestore chain {chain_id} -> {freq_mhz} MHz (stock)"
+        ));
+        if let Err(refusal) = variant_guard
+            .check_freq_step(chain_id, freq_mhz, FreqStepKind::NominalRestore)
+        {
+            // Defensive: NominalRestore can only be refused when the guard
+            // is NotTunable — still allow the restore (the variant is not
+            // being tuned at all in that case, and the daemon owns the
+            // safe-stock boot point), but surface it loudly.
+            warn!(
+                chain_id,
+                freq_mhz,
+                refusal = %refusal,
+                "nominal restore tripped the variant guard — allowing the restore to stock, no tuning occurred"
+            );
+        }
+        Self::set_chain_freq_checked(freq_cmd_tx, chain_id, freq_mhz).await
+    }
+
+    /// Guarded voltage step (axis-aware; both directions refused out of
+    /// band — see `tune_guard::TuneGuard::check_voltage_step`).
+    async fn guarded_set_voltage(
+        variant_guard: &TuneGuard,
+        freq_cmd_tx: &mpsc::Sender<FreqCommand>,
+        chain_id: u8,
+        voltage_mv: u16,
+    ) -> crate::Result<u16> {
+        variant_guard
+            .record_step(format!("SetVoltage chain {chain_id} -> {voltage_mv} mV"));
+        if let Err(refusal) = variant_guard.check_voltage_step(chain_id, voltage_mv) {
+            warn!(
+                chain_id,
+                voltage_mv,
+                refusal = %refusal,
+                "TUNE STEP REFUSED by variant envelope guard — not executed"
+            );
+            return Err(Self::guard_refusal_error(&refusal));
+        }
+        Self::set_voltage_checked(freq_cmd_tx, chain_id, voltage_mv).await
     }
 
     async fn verify_voltage_checked_once(
@@ -3190,7 +3601,7 @@ impl AutoTuner {
             } else {
                 candidate.profile.voltage_mv
             };
-            Self::set_voltage_checked(freq_cmd_tx, candidate.chain_id, target_voltage_mv).await?;
+            Self::guarded_set_voltage(&self.variant_guard,freq_cmd_tx, candidate.chain_id, target_voltage_mv).await?;
             let _ =
                 Self::verify_voltage_checked(freq_cmd_tx, candidate.chain_id, target_voltage_mv)
                     .await?;
@@ -3262,7 +3673,7 @@ impl AutoTuner {
                     crate::autotuner_capabilities_for_chip_with_voltage_autotune(
                         info.chip_id,
                         &self.capabilities.voltage_control,
-                        std::env::var(crate::config::AM2_VOLTAGE_AUTOTUNE_ENV)
+                        dcentrald_common::lab_env::var(crate::config::AM2_VOLTAGE_AUTOTUNE_ENV)
                             .ok()
                             .as_deref(),
                     )
@@ -3288,6 +3699,86 @@ impl AutoTuner {
         // `chain_skus` is empty (today's live default) and byte-identical on the
         // proven am2 paths (every BM1362 envelope max >= the applied 545 ceiling).
         self.apply_sku_freq_ceilings();
+
+        // ---- C3a: variant guard gate (refuse, never tune blind) ----------
+        //
+        // Re-resolve the variant envelope guard now that the chain map,
+        // per-chain SKUs, and the daemon-installed BoardDesc cooling
+        // medium/ladder are known. A variant whose envelope datums are
+        // unknown/missing (or whose declared cut-ladder is structurally
+        // invalid, or fanless-with-fan-rung) parks HERE with an explicit
+        // surfaced NotTunable reason and never emits a single mutating
+        // step. This is the load-bearing fail-closed direction of the
+        // operator's 2026-09-01 "autotune default-ON everywhere" decision.
+        self.reresolve_variant_guard();
+        if let Err(reason) = self.variant_guard.envelope() {
+            self.state = TunerState::Failed;
+            let message = format!(
+                "NOT TUNABLE — {} (chains stay at the variant safe-stock point;                  refuse, never tune blind)",
+                reason
+            );
+            warn!(
+                reason = %reason,
+                chains = ?self.target_chain_ids,
+                "Auto-tuner refusing to tune this variant (C3a envelope guard)"
+            );
+            self.publish_runtime_status(&message, None);
+            self.publish_telemetry_state();
+            return;
+        }
+
+        // ---- C3a: first-boot safe-stock start gate ------------------------
+        //
+        // The daemon publishes FirstBootGateSnapshots on the watch installed
+        // via `set_first_boot_gate`. Until the gate opens (health snapshot OK
+        // + fans OK + temp in envelope + ExperimentalOptIn operator ack),
+        // the tuner parks in Idle with the surfaced park reason — the board
+        // keeps running the variant's safe-stock (nominal) profile. An
+        // absent receiver is itself a park reason: fail-closed, because a
+        // forgotten gate wiring must never silently start characterization.
+        {
+            let mut park_tick =
+                tokio::time::interval(std::time::Duration::from_secs(5));
+            park_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                let park_reason = match self.first_boot_gate_rx.as_ref() {
+                    None => Some(
+                        "waiting for first-boot start gate wiring (no gate receiver installed)",
+                    ),
+                    Some(rx) => rx.borrow().park_reason(),
+                };
+                match park_reason {
+                    Some(reason) => {
+                        let first_park = self.start_gate_park_reason != Some(reason);
+                        self.start_gate_park_reason = Some(reason);
+                        if first_park {
+                            info!(
+                                park_reason = reason,
+                                "Auto-tuner parked in Idle (first-boot safe-stock gate) —                                  board runs the variant safe-stock profile"
+                            );
+                        }
+                        self.publish_runtime_status(
+                            &format!("Parked in Idle: {reason}"),
+                            None,
+                        );
+                    }
+                    None => {
+                        if self.start_gate_park_reason.is_some() {
+                            info!("Auto-tuner first-boot start gate OPEN — characterization may begin");
+                        }
+                        self.start_gate_park_reason = None;
+                        break;
+                    }
+                }
+                tokio::select! {
+                    _ = shutdown.cancelled() => {
+                        info!("Auto-tuner stopping while parked at the first-boot start gate");
+                        return;
+                    }
+                    _ = park_tick.tick() => {}
+                }
+            }
+        }
 
         self.profiles.clear();
         self.failed_chain_ids.clear();
@@ -3429,7 +3920,8 @@ impl AutoTuner {
                     .await
                 {
                     Ok(profile) => {
-                        self.telemetry.finish_run(true);
+                        self.telemetry
+                            .finish_run_with_convergence(true, Some(self.build_convergence_snapshot()));
                         self.publish_telemetry_state();
                         if let Err(e) = profile.save(&self.config.profile_path) {
                             warn!(
@@ -3442,7 +3934,10 @@ impl AutoTuner {
                         self.profiles.insert(chain_id, profile);
                     }
                     Err(e) => {
-                        self.telemetry.finish_run(false);
+                        self.telemetry.finish_run_with_convergence(
+                            false,
+                            Some(self.build_convergence_snapshot()),
+                        );
                         self.publish_telemetry_state();
                         self.failed_chain_ids.insert(chain_id);
                         if let Err(restore_err) =
@@ -3655,7 +4150,7 @@ impl AutoTuner {
                         );
 
                         if let Err(restore_err) =
-                            Self::set_voltage_checked(&freq_cmd_tx, chain_id, initial_voltage_mv)
+                            Self::guarded_set_voltage(&self.variant_guard,&freq_cmd_tx, chain_id, initial_voltage_mv)
                                 .await
                         {
                             warn!(
@@ -3684,7 +4179,7 @@ impl AutoTuner {
                                         "Failed to re-apply backup profile after optimization failure"
                                     );
                                 }
-                                if let Err(restore_err) = Self::set_voltage_checked(
+                                if let Err(restore_err) = Self::guarded_set_voltage(&self.variant_guard,
                                     &freq_cmd_tx,
                                     chain_id,
                                     initial_voltage_mv,
@@ -3834,7 +4329,7 @@ impl AutoTuner {
             // Set each chip to its current test frequency via command channel
             let freqs = tuner.current_frequencies(&states);
             for &(chip_idx, freq) in &freqs {
-                Self::set_chip_freq_checked(freq_cmd_tx, chain_id, chip_idx, freq).await?;
+                Self::guarded_set_chip_freq(&self.variant_guard,freq_cmd_tx, chain_id, chip_idx, freq).await?;
             }
 
             // Update WORK_TIME based on SLOWEST chip — slow chips need longer to exhaust
@@ -4002,7 +4497,7 @@ impl AutoTuner {
 
         // Apply operating frequencies for verification via command channel
         for profile in &profiles {
-            Self::set_chip_freq_checked(
+            Self::guarded_set_chip_freq(&self.variant_guard,
                 freq_cmd_tx,
                 chain_id,
                 profile.chip_index,
@@ -4352,7 +4847,7 @@ impl AutoTuner {
 
                         // Apply the frequency change
                         if let Err(e) =
-                            Self::set_chip_freq_checked(freq_cmd_tx, chain_id, i as u8, new_freq)
+                            Self::guarded_set_chip_freq(&self.variant_guard,freq_cmd_tx, chain_id, i as u8, new_freq)
                                 .await
                         {
                             warn!(chain_id, chip = i as u8, error = %e, "Thermal refinement: failed to apply backoff frequency");
@@ -4529,7 +5024,7 @@ impl AutoTuner {
                 for chip in &profile.chips {
                     let chip_freq = ramp_freq.min(chip.operating_mhz);
                     ramp_min_freq = ramp_min_freq.min(chip_freq);
-                    Self::set_chip_freq_checked(freq_cmd_tx, chain_id, chip.chip_index, chip_freq)
+                    Self::guarded_set_chip_freq(&self.variant_guard,freq_cmd_tx, chain_id, chip.chip_index, chip_freq)
                         .await?;
                 }
 
@@ -4566,7 +5061,7 @@ impl AutoTuner {
                 None
             };
             let applied_target = fan_limit.unwrap_or(chip.operating_mhz);
-            Self::set_chip_freq_checked(freq_cmd_tx, chain_id, chip.chip_index, chip.operating_mhz)
+            Self::guarded_set_chip_freq(&self.variant_guard,freq_cmd_tx, chain_id, chip.chip_index, chip.operating_mhz)
                 .await?;
             Self::set_chip_limit_checked(
                 freq_cmd_tx,
@@ -5639,7 +6134,7 @@ impl AutoTuner {
                         chip_idx,
                         monitor.current_freq_mhz,
                     );
-                    if let Err(e) = Self::set_chip_freq_checked(
+                    if let Err(e) = Self::guarded_set_chip_freq(&self.variant_guard,
                         freq_cmd_tx,
                         snapshot.chain_id,
                         chip_idx,
@@ -5698,7 +6193,7 @@ impl AutoTuner {
                                     old_freq,
                                     new_freq,
                                 );
-                                    if let Err(e) = Self::set_chip_freq_checked(
+                                    if let Err(e) = Self::guarded_set_chip_freq(&self.variant_guard,
                                         freq_cmd_tx,
                                         snapshot.chain_id,
                                         chip_idx,
@@ -5753,7 +6248,7 @@ impl AutoTuner {
                             new_freq,
                         );
 
-                        if let Err(e) = Self::set_chip_freq_checked(
+                        if let Err(e) = Self::guarded_set_chip_freq(&self.variant_guard,
                             freq_cmd_tx,
                             snapshot.chain_id,
                             chip_idx,
@@ -5853,7 +6348,7 @@ impl AutoTuner {
                                 self.config.max_boost_attempts,
                             );
 
-                            if let Err(e) = Self::set_chip_freq_checked(
+                            if let Err(e) = Self::guarded_set_chip_freq(&self.variant_guard,
                                 freq_cmd_tx,
                                 snapshot.chain_id,
                                 chip_idx,
@@ -5954,7 +6449,7 @@ impl AutoTuner {
                                             boost_monitor.desired_freq_mhz,
                                             boost_freq,
                                         );
-                                        if let Err(e) = Self::set_chip_freq_checked(
+                                        if let Err(e) = Self::guarded_set_chip_freq(&self.variant_guard,
                                             freq_cmd_tx,
                                             snapshot.chain_id,
                                             boost_idx,
@@ -6150,7 +6645,7 @@ impl AutoTuner {
             let test_voltage = search.current_voltage();
 
             // Send voltage change command to dispatcher and require an apply acknowledgement
-            Self::set_voltage_checked(freq_cmd_tx, chain_id, test_voltage).await?;
+            Self::guarded_set_voltage(&self.variant_guard,freq_cmd_tx, chain_id, test_voltage).await?;
 
             info!(
                 chain_id,
@@ -6284,7 +6779,7 @@ impl AutoTuner {
         let duration_s = start.elapsed().as_secs_f64();
 
         // Set the final optimized voltage and require a controller acknowledgement.
-        Self::set_voltage_checked(freq_cmd_tx, chain_id, result_mv).await?;
+        Self::guarded_set_voltage(&self.variant_guard,freq_cmd_tx, chain_id, result_mv).await?;
 
         // Request voltage readback verification from the daemon.
         // The autotuner has no direct I2C access (HAL crate), so it signals
@@ -6434,6 +6929,7 @@ impl AutoTuner {
         chain_infos: &[crate::ChainTuneInfo],
         freq_cmd_tx: &mpsc::Sender<FreqCommand>,
     ) {
+        self.last_power_dispatch_confirmed = false;
         match self.config.target_mode {
             TuneTarget::Hashrate => {
                 self.active_runtime_objective = "hashrate".to_string();
@@ -6561,6 +7057,7 @@ impl AutoTuner {
                 )
                 .freqs;
 
+                let mut dispatch_confirmed = chain_chip_ranges.iter().all(|(_, voltage, _, count)| *voltage > 0 && *count > 0);
                 // Apply the budget-allocated frequencies to each chain
                 for &(chain_id, _voltage, start, count) in &chain_chip_ranges {
                     let chain_freqs = &budget_freqs[start..start + count];
@@ -6569,7 +7066,7 @@ impl AutoTuner {
                         for (i, &new_freq) in chain_freqs.iter().enumerate() {
                             if i < profile.chips.len() {
                                 let old_freq = profile.chips[i].operating_mhz;
-                                match Self::set_chip_freq_checked(
+                                match Self::guarded_set_chip_freq(&self.variant_guard,
                                     freq_cmd_tx,
                                     chain_id,
                                     profile.chips[i].chip_index,
@@ -6581,6 +7078,7 @@ impl AutoTuner {
                                         profile.chips[i].operating_mhz = applied_freq;
                                     }
                                     Err(e) => {
+                                        dispatch_confirmed = false;
                                         warn!(chain_id, chip = profile.chips[i].chip_index, error = %e, "Target mode DVFS: failed to apply chip frequency");
                                     }
                                 }
@@ -6617,6 +7115,7 @@ impl AutoTuner {
                             chain_id, min_freq
                         );
                         if let Err(e) = Self::wait_for_dispatcher(freq_cmd_tx).await {
+                            dispatch_confirmed = false;
                             warn!(chain_id, error = %e, "Target mode DVFS: dispatcher sync failed after frequency batch");
                         }
 
@@ -6626,9 +7125,11 @@ impl AutoTuner {
                     }
                 }
 
+                self.last_power_dispatch_confirmed = dispatch_confirmed;
                 info!(
                     target_watts,
-                    "Power budget applied — frequencies adjusted for {} chips across {} chain(s)",
+                    dispatch_confirmed,
+                    "Power budget processed for {} chips across {} chain(s)",
                     all_chips.len(),
                     chain_chip_ranges.len(),
                 );
@@ -6756,7 +7257,7 @@ impl AutoTuner {
                                     // model trusting a frequency the hardware never took —
                                     // and total-power enforcement then passed on phantom
                                     // numbers while the chip ran at its prior (higher) freq.
-                                    match Self::set_chip_freq_checked(
+                                    match Self::guarded_set_chip_freq(&self.variant_guard,
                                         freq_cmd_tx,
                                         chain_id,
                                         profile.chips[i].chip_index,
@@ -6869,7 +7370,7 @@ impl AutoTuner {
                         );
 
                         let voltage_apply_succeeded = if runtime_voltage_supported {
-                            match Self::set_voltage_checked(
+                            match Self::guarded_set_voltage(&self.variant_guard,
                                 freq_cmd_tx,
                                 chain_id,
                                 optimal_voltage_mv,
@@ -6929,7 +7430,7 @@ impl AutoTuner {
                         // Apply per-chip frequencies
                         for (i, &new_freq) in per_chip_freqs.iter().enumerate() {
                             if i < profile.chips.len() {
-                                match Self::set_chip_freq_checked(
+                                match Self::guarded_set_chip_freq(&self.variant_guard,
                                     freq_cmd_tx,
                                     chain_id,
                                     profile.chips[i].chip_index,
@@ -7189,7 +7690,7 @@ impl AutoTuner {
                             .unwrap_or(min_freq);
                     if new_freq < old_freq {
                         chip.operating_mhz = new_freq;
-                        if let Err(e) = Self::set_chip_freq_checked(
+                        if let Err(e) = Self::guarded_set_chip_freq(&self.variant_guard,
                             freq_cmd_tx,
                             *chain_id,
                             *chip_index,
@@ -7322,7 +7823,7 @@ impl AutoTuner {
             // Apply voltage changes
             if best_new_voltage < best.2 {
                 if let Err(e) =
-                    Self::set_voltage_checked(freq_cmd_tx, best.0, best_new_voltage).await
+                    Self::guarded_set_voltage(&self.variant_guard,freq_cmd_tx, best.0, best_new_voltage).await
                 {
                     warn!(chain_id = best.0, error = %e, "Cross-chain voltage optimize: failed to lower voltage on best chain");
                 } else if let Some(profile) = self.profiles.get_mut(&best.0) {
@@ -7332,7 +7833,7 @@ impl AutoTuner {
 
             if worst_new_voltage > worst.2 {
                 if let Err(e) =
-                    Self::set_voltage_checked(freq_cmd_tx, worst.0, worst_new_voltage).await
+                    Self::guarded_set_voltage(&self.variant_guard,freq_cmd_tx, worst.0, worst_new_voltage).await
                 {
                     warn!(chain_id = worst.0, error = %e, "Cross-chain voltage optimize: failed to raise voltage on worst chain");
                 } else if let Some(profile) = self.profiles.get_mut(&worst.0) {
@@ -7420,7 +7921,7 @@ impl AutoTuner {
                 let freqs = tuner.current_frequencies(&states);
                 for &(chip_idx, freq) in &freqs {
                     if let Err(e) =
-                        Self::set_chip_freq_checked(freq_cmd_tx, *chain_id, chip_idx, freq).await
+                        Self::guarded_set_chip_freq(&self.variant_guard,freq_cmd_tx, *chain_id, chip_idx, freq).await
                     {
                         warn!(chain_id = *chain_id, chip = chip_idx, error = %e,
                             "Re-characterization: failed to apply test frequency");
@@ -7500,7 +8001,7 @@ impl AutoTuner {
                         );
 
                         // Apply the new operating frequency
-                        if let Err(e) = Self::set_chip_freq_checked(
+                        if let Err(e) = Self::guarded_set_chip_freq(&self.variant_guard,
                             freq_cmd_tx,
                             *chain_id,
                             new_chip.chip_index,
@@ -7697,6 +8198,114 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn power_partial_ack_then_failure_updates_monitors_and_published_status() {
+        for fail_barrier in [false, true] {
+            let mut tuner = AutoTuner::new(
+                AutoTunerConfig {
+                    total_power_limit_w: 400,
+                    voltage_optimization: false,
+                    dvfs_enabled: false,
+                    ..AutoTunerConfig::default()
+                },
+                625,
+                "BM1387".into(),
+                "pic16".into(),
+                default_power_calibration(),
+            );
+            tuner.install_profile_for_test(6, make_test_profile(6, 63, 625));
+            tuner.state = TunerState::BackgroundAdjust;
+            tuner.live_avg_frequency_mhz = Some(625.0);
+            let (status_tx, status_rx) =
+                tokio::sync::watch::channel(tuner.build_runtime_status("before", None));
+            tuner.set_runtime_status_watch(status_tx);
+            let mut monitors: HashMap<_, _> = (0..63)
+                .map(|chip| {
+                    (
+                        (6, chip),
+                        ChipMonitor {
+                            chip_id: 0x1387,
+                            consecutive_errors: 0,
+                            consecutive_hashrate_deficit: 0,
+                            current_freq_mhz: 625,
+                            desired_freq_mhz: 625,
+                            profile_freq_mhz: 625,
+                            thermal_limit_mhz: None,
+                            fan_limit_mhz: None,
+                            sensor_safety_limit_mhz: None,
+                            thermally_derated: false,
+                            consecutive_clean_windows: 0,
+                            boost_attempts: 0,
+                            consecutive_zero_nonce_windows: 0,
+                            masked: false,
+                        },
+                    )
+                })
+                .collect();
+            let (tx, mut rx) = mpsc::channel(128);
+            let apply = async {
+                let result = tuner
+                    .apply_runtime_mode(TunerMode::PowerTarget { watts: 600 }, &tx, &mut monitors)
+                    .await;
+                drop(tx);
+                result
+            };
+            let dispatcher = async {
+                let mut writes = 0;
+                while let Some(command) = rx.recv().await {
+                    match command {
+                        FreqCommand::SetChipFreq {
+                            chip_index,
+                            freq_mhz,
+                            ack_tx,
+                            ..
+                        } => {
+                            assert!(freq_mhz < 625);
+                            writes += 1;
+                            ack_tx
+                                .unwrap()
+                                .send(if fail_barrier || chip_index == 0 {
+                                    Ok(freq_mhz)
+                                } else {
+                                    Err("late chip failure".into())
+                                })
+                                .unwrap();
+                        }
+                        FreqCommand::UpdateWorkTime { .. } => {}
+                        FreqCommand::Barrier { ack_tx } => {
+                            if fail_barrier {
+                                drop(ack_tx);
+                            } else {
+                                ack_tx.send(()).unwrap();
+                            }
+                        }
+                        other => panic!("unexpected voltage or fan operation: {other:?}"),
+                    }
+                }
+                assert_eq!(writes, 63);
+            };
+            let (result, ()) = tokio::join!(apply, dispatcher);
+            assert!(matches!(result.status, crate::AutoTunerCommandStatus::Deferred));
+            assert!(!result.applied_runtime);
+            assert!(tuner.profiles[&6].chips[0].operating_mhz < 625);
+            if !fail_barrier {
+                assert_eq!(tuner.profiles[&6].chips[1].operating_mhz, 625);
+            }
+            let mut total = 0u32;
+            for chip in &tuner.profiles[&6].chips {
+                let monitor = &monitors[&(6, chip.chip_index)];
+                assert_eq!(monitor.current_freq_mhz, chip.operating_mhz);
+                assert_eq!(monitor.desired_freq_mhz, chip.operating_mhz);
+                assert_eq!(monitor.profile_freq_mhz, chip.operating_mhz);
+                total += u32::from(chip.operating_mhz);
+            }
+            let average = Some(f64::from(total) / 63.0);
+            assert_eq!(tuner.live_avg_frequency_mhz, average);
+            assert_eq!(status_rx.borrow().avg_frequency_mhz, average);
+            assert!(status_rx.borrow().message.contains("unconfirmed"));
+        }
+    }
+
     #[test]
     fn test_tuner_initial_state() {
         let config = AutoTunerConfig::default();
@@ -7772,7 +8381,7 @@ mod tests {
     }
 
     #[test]
-    fn perf006_tuner_new_voltage_autotune_gate_on_flips_capability() {
+    fn perf006_tuner_new_voltage_autotune_override_requires_lab_capability() {
         // dsPIC BM1362 (am2). Gate ON ⇒ the operator-opted-in voltage search is
         // advertised (the downstream clamp to [13700,14500] stays enforced in
         // the autotuner runtime / pvt envelope — this only flips the capability
@@ -7785,9 +8394,10 @@ mod tests {
                 "dspic".to_string(),
                 default_power_calibration(),
             );
-            assert!(
+            assert_eq!(
                 tuner.capabilities.voltage_optimization_supported,
-                "gate ON must advertise the opted-in dsPIC voltage search"
+                dcentrald_common::lab_env::compiled(),
+                "only lab builds may enable dsPIC voltage search via environment"
             );
         });
     }
@@ -7957,6 +8567,14 @@ mod tests {
             "pic16".to_string(),
             default_power_calibration(),
         );
+        // C3a: the first-boot safe-stock start gate is fail-closed — a
+        // tuner with no gate receiver parks in Idle forever. Characterization
+        // tests must install an OPEN gate (production spawn sites install a
+        // daemon-fed one).
+        let (gate_tx, gate_rx) =
+            tokio::sync::watch::channel(crate::tune_guard::FirstBootGateSnapshot::all_pass());
+        tuner.set_first_boot_gate(gate_rx);
+        let _gate_tx = gate_tx;
 
         let (stats_tx, stats_rx) = mpsc::channel::<ChipStatsSnapshot>(100);
         let (freq_cmd_tx, mut freq_cmd_rx) = mpsc::channel::<FreqCommand>(100);
@@ -9487,4 +10105,457 @@ mod tests {
             "GET truth helper must report adopted after the live command"
         );
     }
+
+    // ===================================================================
+    // C3a — variant guard + first-boot gate + convergence telemetry
+    // (tuner-level; unit-level pins live in tune_guard.rs)
+    // ===================================================================
+
+    /// MUTATION PIN (tuner-level): a variant whose envelope datums are
+    /// unknown (BM1366/nopic — no published desk envelope) must make
+    /// `run()` refuse to tune with the surfaced NotTunable reason and emit
+    /// ZERO mutating FreqCommands. Delete the run() guard gate and this
+    /// fails.
+    #[tokio::test]
+    async fn c3a_run_refuses_not_tunable_variant_with_surfaced_reason() {
+        let config = AutoTunerConfig {
+            measurement_window_s: 1,
+            verification_window_s: 1,
+            ..Default::default()
+        };
+        let mut tuner = AutoTuner::new(
+            config,
+            500,
+            "BM1366".to_string(),
+            "nopic".to_string(),
+            default_power_calibration(),
+        );
+        tuner.set_first_boot_gate_open_for_test();
+
+        let (stats_tx, stats_rx) = mpsc::channel::<ChipStatsSnapshot>(16);
+        let (freq_cmd_tx, mut freq_cmd_rx) = mpsc::channel::<FreqCommand>(16);
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+        drop(stats_tx);
+
+        let chain_infos = vec![crate::ChainTuneInfo {
+            chain_id: 0,
+            chip_count: 4,
+            voltage_mv: 3_300,
+            chip_id: 0x1366,
+            hardware_identity: crate::ChainHardwareIdentity::default(),
+        }];
+
+        let handle = tokio::spawn(async move {
+            tuner
+                .run(&chain_infos, stats_rx, freq_cmd_tx, shutdown_clone)
+                .await;
+            tuner
+        });
+        // Give the park a moment, then stop.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        shutdown.cancel();
+        let tuner = handle.await.unwrap();
+
+        // No mutating command may have been emitted for a NotTunable variant.
+        let mut emitted_any_command = false;
+        while let Ok(_cmd) = freq_cmd_rx.try_recv() {
+            emitted_any_command = true;
+        }
+        assert!(
+            !emitted_any_command,
+            "NotTunable variant must not emit any FreqCommand"
+        );
+
+        let status = tuner.runtime_status_for_test();
+        assert_eq!(
+            status.state, "Failed",
+            "status state must surface the refusal"
+        );
+        let reason = status
+            .not_tunable_reason
+            .expect("NotTunable reason must be surfaced");
+        assert!(
+            reason.contains("0x1366") && reason.contains("refusing to tune blind"),
+            "surfaced reason must name the variant and the refusal: {reason}"
+        );
+        // Convergence telemetry counts every target chain NotTunable.
+        let conv = status.convergence.expect("convergence snapshot");
+        assert_eq!(conv.rung_counts.not_tunable, 1);
+        assert_eq!(conv.rung_counts.tunable, 0);
+        assert!(conv.envelope_version.starts_with("c3a-"));
+    }
+
+    /// MUTATION PIN (tuner-level): a fanless medium carrying a fan rung
+    /// makes the variant NotTunable (RaiseFansToCap unreachable on
+    /// fanless through the tuner's inputs).
+    #[test]
+    fn c3a_run_refuses_fanless_medium_with_fan_rung() {
+        let mut tuner = AutoTuner::new(
+            AutoTunerConfig::default(),
+            650,
+            "BM1387".to_string(),
+            "pic16".to_string(),
+            default_power_calibration(),
+        );
+        tuner.set_variant_cooling(
+            Some(dcentrald_common::cooling_medium::CoolingMedium::Hydro),
+            dcentrald_common::cooling_medium::CANONICAL_FORCED_AIR_LADDER,
+        );
+        let telemetry = tuner.variant_guard_telemetry();
+        assert!(
+            !telemetry.tunable,
+            "fan rung on fanless must refuse (NotTunable)"
+        );
+        let status = tuner.runtime_status_for_test();
+        assert!(
+            status
+                .not_tunable_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("RaiseFansToCap"),
+            "reason must name the fan rung: {:?}",
+            status.not_tunable_reason
+        );
+    }
+
+    /// The first-boot gate parks per condition with a visible reason (each
+    /// condition individually), and the tuner stays in Idle emitting no
+    /// mutating commands until the gate opens.
+    #[tokio::test]
+    async fn c3a_run_parks_in_idle_per_start_gate_condition() {
+        for mutate in ["health", "fans", "temp"] {
+            let mut tuner = AutoTuner::new(
+                AutoTunerConfig {
+                    measurement_window_s: 1,
+                    verification_window_s: 1,
+                    ..Default::default()
+                },
+                650,
+                "BM1387".to_string(),
+                "pic16".to_string(),
+                default_power_calibration(),
+            );
+            let mut gate = crate::tune_guard::FirstBootGateSnapshot::all_pass();
+            match mutate {
+                "health" => gate.health_snapshot_ok = false,
+                "fans" => gate.fans_ok = false,
+                "temp" => gate.temp_in_envelope = false,
+                _ => unreachable!(),
+            }
+            let (_gate_tx, gate_rx) = tokio::sync::watch::channel(gate);
+            tuner.set_first_boot_gate(gate_rx);
+
+            let (stats_tx, stats_rx) = mpsc::channel::<ChipStatsSnapshot>(16);
+            let (freq_cmd_tx, mut freq_cmd_rx) = mpsc::channel::<FreqCommand>(16);
+            let shutdown = CancellationToken::new();
+            let shutdown_clone = shutdown.clone();
+            drop(stats_tx);
+
+            let chain_infos = vec![crate::ChainTuneInfo {
+                chain_id: 6,
+                chip_count: 3,
+                voltage_mv: 9_100,
+                chip_id: 0x1387,
+                hardware_identity: crate::ChainHardwareIdentity::default(),
+            }];
+
+            let handle = tokio::spawn(async move {
+                tuner
+                    .run(&chain_infos, stats_rx, freq_cmd_tx, shutdown_clone)
+                    .await;
+                tuner
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            shutdown.cancel();
+            let tuner = handle.await.unwrap();
+
+            assert_eq!(
+                tuner.state(),
+                TunerState::Idle,
+                "condition {mutate}: tuner must stay parked in Idle"
+            );
+            let status = tuner.runtime_status_for_test();
+            let reason = status
+                .start_gate_park_reason
+                .unwrap_or_else(|| panic!("condition {mutate} must surface a park reason"));
+            let expected = match mutate {
+                "health" => "health snapshot",
+                "fans" => "fans OK",
+                "temp" => "temperature in envelope",
+                "ack" => "ExperimentalOptIn",
+                _ => unreachable!(),
+            };
+            assert!(
+                reason.contains(expected),
+                "condition {mutate}: park reason must mention {expected}, got: {reason}"
+            );
+            // No mutating command while parked.
+            let mut any_cmd = false;
+            while let Ok(_cmd) = freq_cmd_rx.try_recv() {
+                any_cmd = true;
+            }
+            assert!(
+                !any_cmd,
+                "condition {mutate}: parked tuner must not emit FreqCommands"
+            );
+        }
+    }
+
+    /// Fail-closed wiring pin: NO gate receiver installed ⇒ park in Idle
+    /// forever with the explicit "gate not wired" reason (a forgotten
+    /// production wiring must never silently start characterization).
+    #[tokio::test]
+    async fn c3a_run_parks_forever_when_gate_not_wired() {
+        let mut tuner = AutoTuner::new(
+            AutoTunerConfig {
+                measurement_window_s: 1,
+                verification_window_s: 1,
+                ..Default::default()
+            },
+            650,
+            "BM1387".to_string(),
+            "pic16".to_string(),
+            default_power_calibration(),
+        );
+        // NOTE: deliberately no set_first_boot_gate call.
+        let (stats_tx, stats_rx) = mpsc::channel::<ChipStatsSnapshot>(16);
+        let (freq_cmd_tx, mut freq_cmd_rx) = mpsc::channel::<FreqCommand>(16);
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+        drop(stats_tx);
+
+        let chain_infos = vec![crate::ChainTuneInfo {
+            chain_id: 6,
+            chip_count: 3,
+            voltage_mv: 9_100,
+            chip_id: 0x1387,
+            hardware_identity: crate::ChainHardwareIdentity::default(),
+        }];
+
+        let handle = tokio::spawn(async move {
+            tuner
+                .run(&chain_infos, stats_rx, freq_cmd_tx, shutdown_clone)
+                .await;
+            tuner
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        shutdown.cancel();
+        let tuner = handle.await.unwrap();
+        assert_eq!(tuner.state(), TunerState::Idle);
+        let status = tuner.runtime_status_for_test();
+        assert!(
+            status
+                .start_gate_park_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("gate wiring"),
+            "absent gate must park with the wiring reason: {:?}",
+            status.start_gate_park_reason
+        );
+        let mut any_cmd = false;
+        while let Ok(_cmd) = freq_cmd_rx.try_recv() {
+            any_cmd = true;
+        }
+        assert!(!any_cmd);
+    }
+
+    /// MUTATION PIN (tuner-level): a frequency raise above the resolved
+    /// variant envelope refuses through the tuner's own guard instance
+    /// (S9 documented band ceiling = 750 MHz), and the refusal lands in the
+    /// convergence telemetry with its reason.
+    #[test]
+    fn c3a_tuner_guard_refuses_above_s9_envelope_and_counts() {
+        let tuner = AutoTuner::new(
+            AutoTunerConfig::default(),
+            650,
+            "BM1387".to_string(),
+            "pic16".to_string(),
+            default_power_calibration(),
+        );
+        assert!(tuner.variant_guard_check_freq_for_test(6, 650).is_ok());
+        assert!(tuner.variant_guard_check_freq_for_test(6, 750).is_ok());
+        let err = tuner
+            .variant_guard_check_freq_for_test(6, 751)
+            .expect_err("751 MHz must refuse vs the S9 envelope ceiling");
+        assert!(
+            err.contains("751") && err.contains("750"),
+            "refusal names the bound: {err}"
+        );
+        let telemetry = tuner.variant_guard_telemetry();
+        assert_eq!(telemetry.refused_steps, 1);
+        assert!(
+            telemetry.last_refusal.unwrap().contains("bm1387-pic16"),
+            "refusal names the envelope source"
+        );
+    }
+
+    /// BM1362 without a classified SKU is NotTunable through the tuner
+    /// construction path too (pre-C3a open-gate behavior must not return).
+    #[test]
+    fn c3a_bm1362_tuner_without_sku_is_not_tunable() {
+        let mut tuner = AutoTuner::new(
+            AutoTunerConfig::default(),
+            525,
+            "BM1362".to_string(),
+            "dspic".to_string(),
+            default_power_calibration(),
+        );
+        assert!(
+            !tuner.variant_guard_telemetry().tunable,
+            "BM1362 without set_chain_sku must be NotTunable"
+        );
+        // Registering the SKU resolves the PVT envelope and makes it tunable.
+        tuner.set_chain_sku(0, Bm1362HashboardSku::Bhb42601);
+        assert!(tuner.variant_guard_telemetry().tunable);
+        assert!(tuner.variant_guard_check_freq_for_test(0, 545).is_ok());
+        assert!(tuner.variant_guard_check_freq_for_test(0, 546).is_err());
+    }
+
+    /// C3a fix lane (DCENT_EE finding 2 — partial-SKU-coverage seam):
+    /// registering a SKU for only SOME of the target chains must refuse.
+    /// `uniform_chain_sku` used to certify uniformity over the REGISTERED
+    /// SKUs only, so {chain0: sku} resolved tunable while chain1 (whose
+    /// EEPROM classification failed, hence absent from the map) tuned under
+    /// sku's envelope. Unreachable today (the map is only populated under
+    /// NoPic, and NoPic is BM1366/68 ⇒ `VariantEnvelopeUnknown` regardless);
+    /// pinned so the seam stays closed when a BM1362-on-NoPic variant ships.
+    #[test]
+    fn c3a_bm1362_partial_sku_coverage_refuses() {
+        use std::collections::BTreeSet;
+        let mut chain_skus: HashMap<u8, Bm1362HashboardSku> = HashMap::new();
+        chain_skus.insert(0, Bm1362HashboardSku::Bhb42601);
+
+        let full_coverage: BTreeSet<u8> = [0u8].into_iter().collect();
+        assert_eq!(
+            AutoTuner::uniform_chain_sku(&chain_skus, &full_coverage),
+            Some(Bm1362HashboardSku::Bhb42601),
+            "full coverage of a single-chain target set resolves"
+        );
+
+        // Partial coverage: chain 1 unclassified (absent from the map).
+        let partial_coverage: BTreeSet<u8> = [0u8, 1u8].into_iter().collect();
+        assert_eq!(
+            AutoTuner::uniform_chain_sku(&chain_skus, &partial_coverage),
+            None,
+            "partial SKU coverage must not certify a uniform envelope"
+        );
+
+        // Empty target set (pre-`run()` re-resolutions): the coverage
+        // requirement is vacuous — run()-entry re-resolution certifies.
+        assert_eq!(
+            AutoTuner::uniform_chain_sku(&chain_skus, &BTreeSet::new()),
+            Some(Bm1362HashboardSku::Bhb42601)
+        );
+    }
+
+    /// Run()-level pin of the same seam: a BM1362 tuner with two target
+    /// chains but a SKU registered for only one must park NotTunable with
+    /// the surfaced `Bm1362SkuUnclassified` reason and emit ZERO
+    /// FreqCommands.
+    #[tokio::test]
+    async fn c3a_run_refuses_bm1362_partial_sku_coverage() {
+        let config = AutoTunerConfig {
+            measurement_window_s: 1,
+            verification_window_s: 1,
+            ..Default::default()
+        };
+        let mut tuner = AutoTuner::new(
+            config,
+            525,
+            "BM1362".to_string(),
+            "dspic".to_string(),
+            default_power_calibration(),
+        );
+        tuner.set_first_boot_gate_open_for_test();
+        tuner.set_chain_sku(0, Bm1362HashboardSku::Bhb42601);
+        // Chain 1 deliberately NOT registered — its EEPROM classification
+        // failed at the population site, so it is absent from the map.
+
+        let (stats_tx, stats_rx) = mpsc::channel::<ChipStatsSnapshot>(16);
+        let (freq_cmd_tx, mut freq_cmd_rx) = mpsc::channel::<FreqCommand>(16);
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+        drop(stats_tx);
+
+        let chain_infos = vec![
+            crate::ChainTuneInfo {
+                chain_id: 0,
+                chip_count: 4,
+                voltage_mv: 13_700,
+                chip_id: 0x1362,
+                hardware_identity: crate::ChainHardwareIdentity::default(),
+            },
+            crate::ChainTuneInfo {
+                chain_id: 1,
+                chip_count: 4,
+                voltage_mv: 13_700,
+                chip_id: 0x1362,
+                hardware_identity: crate::ChainHardwareIdentity::default(),
+            },
+        ];
+
+        let handle = tokio::spawn(async move {
+            tuner
+                .run(&chain_infos, stats_rx, freq_cmd_tx, shutdown_clone)
+                .await;
+            tuner
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        shutdown.cancel();
+        let tuner = handle.await.unwrap();
+
+        let mut emitted_any_command = false;
+        while let Ok(_cmd) = freq_cmd_rx.try_recv() {
+            emitted_any_command = true;
+        }
+        assert!(
+            !emitted_any_command,
+            "partial SKU coverage must not emit any FreqCommand"
+        );
+
+        let status = tuner.runtime_status_for_test();
+        assert_eq!(
+            status.state, "Failed",
+            "the partial-coverage seam must refuse (Failed), not tune"
+        );
+        let reason = status
+            .not_tunable_reason
+            .expect("NotTunable reason must be surfaced");
+        assert!(
+            reason.contains("uniform classified hashboard SKU"),
+            "reason must name the SKU refusal: {reason}"
+        );
+        // Convergence telemetry counts every target chain NotTunable.
+        let conv = status.convergence.expect("convergence snapshot");
+        assert_eq!(conv.rung_counts.not_tunable, 2);
+    }
+
+    /// Convergence telemetry honesty: the efficiency figure carried in the
+    /// convergence snapshot is ALWAYS flagged as an estimate — a projected
+    /// J/TH must never be consumable as a measured value.
+    #[test]
+    fn c3a_convergence_efficiency_is_always_flagged_estimate() {
+        let tuner = AutoTuner::new(
+            AutoTunerConfig::default(),
+            650,
+            "BM1387".to_string(),
+            "pic16".to_string(),
+            default_power_calibration(),
+        );
+        let status = tuner.runtime_status_for_test();
+        let conv = status.convergence.expect("convergence snapshot present");
+        if conv.estimated_efficiency_jth.is_some() {
+            assert!(
+                conv.efficiency_jth_estimated,
+                "any efficiency projection must carry the estimated flag"
+            );
+        }
+        // The serialized JSON must carry the flag whenever the value exists.
+        let json = serde_json::to_string(&conv).unwrap();
+        if json.contains("estimated_efficiency_jth") {
+            assert!(json.contains("efficiency_jth_estimated"));
+        }
+    }
+
 }

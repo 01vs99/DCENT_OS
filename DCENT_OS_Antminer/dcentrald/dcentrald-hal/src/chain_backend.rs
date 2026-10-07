@@ -108,4 +108,11 @@ pub trait Bm1397PlusChainBackend: Send + Sync {
     /// versions — current values: `"serial-devmem-uart"`,
     /// `"serial-kernel-uart"`, `"fpga-fifo-uio"`, `"fpga-fifo-devmem"`.
     fn transport_label(&self) -> &'static str;
+
+    /// Host-only identity check for the retained command/FIFO adapter fixture.
+    /// An arbitrary backend cannot authorize injected system-image identity.
+    #[cfg(feature = "sim-hal")]
+    fn sim_owns_fpga(&self, _fifo: &crate::fpga_chain::FpgaChain) -> bool {
+        false
+    }
 }

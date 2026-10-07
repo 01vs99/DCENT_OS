@@ -132,6 +132,7 @@ class DeskNowDevopsPackagingTests(unittest.TestCase):
         / "common"
         / "prune-runtime-research-tools.sh"
     )
+    RELEASE_POSTURE = ROOT.parent / "scripts" / "lib" / "release_posture.sh"
     COMMON_FRAGMENT = (
         ROOT.parent / "br2_external_dcentos" / "configs" / "dcentos-common.fragment"
     )
@@ -202,6 +203,7 @@ class DeskNowDevopsPackagingTests(unittest.TestCase):
 
     def test_release_prune_source_drops_strace_and_i2cget_only_when_release(self) -> None:
         prune = self.PRUNE.read_text(encoding="utf-8")
+        posture = self.RELEASE_POSTURE.read_text(encoding="utf-8")
         fragment = self.COMMON_FRAGMENT.read_text(encoding="utf-8")
         self.assertIn("BR2_PACKAGE_STRACE=y", fragment)
         self.assertIn("# BR2_PACKAGE_I2C_TOOLS is not set", fragment)
@@ -209,7 +211,16 @@ class DeskNowDevopsPackagingTests(unittest.TestCase):
         self.assertIn("DCENT_RELEASE_IMAGE", prune)
         self.assertIn("usr/bin/strace", prune)
         self.assertIn("usr/sbin/i2cget", prune)
-        self.assertIn("1|true|TRUE|yes|YES|y|Y", prune)
+        # WS-A4 re-anchor (2026-09-01): the truthy spelling table moved from
+        # the prune script's inline `case` into the canonical resolver the
+        # prune script now calls (dcent_release_posture_is_release). Pin the
+        # spellings in their new single source and the call in the consumer;
+        # the semantic (prune only on the RELEASE posture, DEV opts out) is
+        # unchanged and additionally pinned functionally by
+        # scripts/test_runtime_hardware_ownership.py.
+        self.assertIn("dcent_release_posture_is_release", prune)
+        self.assertIn("1|true|TRUE|yes|YES|y|Y", posture)
+        self.assertIn("DCENT_DEV_IMAGE", posture)
 
 
 if __name__ == "__main__":

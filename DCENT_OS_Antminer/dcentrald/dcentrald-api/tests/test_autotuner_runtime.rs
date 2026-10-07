@@ -185,7 +185,7 @@ fn build_test_autotuner_runtime_ready() -> (AutoTuner, mpsc::Sender<AutoTunerCom
         AutoTunerConfig::default(),
         500,
         "BM1387".to_string(),
-        "pic".to_string(),
+        "pic16".to_string(),
         calibration,
     );
     let (cmd_tx, cmd_rx) = mpsc::channel::<AutoTunerCommand>(8);
@@ -344,7 +344,7 @@ async fn test_apply_silicon_profile_deferred_when_not_ready() {
         AutoTunerConfig::default(),
         500,
         "BM1387".to_string(),
-        "pic".to_string(),
+        "pic16".to_string(),
         calibration,
     );
     let (cmd_tx, cmd_rx) = mpsc::channel::<AutoTunerCommand>(8);
@@ -584,7 +584,7 @@ async fn build_w15a_tuner_with_active_profile(
         AutoTunerConfig::default(),
         500,
         "BM1387".to_string(),
-        "pic".to_string(),
+        "pic16".to_string(),
         calibration,
     );
     let (cmd_tx, cmd_rx) = mpsc::channel::<AutoTunerCommand>(8);
@@ -703,7 +703,7 @@ async fn test_tuner_loop_falls_back_to_config_when_no_active_profile() {
         AutoTunerConfig::default(),
         500,
         "BM1387".to_string(),
-        "pic".to_string(),
+        "pic16".to_string(),
         calibration,
     );
     tuner.force_state_for_test(TunerState::BackgroundAdjust);
@@ -729,7 +729,8 @@ async fn test_tuner_loop_falls_back_to_config_when_no_active_profile() {
 
 /// W15-A test 3: a preset row with extreme freq/voltage values is
 /// clamped to the autotuner's safety bounds (config min/max freq,
-/// chain-rail voltage ceiling for BM1387 = 9440 mV).
+/// chain-rail voltage ceiling for BM1387 = 9400 mV — PIC DAC 6, the
+/// codebase's safe operating ceiling; c3a-2 DCENT_EE merge condition).
 #[tokio::test]
 async fn test_profile_targets_clamped_by_safety_bounds() {
     let _guard = test_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -771,14 +772,14 @@ async fn test_profile_targets_clamped_by_safety_bounds() {
         target.0,
         AutoTunerConfig::default().max_freq_mhz
     );
-    // BM1387 chain-rail max is 9440 mV; 15.0 V (=15000 mV) raw must be
+    // BM1387 chain-rail max is 9400 mV; 15.0 V (=15000 mV) raw must be
     // clamped down.
     assert_eq!(
-        target.1, 9440,
-        "voltage must be clamped to BM1387 chain-rail ceiling 9440 mV"
+        target.1, 9400,
+        "voltage must be clamped to BM1387 chain-rail ceiling 9400 mV"
     );
     assert!(
-        voltages.iter().any(|(c, mv)| *c == 6 && *mv == 9440),
+        voltages.iter().any(|(c, mv)| *c == 6 && *mv == 9400),
         "dispatcher should have received clamped voltage, got {:?}",
         voltages
     );

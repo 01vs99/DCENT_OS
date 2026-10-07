@@ -31,6 +31,12 @@ export type ApiClientRouteManifestEntry = {
 };
 
 export const API_CLIENT_ROUTE_MANIFEST = [
+  { method: 'GET', path: '/api/system/update/check', owner: 'system-upgrade' },
+  { method: 'POST', path: '/api/system/update/fetch', owner: 'system-upgrade' },
+  { method: 'GET', path: '/api/system/update/operation', owner: 'system-upgrade' },
+  { method: 'GET', path: '/api/system/update/downloads', owner: 'system-upgrade' },
+  { method: 'POST', path: '/api/system/update/discard', owner: 'system-upgrade' },
+  { method: 'POST', path: '/api/system/update/apply', owner: 'system-upgrade' },
   { method: 'POST', path: '/api/auth/session', owner: 'core-client' },
   { method: 'DELETE', path: '/api/auth/session/current', owner: 'core-client' },
   { method: 'GET', path: '/api/status', owner: 'core-client' },
@@ -65,6 +71,8 @@ export const API_CLIENT_ROUTE_MANIFEST = [
   { method: 'POST', path: '/api/setup/test-pool', owner: 'setup' },
   { method: 'POST', path: '/api/setup/complete', owner: 'setup' },
 
+  { method: 'GET', path: '/api/system/ssh/keys', owner: 'setup' },
+  { method: 'POST', path: '/api/system/ssh/keys', owner: 'setup' },
   { method: 'GET', path: '/api/system/info', owner: 'core-client' },
   { method: 'GET', path: '/api/system/health', owner: 'core-client' },
   { method: 'GET', path: '/api/system/asic', owner: 'core-client' },
@@ -196,6 +204,8 @@ export const API_CLIENT_ROUTE_MANIFEST = [
   { method: 'POST', path: '/api/network/hostname', owner: 'network-info' },
   { method: 'GET', path: '/api/miner/type', owner: 'network-info' },
   { method: 'GET', path: '/api/log/backup', owner: 'support-bundle' },
+  { method: 'GET', path: '/api/diagnostics', owner: 'diagnostics' },
+  { method: 'POST', path: '/api/system/reset-settings', owner: 'actions' },
 
   { method: 'GET', path: '/api/pool/sv2/status', owner: 'sv2-jd' },
   { method: 'GET', path: '/api/pool/sv2/handshake', owner: 'sv2-jd' },

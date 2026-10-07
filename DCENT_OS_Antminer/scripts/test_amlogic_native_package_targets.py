@@ -79,11 +79,28 @@ class AmlogicNativePackageTargetsTest(unittest.TestCase):
             with self.subTest(model=model):
                 config = (configs / defconfig).read_text(encoding="utf-8")
                 self.assertIn(f"/{board}/rootfs-overlay", config)
-                self.assertIn("/am3-s21/post-build.sh", config)
+                if board == "am3-s19jproplus":
+                    self.assertIn("/am3-bm1362-nopic/post-build.sh", config)
+                    wrapper = (boards / "am3-bm1362-nopic/post-build.sh").read_text(encoding="utf-8")
+                    self.assertIn('case "$TARGET" in am3-s19jproa|am3-s19jproplus)', wrapper)
+                    self.assertIn('exec "$SCRIPT_DIR/../am3-s21/post-build.sh" "$@"', wrapper)
+                else:
+                    self.assertIn("/am3-s21/post-build.sh", config)
                 if board in {"am3-s19jxp", "am3-s19jproplus"}:
                     self.assertIn(f"/{board}/post-image.sh", config)
                     wrapper = (boards / board / "post-image.sh").read_text(encoding="utf-8")
-                    self.assertIn("/am3-s21/post-image.sh", wrapper)
+                    if board == "am3-s19jproplus":
+                        self.assertIn('exec "$SCRIPT_DIR/../am3-bm1362-nopic/post-image.sh" "$@"', wrapper)
+                        dedicated = (boards / "am3-bm1362-nopic/post-image.sh").read_text(encoding="utf-8")
+                        self.assertIn('am3-s19jproplus) PRODUCT_LABEL="S19j Pro+ 120"', dedicated)
+                        self.assertIn('*) echo "ERROR: exact A126/Plus120 post-image target required" >&2; exit 1', dedicated)
+                        self.assertIn('dcent_require_exact_amlogic_build_inputs "${TARGET:-}"', dedicated)
+                        self.assertIn("PACKAGE_INSTALL_AUTHORIZED=0", dedicated)
+                        self.assertIn("PACKAGE_STORAGE_AUTHORIZED=0", dedicated)
+                        self.assertIn("DCENT_PACKAGE_INSTALLABLE=false", dedicated)
+                        self.assertIn("DCENT_TOOLBOX_INSTALL_MODE=package_only_denied", dedicated)
+                    else:
+                        self.assertIn("/am3-s21/post-image.sh", wrapper)
                 else:
                     self.assertIn("/am3-s21/post-image.sh", config)
                 overlay = boards / board / "rootfs-overlay" / "etc"
@@ -101,8 +118,7 @@ class AmlogicNativePackageTargetsTest(unittest.TestCase):
             / "br2_external_dcentos"
             / "board"
             / "amlogic"
-            / "am3-s21"
-            / "post-image.sh"
+            / "post-image-family.sh"
         ).read_text(encoding="utf-8")
         helper = (PROJECT / "scripts" / "lib" / "sysupgrade_package_common.sh").read_text(
             encoding="utf-8"

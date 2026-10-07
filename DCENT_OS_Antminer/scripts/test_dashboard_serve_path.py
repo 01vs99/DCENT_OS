@@ -8,6 +8,7 @@ import hashlib
 import http.client
 import importlib.util
 import os
+import ssl
 import sys
 import tempfile
 import threading
@@ -48,6 +49,16 @@ def write_dashboard(root: Path, html: bytes, with_sidecars: bool = True) -> Path
 
 
 class ServerHarness:
+    """Serve the overlay handler over real TLS, exactly as production serves it.
+
+    Since commit 94b997a41 ("persistent device TLS and secure sessions"),
+    parse_request() answers every plain-HTTP non-/api/ request with a 308
+    HTTPS redirect. The gzip/ETag/banner-injection behavior under test is
+    therefore only reachable over TLS, so the harness speaks TLS too (same
+    pattern as scripts/test_dashboard_tls.py: real generated certificate,
+    inert persistent-storage verifier).
+    """
+
     def __init__(self, module, index: Path, static_dir: Optional[Path] = None):
         self.module = module
         self.index = index
@@ -61,9 +72,14 @@ class ServerHarness:
         self.module.DASHBOARD_INDEX = self.index
         if self.static_dir is not None:
             self.module.STATIC_DIR = self.static_dir
-        self.httpd = self.module.ThreadedHTTPServer(
+        context, _info = self.module.load_device_tls(
+            self.index.parent / "tls",
+            verify_storage=lambda _path: "inert-owner",
+        )
+        self.httpd = self.module.create_tls_server(
             ("127.0.0.1", 0),
-            self.module.DCENTosHandler,
+            context,
+            {"enabled": True},
         )
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
@@ -83,7 +99,11 @@ class ServerHarness:
         return self.httpd.server_address[1]
 
     def get(self, headers: Optional[Dict[str, str]] = None, path: str = "/"):
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        client_context.check_hostname = False
+        client_context.verify_mode = ssl.CERT_NONE
+        conn = http.client.HTTPSConnection(
+            "127.0.0.1", self.port, context=client_context, timeout=5)
         try:
             conn.request("GET", path, headers=headers or {})
             response = conn.getresponse()

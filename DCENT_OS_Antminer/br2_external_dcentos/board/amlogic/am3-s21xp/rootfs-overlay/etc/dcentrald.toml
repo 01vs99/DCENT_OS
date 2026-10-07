@@ -1,14 +1,9 @@
-# DCENT_OS dcentrald config for Antminer S21 XP (Amlogic A113D)
-# Package-only management identity. Exact production evidence refutes the
-# shared base-S21 ttyS4/NoPic route; model/HAL/install gates refuse execution.
-# Platform: Amlogic A113D (aarch64); production PIC/PSU protocols unresolved.
-#
-# TODO-confirm (live unit needed): S21 XP PSU class may differ from S21 Pro.
-# serial_chip_count below follows the exact held A3HB70501 geometry (91 chips
-# per hashboard), not the S21 Pro 65-chip hashboard layout. Confirm the complete
-# carrier/PSU tuple against a real S21 XP before any flash.
-#
-# This image is management-only; model/HAL gates refuse hardware construction.
+# DCENT_OS exact S21 XP Amlogic BM1370 hardware beta.
+# Held production model -> ASIC profile -> PsuAsVoltageController selects
+# the retained AML GPIO APW17/c1 owner; factory PIC presence does not imply
+# a PIC-managed AML software route. Exact board names A3HB70501/70502/70503, 91 chips/chain.
+# Physical slots 1/2/3 bind ttyS3/ttyS2/ttyS1 after fresh board/population checks.
+# Configure a pool and select Start Mining; the image boots idle.
 
 [general]
 hostname = "dcent-s21xp"
@@ -23,7 +18,7 @@ protocol = "sv1"
 [mining]
 enabled = false
 model = "s21xp"
-# Schema placeholders only; no S21 XP tuning authority is admitted.
+# Conservative startup; the native owner enforces the exact profile envelope.
 frequency_mhz = 480
 voltage_mv = 13400
 version_rolling = true
@@ -40,11 +35,6 @@ board_target = "am3-s21xp"
 mode = "bypass"
 target_watts = 3500
 
-[power.psu_override]
-enabled = false
-model = "APW12"
-voltage_v = 14.0
-
 [thermal]
 target_temp_c = 60
 hot_temp_c = 70
@@ -53,6 +43,9 @@ fan_min_pwm = 10
 fan_max_pwm = 30
 
 [api]
+# Read-only LAN monitoring; remote control requires a separate explicit opt-in.
+cgminer_bind_lan = true
+cgminer_lan_writes = false
 cgminer_port = 4028
 http_port = 8080
 websocket = true
@@ -60,16 +53,20 @@ auth_enabled = false
 auth_password = ""
 
 [donation]
+# DCENT_OS ships with ZERO mandatory fee. Optional transparent donation:
+# set enabled = true and percent 1-5 (time-sliced, always visible, one tap
+# off). Fund development: https://d-central.tech/fund/
 enabled = false
-percent = 2.0
+percent = 0.0
 pool_url = ""
 worker = ""
 password = "x"
 cycle_duration_s = 3600
 
 [watchdog]
-# No S21 XP hardware watchdog, PIC heartbeat, or rail-cut composition is admitted.
-enabled = false
+# Retained watchdog custody covers the native GPIO PSU owner and thermal bus.
+# Runtime admission still requires the exact platform power-cut path.
+enabled = true
 timeout_s = 30
 kick_interval_s = 5
 
@@ -80,7 +77,15 @@ enabled = false
 active = "standard"
 
 [autotuner]
-enabled = false
+# Autotune is ON by default (operator decision 2026-09-01). Safety contract:
+# the tuner REFUSES to tune blind - every frequency/voltage step validates
+# against the variant BoardDesc cut-ladder + published envelope BEFORE
+# execution; variants with unknown/missing envelope datums surface
+# NOT TUNABLE instead of tuning. First boot parks at the safe-stock
+# profile until health + fans + temp-in-envelope (+ ExperimentalOptIn
+# operator ack) pass. Voltage autotune on am2 stays behind the
+# DCENT_AM2_VOLTAGE_AUTOTUNE live-safety fence.
+enabled = true
 min_freq_mhz = 400
 max_freq_mhz = 585
 

@@ -77,8 +77,8 @@ rustflags = [
 #
 # We do NOT put a default in a `[env]` block here: cargo resolves the path
 # to an absolute form before handing it to cc-rs, and cc-rs on Windows can
-# mis-split when that absolute path contains spaces (common: "Claude Code"
-# in this workspace). A cargo-resolved default therefore fails with "Access is
+# mis-split when that absolute path contains spaces (common in
+# Windows workspace paths). A cargo-resolved default therefore fails with "Access is
 # denied" on Windows devs, and the user sees a cryptic secp256k1 build error.
 #
 # Instead, the shipped build scripts export the env vars manually — see

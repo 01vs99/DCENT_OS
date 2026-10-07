@@ -20,6 +20,8 @@ serde.workspace = true
 proptest = { workspace = true }
 
 [features]
+# Hardware environment overrides; excluded from signed Beta/Stable builds.
+lab = ["dcentrald-common/lab", "dcentrald-hal?/lab"]
 # `hal` pulls in the Unix-only dcentrald-hal crate (mmap / ioctl / AsRawFd).
 # Default-ON, so every consumer (dcentrald, dcentrald-api, dcentrald-diagnostics —
 # none of which set default-features=false) is unchanged. Build/test with

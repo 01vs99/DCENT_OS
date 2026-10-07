@@ -5,17 +5,17 @@
 # removed only at the final real DCENT_OS persistent switch) => the proven
 # 2026-05-15 milestone path (Loki-IN + override skips the APW SMBus probe).
 # fan_max_pwm=30 / hash_on_disconnect=false / autotuner=false preserved
-# verbatim (asserted). Stage to /tmp on .109 ONLY on explicit operator go
+# verbatim (asserted). Stage to /tmp on a lab unit ONLY on explicit operator go
 # AFTER an AC-cycle. NOT a NAND/persistent artifact.
 # DCENT_OS dcentrald config — S19j Pro "XIL" unit (zynq-bm3-am2, BM1362, Loki Mod)
 #
-# Target unit: 203.0.113.109  ("XIL" — Xilinx/Zynq am2 control board)
+# Target unit: 192.0.2.20  ("XIL" — Xilinx/Zynq am2 control board)
 #   - Home unit with the "Loki Mod": runs an APW3 PSU tweaked to ~12.8 V
 #     output instead of the stock APW12. BraiinsOS refuses to start without a
 #     valid APW12 I²C handshake, so the unit currently uses a "Loki board" that
 #     spoofs APW12 telemetry. DCENT_OS does NOT need the Loki board — it has a
 #     native PSU-override path (see [power.psu_override] below).
-#   - Same control-board *class* as 203.0.113.139 (am2 Zynq, BM1362). The
+#   - Same control-board *class* as 192.0.2.10 (am2 Zynq, BM1362). The
 #     "Loki Mod" is a POWER configuration, not a separate control-board variant
 #     — routing is still `zynq-bm3-am2` + `model = "s19jpro"`.
 #   - Currently on BraiinsOS — this config is for the overlay-deploy bring-up
@@ -24,7 +24,7 @@
 # Bring-up plan (operator decision 2026-05-12):
 #   1. FIRST RUNS: Loki board STAYS in place. [power.psu_override] is DISABLED
 #      below — the rail is already up via the Loki+APW3 under BraiinsOS, and the
-#      [psu] block keeps matching the .139 APW121215a smart path (the Loki board
+#      [psu] block keeps matching the lab-unit APW121215a smart path (the Loki board
 #      presents the smart interface, so Phase 0's APW probe is best-effort/
 #      non-fatal either way). Goal of these runs: validate the chain-UART-RX fix
 #      (DevmemUart MCR=0x03 + FCR=0x07 — R4/W13 root cause) live on a Zynq am2
@@ -35,13 +35,13 @@
 #      probe / watchdog / set-voltage, still asserts PWR_CONTROL, records the
 #      rail voltage and APW3 efficiency 0.85), then re-run and confirm the
 #      "PSU OVERRIDE (Loki bypass)" branch + PWR_CONTROL asserted + still mining.
-# +
-#      .
+#      See psu override honored by am2 hybrid path rule +
+#      loki mod is a psu config not a variant rule.
 #
 # S19j Pro am2 hardware facts (mirror of dcentrald_s19jpro_am2.toml — the XIL
 # unit is the same control-board class):
 #   - zynq-bm3-am2 platform, BM1362 chip, dsPIC at I2C 0x21 (per-chain voltage
-#     controller — present on the Loki-modded hashboard exactly as on .139;
+#     controller — present on the Loki-modded hashboard exactly as on a lab unit;
 #     only the PSU upstream differs)
 #   - Live preflight on 2026-05-14 shows two populated boards. Braiins opens
 #     `/dev/ttyS1` for board #1 and `/dev/ttyS3` for board #3. First DCENT
@@ -53,21 +53,21 @@
 # `mining.voltage_mv` is the per-CHAIN target the hashboard dsPIC regulates to
 # (~13.7 V) — NOT the PSU rail. With the Loki Mod the APW3 delivers ~12.8 V
 # upstream and the dsPIC step-up/regulator brings the chain to 13.7 V (same as
-# .139 from a 15.2 V APW12). `[power.psu_override].voltage_v` (when enabled) is
+# lab-unit from a 15.2 V APW12). `[power.psu_override].voltage_v` (when enabled) is
 # the PSU OUTPUT rail (~12.8 V) — it is deliberately NOT used as the chip rail.
 #
 # NEVER-VIOLATE rules (enforced by the daemon regardless of config):
-#   - MiscCtrl triple-write with 5 ms spacing
-#   - Deferred voltage gate on 5 stable heartbeat ticks
-#   - Board-temp I2C NACK → XADC die-temp fallback
-#   - PIC RESET NEVER sent on S19j Pro
-#   - AXI IIC unbind/SOFTR NEVER on am2
-#   - PSU I2C GPIO bit-bang PROBE disabled on am2;
+#   - MiscCtrl triple-write with 5 ms spacing (miscctrl never fire and forget rule)
+#   - Deferred voltage gate on 5 stable heartbeat ticks (deferred voltage stability gate rule)
+#   - Board-temp I2C NACK → XADC die-temp fallback (board temp i2c rules rule)
+#   - PIC RESET NEVER sent on S19j Pro (pic no reset s19j rule)
+#   - AXI IIC unbind/SOFTR NEVER on am2 (i2c recovery s19 danger rule)
+#   - PSU I2C GPIO bit-bang PROBE disabled on am2 (psu probe disabled rule);
 #     framed heartbeat/watchdog writes on bus 0 @ 0x10 remain legal.
-#   - Fan ceiling PWM 30 for home mining ( / )
+#   - Fan ceiling PWM 30 for home mining (fan max 30pwm rule / fan never blast rule)
 #
-# Deploy (overlay bring-up —):
-#   dcent install 203.0.113.109 --target braiinsos-am2-s19jpro-zynq-runtime \
+# Deploy (overlay bring-up — see internal engineering notes):
+#   dcent install 192.0.2.20 --target braiinsos-am2-s19jpro-zynq-runtime \
 #       --runtime-only --runtime-binary DCENT_OS_Antminer/dcentrald/target/armv7-unknown-linux-musleabihf/release/dcentrald \
 #       --runtime-config DCENT_OS_Antminer/dcentrald/configs/dcentrald_s19jpro_xil.toml --yes
 #   # The toolbox route must stage/run the XIL quiet helpers, then launch:
@@ -81,7 +81,7 @@ hostname = "dcentos-s19jpro-xil"
 log_level = "info"
 
 [pool]
-# Home bring-up pool. BB `a lab unit` proved Public Pool with suggested difficulty
+# Home bring-up pool. lab-unit proved Public Pool with suggested difficulty
 # 256 gives fast accepted-share feedback during short quiet proof windows.
 # `worker` must still be a valid BTC address plus worker suffix.
 url = "stratum+tcp://public-pool.io:21496"
@@ -111,7 +111,7 @@ voltage_mv = 13700
 suggest_difficulty = 256
 
 # Cold-boot init path (NOT passthrough — passthrough on am2 post-bosminer
-# produces zero RX; proven on .139 Phase 13/14). dcentrald runs the full
+# produces zero RX; proven on a lab unit Phase 13/14). dcentrald runs the full
 # BM1362 init over /dev/ttyS1 then dispatches via the FPGA WORK_TX FIFO at
 # 0x43C03000 (chain1). CMD FIFO is DEAD on am2.
 passthrough = false
@@ -150,7 +150,7 @@ circuit_amperage_a = 20
 # --- PSU OVERRIDE ("Loki bypass") -------------------------------------------
 # DISABLED for the first bring-up runs (Loki board still in place; the rail is
 # already up via Loki+APW3 under BraiinsOS, and the [psu] block below keeps
-# matching the .139 smart path which the Loki board satisfies).
+# matching the lab-unit smart path which the Loki board satisfies).
 #
 # AFTER first-hash is confirmed and the Loki board is physically removed, set:
 #     [power.psu_override]
@@ -161,14 +161,14 @@ circuit_amperage_a = 20
 # / set-DAC / arm sequence and the 1 Hz PSU heartbeat thread, still asserts
 # PWR_CONTROL (the APW3 output enable is wired through it on a Loki-modded
 # chassis), records the declared rail voltage, and proceeds to the dsPIC + BM1362
-# init unchanged..
+# init unchanged. See psu override honored by am2 hybrid path rule.
 [power.psu_override]
 enabled = true
 model = "APW3"
 voltage_v = 12.8
 
 [psu]
-# APW121215a rail params — kept matching .139 for the Loki-board-present bring-up
+# APW121215a rail params — kept matching lab-unit for the Loki-board-present bring-up
 # runs. When [power.psu_override] is enabled (Loki board removed), this whole
 # block is bypassed (no APW121215a opened).
 voltage_mv = 15200
@@ -188,7 +188,7 @@ hot_temp_c = 70
 dangerous_temp_c = 80
 
 # Home-mining fan ceiling — NEVER raise above 30 without an explicit user mode
-# override ( / ). The hybrid
+# override (fan max 30pwm rule / fan never blast rule). The hybrid
 # path honours this cap during cold boot too: no transient fan burst.
 fan_min_pwm = 10
 fan_max_pwm = 30
@@ -210,7 +210,7 @@ cgminer_bind_lan = false
 metrics_require_auth = true
 
 [donation]
-# Bring-up: off. Re-enable (2% default) for production deploys.
+# 0% default posture: donation is opt-in everywhere (enabled=true, percent 1-5).
 enabled = false
 
 [watchdog]

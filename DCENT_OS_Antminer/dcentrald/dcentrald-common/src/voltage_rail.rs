@@ -29,6 +29,171 @@
 //! Do not add a fourth parallel voltage protocol without implementing (or
 //! planning) this trait.
 
+/// Exact T21 APW11A identification profile from the stock Zynq topology.
+/// These are identity keys, not DAC coefficients, PMBus commands or AML wiring.
+pub const T21_APW11A_VERSION_KEYS: &[u8] = &[66, 67, 106, 113, 114, 115, 117, 118, 119, 120, 193];
+
+/// PSU identity supplied by a bench observation. Discovery never probes a bus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BenchPsuIdentity<'a> {
+    pub family: &'a str,
+    pub address_7bit: u8,
+    pub version: u8,
+}
+
+/// Validate the T21 stock-declared APW11A tuple. In particular, APW11 and
+/// APW11A1216-1a are different profiles; matching a version alone is insufficient.
+pub fn validate_t21_apw11a(identity: BenchPsuIdentity<'_>) -> Result<(), VoltageRailError> {
+    let declaration = crate::t21_bm1368_profile::T21_PSU_ZYNQ_VARIANT_DECLARATION;
+    if identity.family != declaration.family
+        || identity.address_7bit != declaration.i2c_addr_7bit
+        || !T21_APW11A_VERSION_KEYS.contains(&identity.version)
+    {
+        return Err(VoltageRailError::Refused {
+            reason: VoltageRefuseReason::BindingMismatch,
+            detail: "T21 PSU identity does not match stock APW11A at 0x10 and its version list"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
+/// A discover-only row. Geometry reuses the exact existing board profiles.
+/// This row supplies neither a hardware owner nor a voltage-control protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct S21BenchProfile {
+    board_target: &'static str,
+    asic: crate::board_desc::AsicProtocolIdentity,
+    chips_per_chain: u16,
+    board_names: &'static [&'static str],
+}
+
+impl S21BenchProfile {
+    pub fn for_board_target(target: &str) -> Result<Self, VoltageRailError> {
+        use crate::bm1370_board_profiles::Bm1370BoardProfile;
+        use crate::board_desc::AsicProtocolIdentity;
+        use crate::t21_bm1368_profile::T21;
+        let profile = match target {
+            "am3-t21" => Self {
+                board_target: T21.board_target,
+                asic: AsicProtocolIdentity::Bm1368,
+                chips_per_chain: T21.chips_per_chain,
+                board_names: T21.board_names,
+            },
+            "am3-s21" => Self {
+                board_target: "am3-s21",
+                asic: AsicProtocolIdentity::Bm1368,
+                chips_per_chain: 108,
+                board_names: &["BHB68603", "BHB68606"],
+            },
+            other => {
+                let p = Bm1370BoardProfile::for_board_target(other).ok_or_else(|| {
+                    VoltageRailError::InvalidParameter {
+                        detail: format!("unknown S21 bench board target {other:?}"),
+                    }
+                })?;
+                Self {
+                    board_target: p.board_target,
+                    asic: AsicProtocolIdentity::Bm1370,
+                    chips_per_chain: p.chips_per_chain,
+                    board_names: p.board_names,
+                }
+            }
+        };
+        Ok(profile)
+    }
+
+    pub const fn board_target(self) -> &'static str {
+        self.board_target
+    }
+    pub const fn asic(self) -> crate::board_desc::AsicProtocolIdentity {
+        self.asic
+    }
+    pub const fn chips_per_chain(self) -> u16 {
+        self.chips_per_chain
+    }
+
+    /// A successful population check is useful for simulation and bench review,
+    /// but never substitutes for format-specific EEPROM decoding on hardware.
+    pub fn validate_population(self, boards: &[(&str, u16)]) -> Result<(), VoltageRailError> {
+        if boards.len() != 3
+            || boards.iter().any(|(name, count)| {
+                !self.board_names.contains(name) || *count == 0 || *count != self.chips_per_chain
+            })
+        {
+            return Err(VoltageRailError::Refused {
+                reason: VoltageRefuseReason::BindingMismatch,
+                detail: format!(
+                    "{} requires three exact board identities with {} chips each",
+                    self.board_target, self.chips_per_chain
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Render the existing per-target polarity policy; never duplicate levels
+    /// or derive them from a sibling. Missing entries also stay undriven.
+    pub fn polarity_card(self) -> String {
+        use crate::amlogic_gpio437::{resolve_boot_policy, BootGpio437Policy};
+        let policy = match resolve_boot_policy(self.board_target) {
+            Ok(BootGpio437Policy::QualifiedOff(recipe)) => format!(
+                "GPIO437 raw ON={} OFF={} (software-qualified; electrical check pending)",
+                recipe.on_raw(),
+                recipe.off_raw()
+            ),
+            Ok(BootGpio437Policy::Undriven) | Err(_) => {
+                "GPIO437 undriven; no qualified ON/OFF levels".into()
+            }
+        };
+        format!(
+            "{}: {policy}; discover-only performs no GPIO, PSU or fan writes",
+            self.board_target
+        )
+    }
+}
+
+/// Result of passive PSU discovery, deliberately not a VoltageRail or an
+/// electrical admission token. All observations remain caller-supplied data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S21PsuDiscovery {
+    pub profile: S21BenchProfile,
+    pub observed_psu: Option<(String, u8, u8)>,
+    pub polarity_card: String,
+    pub voltage_ceiling: &'static str,
+}
+
+pub const S21_VOLTAGE_CEILING: &str = "External DAC set_mv/enable unavailable; no APW11A voltage law or AML binding; discovery does not energize or claim SafeOff";
+
+/// Offline bench mode: validate supplied identities and population, and return
+/// a polarity card. No bus scan, fallback probe, GPIO export or rail operation.
+/// T21 APW11A recognition preserves the stock Zynq declaration's scope; it
+/// does not translate GPIO907 to AML GPIO437 or select a live AML PSU adapter.
+pub fn discover_s21_psu(
+    target: &str,
+    boards: &[(&str, u16)],
+    psu: Option<BenchPsuIdentity<'_>>,
+) -> Result<S21PsuDiscovery, VoltageRailError> {
+    let profile = S21BenchProfile::for_board_target(target)?;
+    profile.validate_population(boards)?;
+    if let Some(identity) = psu {
+        if identity.family.is_empty() || identity.address_7bit > 0x7f {
+            return Err(VoltageRailError::InvalidParameter {
+                detail: "invalid observed PSU identity".into(),
+            });
+        }
+        if target == "am3-t21" {
+            validate_t21_apw11a(identity)?;
+        }
+    }
+    Ok(S21PsuDiscovery {
+        profile,
+        observed_psu: psu.map(|p| (p.family.to_owned(), p.address_7bit, p.version)),
+        polarity_card: profile.polarity_card(),
+        voltage_ceiling: S21_VOLTAGE_CEILING,
+    })
+}
+
 /// Class of refuse conditions that must fail closed on production paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoltageRefuseReason {
@@ -127,7 +292,7 @@ pub fn refuse_wrong_mode(detail: impl Into<String>) -> VoltageRailError {
     }
 }
 
-/// True when the error is a hard refuse (operator/lab override required).
+/// True when the error is an explicit refusal; it must not be retried as success.
 pub fn is_hard_refuse(err: &VoltageRailError) -> bool {
     matches!(err, VoltageRailError::Refused { .. })
 }
@@ -226,6 +391,11 @@ pub enum VoltageRailAdapterKind {
     /// Exact BM1396 framed I2C 0x11 ABI. Pure codec evidence exists, but no
     /// live rail adapter is admitted yet.
     Bm1396I2c11EvidenceOnly,
+    /// Only ClassicAmlPowerOwner holds this PIC/APW12 composition. Legacy
+    /// generic adapters must refuse every op, including heartbeat and cut.
+    ClassicAmlRetainedOwner,
+    /// Only the native BM1391 PIC/APW8 owner may operate this rail.
+    Bm1391RetainedOwner,
     /// PIC1704 family (protocol-sealed boards).
     Pic1704,
     /// NoPic external DAC / PMIC (e.g. TAS5782M on S21-class).
@@ -239,7 +409,10 @@ impl VoltageRailAdapterKind {
     pub const fn admits_mutation(self) -> bool {
         !matches!(
             self,
-            Self::Bm1396I2c11EvidenceOnly | Self::RuntimeDiscovered
+            Self::Bm1396I2c11EvidenceOnly
+                | Self::ClassicAmlRetainedOwner
+                | Self::Bm1391RetainedOwner
+                | Self::RuntimeDiscovered
         )
     }
 
@@ -249,6 +422,8 @@ impl VoltageRailAdapterKind {
             Self::Pic16ChipDriver => VoltageOwnership::ChipDriverPic,
             Self::DsPic33Ep | Self::Pic1704 => VoltageOwnership::HashboardDspic,
             Self::Bm1396I2c11EvidenceOnly => VoltageOwnership::HashboardFramedEndpointEvidenceOnly,
+            Self::ClassicAmlRetainedOwner => VoltageOwnership::RuntimeDiscovered,
+            Self::Bm1391RetainedOwner => VoltageOwnership::RuntimeDiscovered,
             Self::ExternalDacNoPic => VoltageOwnership::ExternalDacNoPic,
             Self::RuntimeDiscovered => VoltageOwnership::RuntimeDiscovered,
         }
@@ -269,6 +444,10 @@ pub fn voltage_rail_adapter_for_controller(
         VoltageControllerClass::Bm1396FramedI2c11 => {
             VoltageRailAdapterKind::Bm1396I2c11EvidenceOnly
         }
+        VoltageControllerClass::ClassicAmlApplication89 => {
+            VoltageRailAdapterKind::ClassicAmlRetainedOwner
+        }
+        VoltageControllerClass::Bm1391Application => VoltageRailAdapterKind::Bm1391RetainedOwner,
         VoltageControllerClass::Pic1704 => VoltageRailAdapterKind::Pic1704,
         VoltageControllerClass::NoPic => VoltageRailAdapterKind::ExternalDacNoPic,
         VoltageControllerClass::RuntimeDiscovered => VoltageRailAdapterKind::RuntimeDiscovered,
@@ -299,7 +478,7 @@ pub fn resolve_voltage_rail_adapter(
     }
 }
 
-/// Fail-closed: may this resolved adapter mutate voltage without lab override?
+/// Fail-closed: may this resolved adapter attempt voltage mutation?
 pub fn admit_voltage_rail_mutation(
     adapter: VoltageRailAdapterKind,
 ) -> Result<(), VoltageRailError> {
@@ -339,10 +518,10 @@ impl VoltageRailOp {
     }
 }
 
-/// Proven dsPIC app-mode firmware bytes that may energize without lab override.
+/// Proven dsPIC app-mode firmware bytes that may energize.
 ///
 /// Mirrors `dcentrald-asic::dspic::dspic_voltage_command_allowed` for the
-/// host-safe adapter layer (fw=0x86 still needs `trust_degraded`).
+/// host-safe adapter layer (fw=0x86 is always refused).
 pub const DSPIC_PROVEN_APP_FW: &[u8] = &[0x82, 0x89, 0x8A, 0xB9, 0xFE];
 
 /// Degraded post-RESET corruption identity (load-bearing refuse by default).
@@ -351,22 +530,20 @@ pub const DSPIC_DEGRADED_FW: u8 = 0x86;
 /// Pure dsPIC firmware admission for VoltageRail energizing ops.
 ///
 /// - `None` / unknown: refuse (no proven wire protocol)
-/// - `Some(0x86)`: only when `trust_degraded`
+/// - `Some(0x86)`: always refused, including legacy override requests
 /// - proven app bytes: allow
 /// - other observed bytes: refuse
 pub fn admit_dspic_firmware_for_energize(
     firmware: Option<u8>,
-    trust_degraded: bool,
+    _trust_degraded: bool,
 ) -> Result<(), VoltageRailError> {
     match firmware {
         None => Err(refuse_wrong_mode(
             "dsPIC VoltageRail energize refused: firmware identity unknown \
              (observe GET_VERSION before set_mv/enable)",
         )),
-        Some(DSPIC_DEGRADED_FW) if trust_degraded => Ok(()),
         Some(DSPIC_DEGRADED_FW) => Err(refuse_degraded_firmware(
-            "dsPIC VoltageRail energize refused for fw=0x86 by default \
-             (set trust_degraded / DCENT_AM2_TRUST_DEGRADED_FW=1 only in lab)",
+            "dsPIC VoltageRail energize refused for fw=0x86; no override permitted",
         )),
         Some(fw) if DSPIC_PROVEN_APP_FW.contains(&fw) => Ok(()),
         Some(fw) => Err(unsupported_voltage_path(format!(
@@ -390,6 +567,15 @@ pub fn admit_voltage_rail_op(
     trust_degraded: bool,
     op: VoltageRailOp,
 ) -> Result<(), VoltageRailError> {
+    if matches!(
+        adapter,
+        VoltageRailAdapterKind::ClassicAmlRetainedOwner
+            | VoltageRailAdapterKind::Bm1391RetainedOwner
+    ) {
+        return Err(unsupported_voltage_path(
+            "native application rail I/O requires its retained current-boot PIC/PSU owner",
+        ));
+    }
     if matches!(adapter, VoltageRailAdapterKind::RuntimeDiscovered) {
         return Err(unsupported_voltage_path(format!(
             "VoltageRail {op:?} refused: adapter=RuntimeDiscovered \
@@ -714,7 +900,7 @@ pub struct BackendVoltageRail<B> {
     pub kind: VoltageRailAdapterKind,
     /// Observed controller firmware byte when known (dsPIC GET_VERSION).
     pub firmware: Option<u8>,
-    /// Lab override for fw=0x86 (must never be default-true in production).
+    /// Legacy compatibility flag; cannot override the fw=0x86 refusal.
     pub trust_degraded: bool,
     /// Inner rail / controller façade.
     pub backend: B,
@@ -857,8 +1043,118 @@ pub fn walk_down_and_safe_off_voltage_rail<R: VoltageRail + ?Sized>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn t21_apw11a_profile_accepts_all_stock_versions_only() {
+        for version in 0..=u8::MAX {
+            let identity = super::BenchPsuIdentity {
+                family: "APW11A",
+                address_7bit: 0x10,
+                version,
+            };
+            assert_eq!(
+                super::validate_t21_apw11a(identity).is_ok(),
+                [66, 67, 106, 113, 114, 115, 117, 118, 119, 120, 193].contains(&version)
+            );
+        }
+        for (family, address_7bit) in [
+            ("APW11", 0x10),
+            ("APW12", 0x10),
+            ("APW11A1216-1a", 0x10),
+            ("APW11A", 0x50),
+        ] {
+            assert!(super::validate_t21_apw11a(super::BenchPsuIdentity {
+                family,
+                address_7bit,
+                version: 66
+            })
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn s21_bench_exact_geometry_and_polarity_cards() {
+        use super::S21BenchProfile;
+        for (target, count) in [
+            ("am3-s21", 108),
+            ("am3-t21", 108),
+            ("amlogic-s21plus", 55),
+            ("am3-s21pro", 65),
+            ("am3-s21xp", 91),
+        ] {
+            let p = S21BenchProfile::for_board_target(target).unwrap();
+            assert_eq!(p.board_target(), target);
+            assert_eq!(p.chips_per_chain(), count);
+            let card = p.polarity_card();
+            assert!(card.starts_with(target));
+            if target == "am3-t21" || target == "amlogic-s21plus" {
+                assert!(card.contains("undriven"));
+                assert!(!card.contains("ON=0"));
+                assert!(!card.contains("ON=1"));
+            } else {
+                assert!(card.contains("ON=0 OFF=1"));
+            }
+        }
+        for target in ["S21", "am3-s21plus", "am3-t21 ", "am3-s19xp"] {
+            assert!(S21BenchProfile::for_board_target(target).is_err());
+        }
+    }
+
+    #[test]
+    fn s21_bench_refuses_wrong_identity_zero_and_sibling_populations() {
+        use super::discover_s21_psu;
+        for (target, name, count, wrong_name) in [
+            ("am3-t21", "BHB68701", 108, "BHB68603"),
+            ("amlogic-s21plus", "A3HB70701", 55, "A3HB70601"),
+        ] {
+            assert!(discover_s21_psu(target, &[(name, count); 3], None).is_ok());
+            for bad in [0, count - 1, count + 1, 65, 91] {
+                assert!(discover_s21_psu(target, &[(name, bad); 3], None).is_err());
+            }
+            assert!(discover_s21_psu(target, &[(wrong_name, count); 3], None).is_err());
+            assert!(discover_s21_psu(target, &[(name, count); 2], None).is_err());
+            assert!(discover_s21_psu(target, &[], None).is_err());
+            assert!(discover_s21_psu(
+                target,
+                &[(name, count), (name, count), (wrong_name, count)],
+                None
+            )
+            .is_err());
+        }
+        for (family, address_7bit) in [("", 0x10), ("unknown", 0x80)] {
+            assert!(discover_s21_psu(
+                "amlogic-s21plus",
+                &[("A3HB70701", 55); 3],
+                Some(super::BenchPsuIdentity {
+                    family,
+                    address_7bit,
+                    version: 0,
+                })
+            )
+            .is_err());
+        }
+    }
     use super::*;
     use crate::board_desc::AsicProtocolIdentity;
+
+    #[test]
+    fn retained_native_application_classes_never_fall_back_to_legacy_pic_adapters() {
+        for class in [
+            crate::board_desc::VoltageControllerClass::ClassicAmlApplication89,
+            crate::board_desc::VoltageControllerClass::Bm1391Application,
+        ] {
+            let adapter = resolve_voltage_rail_adapter(class, AsicProtocolIdentity::Bm1362);
+            assert!(!adapter.admits_mutation());
+            for operation in [
+                VoltageRailOp::SetMv,
+                VoltageRailOp::Enable,
+                VoltageRailOp::Disable,
+                VoltageRailOp::Heartbeat,
+                VoltageRailOp::Measure,
+            ] {
+                assert!(admit_voltage_rail_op(adapter, Some(0x89), true, operation).is_err());
+            }
+        }
+    }
 
     struct RefuseAll;
 
@@ -1323,9 +1619,9 @@ mod tests {
     }
 
     #[test]
-    fn dspic_fw86_energize_refused_unless_trust_degraded() {
+    fn dspic_fw86_energize_refused_even_with_trust_degraded() {
         assert!(admit_dspic_firmware_for_energize(Some(0x86), false).is_err());
-        assert!(admit_dspic_firmware_for_energize(Some(0x86), true).is_ok());
+        assert!(admit_dspic_firmware_for_energize(Some(0x86), true).is_err());
         assert!(admit_dspic_firmware_for_energize(Some(0x89), false).is_ok());
         assert!(admit_dspic_firmware_for_energize(Some(0x82), false).is_ok());
         assert!(admit_dspic_firmware_for_energize(None, false).is_err());
@@ -1359,17 +1655,17 @@ mod tests {
     }
 
     #[test]
-    fn backend_rail_dspic_trust_degraded_allows_energize() {
+    fn backend_rail_dspic_trust_degraded_cannot_energize() {
         let mut rail = BackendVoltageRail::new(
             VoltageRailAdapterKind::DsPic33Ep,
             Some(0x86),
             true,
             RecordingVoltageRail::default(),
         );
-        rail.set_mv(13_700).unwrap();
-        rail.enable().unwrap();
-        assert_eq!(rail.backend.commands, ["set_mv", "enable"]);
-        assert_eq!(rail.backend.last_mv, Some(13_700));
+        assert!(rail.set_mv(13_700).is_err());
+        assert!(rail.enable().is_err());
+        assert!(rail.backend.commands.is_empty());
+        assert_eq!(rail.backend.last_mv, None);
     }
 
     #[test]

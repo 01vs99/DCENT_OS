@@ -19,14 +19,10 @@
 //! live `a lab unit` capture did not cross hot/panic thresholds. Wave E parameterizes
 //! the unknowns as TOML knobs rather than hardcoding them.
 //!
-//! # Opt-in safety
+//! # Default protection
 //!
-//! This module is COMPILED but NOT INSTANTIATED into the running daemon by
-//! default. The integration site in the controller will be gated on
-//! `[thermal.supervisor].enabled = true` in `dcentrald.toml`; with that flag
-//! false (default), the existing controller stays master and supervisor
-//! actions are not emitted. Wave G/H is the integration wave; this wave
-//! ships defensive code that's safety-reviewable in isolation.
+//! Supervision is enabled by default. Existing bounded actuation and sensor
+//! evidence checks remain in force; this setting grants no hardware ownership.
 //!
 //! # Load-bearing rules
 //!
@@ -279,10 +275,8 @@ pub fn filter_actions_for_declared_medium(
 /// surfaces per RE-005 §"Config Fields".
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThermalSupervisorConfig {
-    /// **Default false.** Live-HW gated to `true` only after Wave G/H
-    /// operator authorization. With this flag false the supervisor is
-    /// dormant and `tick()` returns `NoOp` immediately.
-    #[serde(default)]
+    /// Enabled by default; explicit configuration can disable this observer.
+    #[serde(default = "default_supervisor_enabled")]
     pub enabled: bool,
 
     /// Board PCB target temperature (°C). RE-005 default 55.0.
@@ -412,10 +406,12 @@ pub struct ThermalSupervisorConfig {
     pub overtemp_auto_recovery: bool,
 }
 
+fn default_supervisor_enabled() -> bool { true }
+
 impl Default for ThermalSupervisorConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_supervisor_enabled(),
             board_target_c: default_board_target(),
             board_hot_c: default_board_hot(),
             board_panic_c: default_board_panic(),
@@ -531,6 +527,11 @@ fn default_overtemp_recovery() -> bool {
 pub enum SupervisorPlatform {
     /// am1 — S9 (BM1387).
     Am1S9,
+    /// C43 BM1393 has its own compulsory native cooling custodian.
+    Am1C43,
+    Am1Bm1391,
+    /// Exact T17e mandatory native thermal owner.
+    Am2Bm1396,
     /// am2 — Zynq S17/S19/S19j Pro (BM1398/BM1362), incl. the `a lab unit`/`a lab unit`
     /// home units. Quiet-home cap is mandatory here.
     Am2Zynq,
@@ -548,6 +549,9 @@ impl From<dcentrald_common::board_desc::SupervisorClass> for SupervisorPlatform 
 
         match class {
             SupervisorClass::Am1S9 => Self::Am1S9,
+            SupervisorClass::Am1C43 => Self::Am1C43,
+            SupervisorClass::Am1Bm1391 => Self::Am1Bm1391,
+            SupervisorClass::Am2Bm1396 => Self::Am2Bm1396,
             SupervisorClass::Am2Zynq => Self::Am2Zynq,
             SupervisorClass::Am3Aml => Self::Am3Aml,
             SupervisorClass::Am3Bb => Self::Am3Bb,
@@ -568,41 +572,10 @@ impl SupervisorPlatform {
     }
 }
 
-/// Decide whether the [`ThermalSupervisor`] should be ON by default for a
-/// platform.
-///
-/// **LIVE-HARDWARE-DEFAULT contract (do NOT regress):** the supervisor is a
-/// fail-closed safety layer (it can only make the thermal response MORE
-/// conservative), so per-platform default-on is desirable — but ONLY after a
-/// platform has live thermal validation. Until an operator opts a platform in
-/// via `platform_validated` (e.g. the per-platform env gate
-/// `DCENT_THERMAL_SUPERVISOR_DEFAULT_ON=1`), this returns `false` for EVERY
-/// platform, so the compiled default stays OFF and no platform is silently
-/// flipped to default-on. An explicit `[thermal.supervisor].enabled = true`
-/// in config always wins regardless of this helper.
-///
-/// `platform_validated` is the per-platform live-validation flag the caller
-/// resolves (config and/or env). When it is `false` this function is a no-op
-/// (`false`). When it is `true`, only platforms whose live validation has been
-/// signed off return `true` here; un-validated platforms still return `false`.
-pub fn supervisor_default_enabled(platform: SupervisorPlatform, platform_validated: bool) -> bool {
-    if !platform_validated {
-        // No platform is default-on without the explicit per-platform flag.
-        return false;
-    }
-    match platform {
-        // FLAGGED FOR OPERATOR LIVE VALIDATION: as each platform's supervisor
-        // FSM is validated on live hardware, flip its arm to `true`. Today
-        // NONE are signed off, so even with the flag set the helper stays
-        // conservative — the flag is the operator's explicit opt-in, but the
-        // per-platform sign-off below is what actually enables it. This keeps
-        // a half-configured unit from arming an unvalidated FSM.
-        SupervisorPlatform::Am1S9 => false,
-        SupervisorPlatform::Am2Zynq => false,
-        SupervisorPlatform::Am3Aml => false,
-        SupervisorPlatform::Am3Bb => false,
-        SupervisorPlatform::Unknown => false,
-    }
+/// Known executable platforms use the supervisor by default. Unknown targets
+/// cannot inherit a sibling's sensor topology or thermal policy.
+pub fn supervisor_default_enabled(platform: SupervisorPlatform) -> bool {
+    !matches!(platform, SupervisorPlatform::Unknown)
 }
 
 // ---------------------------------------------------------------------------
@@ -1386,8 +1359,18 @@ mod tests {
 
     // -- 1. Default-off contract --
     #[test]
-    fn supervisor_disabled_by_default_emits_no_actions() {
-        let mut s = ThermalSupervisor::new(ThermalSupervisorConfig::default());
+    fn t17e_supervisor_policy_requires_the_exact_registered_target() {
+        assert_eq!(SupervisorPlatform::from_board_target("am2-t17e"), SupervisorPlatform::Am2Bm1396);
+        assert!(supervisor_default_enabled(SupervisorPlatform::Am2Bm1396));
+        assert_eq!(SupervisorPlatform::from_board_target("am2-s17e"), SupervisorPlatform::Am2Bm1396);
+        for target in ["am2-s17e-extra", "am2-t17e-extra", "x17-t17e-pic16-planned"] {
+            assert_eq!(SupervisorPlatform::from_board_target(target), SupervisorPlatform::Unknown);
+        }
+    }
+
+    #[test]
+    fn explicitly_disabled_supervisor_emits_no_actions() {
+        let mut s = ThermalSupervisor::new(ThermalSupervisorConfig { enabled: false, ..ThermalSupervisorConfig::default() });
         assert!(!s.is_enabled());
         let sample = tick(
             vec![board(0, vec![100.0, 100.0], vec![100.0])],
@@ -2014,46 +1997,21 @@ mod tests {
         )));
     }
 
-    // -- THERMAL-8: per-platform default-enable is OFF without the flag --
     #[test]
-    fn supervisor_default_enabled_is_off_without_validation_flag() {
-        // Compiled default: NO platform is default-on unless the operator sets
-        // the per-platform live-validation flag. This is the LIVE-HARDWARE-DEFAULT
-        // guard — a missing/false flag MUST keep the supervisor dormant on every
-        // platform so we never silently arm an unvalidated FSM on live hardware.
-        for p in [
-            SupervisorPlatform::Am1S9,
-            SupervisorPlatform::Am2Zynq,
-            SupervisorPlatform::Am3Aml,
-            SupervisorPlatform::Am3Bb,
-            SupervisorPlatform::Unknown,
-        ] {
-            assert!(
-                !supervisor_default_enabled(p, false),
-                "{p:?} must NOT be default-on without the per-platform validation flag"
-            );
+    fn supervisor_defaults_on_for_known_platforms_and_off_for_unknown() {
+        assert!(ThermalSupervisorConfig::default().enabled);
+        let decoded = ThermalSupervisorConfig::deserialize(
+            serde::de::value::MapDeserializer::<_, serde::de::value::Error>::new(
+                std::iter::empty::<(&str, bool)>(),
+            ),
+        ).unwrap();
+        assert!(decoded.enabled);
+        for platform in [SupervisorPlatform::Am1S9, SupervisorPlatform::Am1C43,
+            SupervisorPlatform::Am1Bm1391, SupervisorPlatform::Am2Bm1396,
+            SupervisorPlatform::Am2Zynq, SupervisorPlatform::Am3Aml, SupervisorPlatform::Am3Bb] {
+            assert!(supervisor_default_enabled(platform));
         }
-    }
-
-    // -- THERMAL-8: even WITH the flag set, only signed-off platforms arm --
-    #[test]
-    fn supervisor_default_enabled_with_flag_only_signed_off_platforms() {
-        // Today NO platform arm is signed off (all `false` in the match), so even
-        // with the validation flag the helper stays conservative. This test pins
-        // that contract; when a platform is live-validated, flip its arm in
-        // `supervisor_default_enabled` AND update this assertion in the same change.
-        for p in [
-            SupervisorPlatform::Am1S9,
-            SupervisorPlatform::Am2Zynq,
-            SupervisorPlatform::Am3Aml,
-            SupervisorPlatform::Am3Bb,
-            SupervisorPlatform::Unknown,
-        ] {
-            assert!(
-                !supervisor_default_enabled(p, true),
-                "{p:?} arm is not signed off yet — must stay OFF until live-validated"
-            );
-        }
+        assert!(!supervisor_default_enabled(SupervisorPlatform::Unknown));
     }
 
     // -- THERMAL-8: board_target marker maps through the exact registry --
@@ -2089,13 +2047,13 @@ mod tests {
         use SupervisorPlatform::Unknown;
 
         for marker in [
-            "am1-s9se",
-            "am1-s9i",
-            "am1-s9j",
             "am1-s11",
-            "am1-s15",
-            "am1-t15",
             "am1-t9plus",
+            "am1-s9se-extra",
+            "am1-s9i-extra",
+            "am1-s9j-extra",
+            "am1-s15-extra",
+            "am1-t15-extra",
             "S9",
             "Antminer S9 SE",
             "zynq-bm3-am2",

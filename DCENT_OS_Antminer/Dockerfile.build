@@ -1,4 +1,6 @@
-FROM ubuntu:22.04
+# Ubuntu official multi-architecture OCI index, verified 2026-09-07.
+# Refresh deliberately; apt packages below remain distribution-managed updates.
+FROM ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -27,12 +29,17 @@ RUN apt-get update && apt-get install -y \
     bc \
     python3 \
     python3-pip \
+    python3-tomli \
+    python3-cryptography \
     file \
     libncurses-dev \
     libssl-dev \
     device-tree-compiler \
     u-boot-tools \
     squashfs-tools \
+    dosfstools \
+    mtools \
+    e2fsprogs \
     gzip \
     bzip2 \
     xz-utils \

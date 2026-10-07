@@ -12,6 +12,15 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
+# Real production identity and throwaway signing keys, shared by all posture
+# fixtures. The caller holds /tmp/dcent-heavy.lock for the small Rust compile.
+python3 "$SCRIPT_DIR/test_runtime_image_manifest.py" --fixture-dir "$TEST_ROOT/identity"
+BR2_EXTERNAL_DCENTOS_PATH="$SCRIPT_DIR/../br2_external_dcentos"
+DCENT_RELEASE_SIGNING_KEY="$TEST_ROOT/identity/test-key.pem"
+DCENT_RELEASE_PUBKEY_FILE="$TEST_ROOT/identity/test-pub.pem"
+DCENT_RELEASE_CHANNEL=beta
+export BR2_EXTERNAL_DCENTOS_PATH DCENT_RELEASE_SIGNING_KEY DCENT_RELEASE_PUBKEY_FILE DCENT_RELEASE_CHANNEL
+
 fail_test() {
     echo "release image provisioning test failed: $*" >&2
     exit 1
@@ -21,6 +30,11 @@ make_target() {
     _test_target="$1"
     _test_root_hash="$2"
     mkdir -p "${_test_target}/etc/dcentos"
+    mkdir -p "${_test_target}/usr/local/bin"
+    cp "$TEST_ROOT/identity/daemon" "${_test_target}/usr/local/bin/dcentrald"
+    printf 'am1-s9\n' > "${_test_target}/etc/dcentos/board_target"
+    printf '1.2.3\n' > "${_test_target}/etc/dcentos-version"
+    printf '[mining]\nenabled = false\n' > "${_test_target}/etc/dcentrald.toml"
     printf 'root:%s:20000:0:99999:7:::\n' "$_test_root_hash" > "${_test_target}/etc/shadow"
     printf 'daemon:*:20000:0:99999:7:::\n' >> "${_test_target}/etc/shadow"
     # Buildroot's post-build staging tree may still be 0644; its device table
@@ -35,6 +49,92 @@ provision_dev() {
 provision_release() {
     DCENT_RELEASE_IMAGE=1 dcent_provision_release_image "$1" test >/dev/null 2>&1
 }
+
+# WS-A4 (2026-09-01): the DEFAULT posture is RELEASE. These helpers run the
+# provisioner with the posture environment fully unset (subshell) and with the
+# canonical DCENT_DEV_IMAGE=1 opt-out so the flipped default is pinned
+# independently of any CI-exported variables.
+provision_default() {
+    (
+        unset DCENT_RELEASE_IMAGE DCENT_DEV_IMAGE
+        dcent_provision_release_image "$1" test
+    ) >/dev/null 2>&1
+}
+
+provision_dev_alias() {
+    (
+        unset DCENT_RELEASE_IMAGE
+        DCENT_DEV_IMAGE=1 dcent_provision_release_image "$1" test
+    ) >/dev/null 2>&1
+}
+
+provision_alias_precedence() {
+    (
+        DCENT_RELEASE_IMAGE=1 DCENT_DEV_IMAGE=1 dcent_provision_release_image "$1" test
+    ) >/dev/null 2>&1
+}
+
+# --- WS-A4: default posture resolution pins --------------------------------
+# (a) DEFAULT build (no posture env) => RELEASE posture: marker stamped on a
+#     locked root, refused on an unlocked root.
+TARGET="${TEST_ROOT}/default-release"
+make_target "$TARGET" '*'
+provision_default "$TARGET" || fail_test "default posture (no env) refused a locked release root"
+[ -f "${TARGET}/etc/dcentos/release-image" ] || fail_test "default posture did not stamp the release marker"
+python3 "$SCRIPT_DIR/runtime_image_manifest.py" verify --rootfs "$TARGET" --board-target am1-s9 --channel beta --version 1.2.3 >/dev/null || fail_test "provisioned runtime metadata did not verify"
+
+TARGET="${TEST_ROOT}/unsigned-release"
+make_target "$TARGET" '*'
+if (unset DCENT_RELEASE_SIGNING_KEY; provision_release "$TARGET"); then
+    fail_test "unsigned release preparation succeeded"
+fi
+[ ! -e "${TARGET}/etc/dcentos/release-image" ] || fail_test "unsigned release left posture marker"
+[ ! -e "${TARGET}/etc/dcentos/runtime-image.json" ] || fail_test "unsigned release left runtime metadata"
+
+TARGET="${TEST_ROOT}/default-unlocked-refused"
+make_target "$TARGET" dcentral
+if provision_default "$TARGET"; then
+    fail_test "default posture stamped a release marker on an unlocked (root:dcentral) shadow"
+fi
+[ ! -e "${TARGET}/etc/dcentos/release-image" ] || fail_test "default unlocked refusal left a marker"
+
+# (b) explicit DCENT_DEV_IMAGE=1 opt-out => DEV posture (marker removed,
+#     rescue SSH preserved) even though nothing else is set.
+TARGET="${TEST_ROOT}/dev-alias"
+make_target "$TARGET" dcentral
+printf 'stale\n' > "${TARGET}/etc/dcentos/release-image"
+printf 'lab-rescue\n' > "${TARGET}/etc/dcentos/rescue_ssh_enabled"
+printf 'stale\n' > "${TARGET}/etc/dcentos/runtime-image.json"
+printf 'stale\n' > "${TARGET}/etc/dcentos/runtime-image.sig"
+provision_dev_alias "$TARGET" || fail_test "DCENT_DEV_IMAGE=1 opt-out was rejected"
+[ ! -e "${TARGET}/etc/dcentos/release-image" ] || fail_test "DCENT_DEV_IMAGE=1 dev marker survived"
+[ ! -e "${TARGET}/etc/dcentos/runtime-image.json" ] || fail_test "dev image inherited signed runtime metadata"
+[ ! -e "${TARGET}/etc/dcentos/runtime-image.sig" ] || fail_test "dev image inherited runtime signature"
+[ -f "${TARGET}/etc/dcentos/rescue_ssh_enabled" ] || fail_test "DCENT_DEV_IMAGE=1 stripped the lab rescue SSH marker"
+
+# (c) an explicit DCENT_RELEASE_IMAGE=1 beats the DCENT_DEV_IMAGE alias
+#     (fail-safe: the stricter posture wins on conflict).
+TARGET="${TEST_ROOT}/alias-precedence"
+make_target "$TARGET" '*'
+if provision_alias_precedence "$TARGET"; then
+    [ -f "${TARGET}/etc/dcentos/release-image" ] || fail_test "explicit RELEASE_IMAGE=1 lost to the DCENT_DEV_IMAGE alias"
+else
+    fail_test "explicit RELEASE_IMAGE=1 + DCENT_DEV_IMAGE=1 alias refused a locked release root"
+fi
+
+# --- WS-A4: canonical resolver / inline fallback byte-sync pin -------------
+# release_image_provision.sh carries an inline fallback copy of the canonical
+# resolver (for contexts where release_posture.sh cannot be located). The two
+# MUST stay identical so the RELEASE default cannot drift between them; the
+# functional cases above pin the semantics, this pins the copy.
+_extract_posture_fn() {
+    sed -n '/^dcent_release_posture_is_release() {/,/^}/p' "$1"
+}
+_posture_canon="$(_extract_posture_fn "$SCRIPT_DIR/lib/release_posture.sh")"
+_posture_fallback="$(_extract_posture_fn "$SCRIPT_DIR/lib/release_image_provision.sh")"
+[ -n "$_posture_canon" ] || fail_test "cannot extract canonical posture resolver"
+[ "$_posture_canon" = "$_posture_fallback" ] || fail_test "release_image_provision.sh inline posture fallback drifted from release_posture.sh"
+
 
 TARGET="${TEST_ROOT}/dev-regular"
 make_target "$TARGET" dcentral
@@ -152,6 +252,7 @@ TARGET="${TEST_ROOT}/config-symlink"
 make_target "$TARGET" '*'
 OUTSIDE="${TEST_ROOT}/outside-config"
 mkdir "$OUTSIDE"
+rm "${TARGET}/etc/dcentos/board_target"
 rmdir "${TARGET}/etc/dcentos"
 ln -s "$OUTSIDE" "${TARGET}/etc/dcentos"
 if provision_release "$TARGET"; then
@@ -206,6 +307,7 @@ fi
 unset -f mv
 grep -F 'root:dcentral:' "${TARGET}/etc/shadow" >/dev/null || fail_test "shadow race injection did not run"
 [ ! -e "${TARGET}/etc/dcentos/release-image" ] || fail_test "shadow replacement race left a runtime claim"
+[ ! -e "${TARGET}/etc/dcentos/runtime-image.json" ] || fail_test "shadow replacement race left signed runtime claim"
 
 TARGET="${TEST_ROOT}/shadow-hardlink-open-race"
 make_target "$TARGET" '*'

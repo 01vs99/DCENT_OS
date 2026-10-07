@@ -267,7 +267,7 @@ impl S19jTapMiner {
         // monitor mirror (Braiins-am2 only) to verify bosminer-set state.
         // dcentrald tap mode never writes the BM1362 relay candidates; this
         // read is pure parity check.
-        let braiins_glitch_uio: u8 = std::env::var("DCENT_BRAIINS_GLITCH_UIO")
+        let braiins_glitch_uio: u8 = dcentrald_common::lab_env::var("DCENT_BRAIINS_GLITCH_UIO")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(18);

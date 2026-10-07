@@ -18,26 +18,27 @@
 #
 # Differences from the S9 (am1-s9) variant:
 #   1. Board name is hard-pinned to "am2-s17plus" (prefix = sysupgrade-am2-s17plus/).
-#      Wrong prefix = brick.
+#      Wrong prefix = brick (sysupgrade board name rule).
 #   2. Expected UBI volume layout on the inactive slot is 23/179/210 LEBs
 #      (kernel/rootfs/rootfs_data) — inherited verbatim from the am2-s19j
-#      Phase 1 live probe of .139 (same Zynq 7007S NAND geometry). NOT yet
+#      Phase 1 live probe of a lab unit (same Zynq 7007S NAND geometry). NOT yet
 #      confirmed on a live S17+ (none on the fleet).
 #      S9 uses 25/166/525 — not compatible on am2.
 #   3. Pre-flight refuses to write if inactive slot volumes do NOT match the
 #      inherited am2 template — prevents the mismatch brick mode documented
-#      in .
+#      in ubi inactive slot volume mismatch rule.
 #   4. Does NOT invoke `bos firmware upgrade` — BraiinsOS signed manifest
 #      (8 usign keys) rejects unsigned tarballs. We bypass by writing
 #      the inactive MTD directly and flipping firmware= via fw_setenv
 #      (libubootenv, redundant-copy-atomic — see Step 4; NEVER raw mtd4
 #      dd/flash_erase/nandwrite, which bricked the am2 control board twice).
 #   5. Preserves the S9 dedicated slot conventions: mtd7=firmware1, mtd8=firmware2.
-#      Inherited am2 layout — confirmed identical on S19j Pro .139, assumed
+#      Inherited am2 layout — confirmed identical on a lab unit, assumed
 #      identical across the BM1397 17 family (same 7007S control board).
 #
 # Usage: sysupgrade [-f] [-T] [-N] <rootfs.squashfs|dcentos-sysupgrade-am2-s17plus.tar>
 #   -f / --force    Skip confirmation
+#   --stop-miner   Gracefully stop mining after validation, before the update
 #   -T / --test     Verify package only, no NAND writes
 #   -N / --dry-run  Run through every check EXCEPT mtd writes + env flip
 #                   (reports the inactive UBI layout so operators can sanity-
@@ -50,6 +51,7 @@ ROOTFS=""
 ROOTFS_ORIGINAL=""
 PACKAGE_INPUT_IS_TAR=0
 FORCE=0
+STOP_MINER=0
 TEST_ONLY=0
 DRY_RUN=0
 PACKAGE_DIR=""
@@ -78,6 +80,7 @@ UBI_NODE_HELPER="/usr/libexec/dcentos/sysupgrade-ubi-node.sh"
 ZYNQ_GEOMETRY_HELPER="/usr/libexec/dcentos/sysupgrade-zynq-geometry.sh"
 UBOOT_ENV_ADMISSION_HELPER="/usr/libexec/dcentos/sysupgrade-uboot-env-admission.sh"
 SESSION_LATCH_HELPER="/usr/libexec/dcentos/dcentrald-session-latch.sh"
+AM2_OTA_HELPER="/usr/libexec/dcentos/am2-native-ota.sh"
 DEPLOY_LOCK_HELPER="/usr/libexec/dcentos/dcentos-deploy-lock"
 DEPLOY_UPGRADE_GUARD="/usr/libexec/dcentos/dcentrald-deploy-upgrade-guard.sh"
 FW_ENV_CONFIG="/etc/fw_env.config"
@@ -122,6 +125,7 @@ if [ "${DCENT_SYSUPGRADE_OFFLINE_HARNESS:-0}" = "1" ]; then
     ZYNQ_GEOMETRY_HELPER="${DCENT_SYSUPGRADE_ZYNQ_GEOMETRY_HELPER:-$ZYNQ_GEOMETRY_HELPER}"
     UBOOT_ENV_ADMISSION_HELPER="${DCENT_SYSUPGRADE_UBOOT_ENV_ADMISSION_HELPER:-$UBOOT_ENV_ADMISSION_HELPER}"
     SESSION_LATCH_HELPER="${DCENT_SYSUPGRADE_SESSION_LATCH_HELPER:-$SESSION_LATCH_HELPER}"
+    AM2_OTA_HELPER="${DCENT_SYSUPGRADE_AM2_OTA_HELPER:-$AM2_OTA_HELPER}"
     FW_ENV_CONFIG="${DCENT_SYSUPGRADE_FW_ENV_CONFIG:-$FW_ENV_CONFIG}"
     UBOOT_ENV_PROC_MTD="${DCENT_SYSUPGRADE_UBOOT_ENV_PROC_MTD:-$UBOOT_ENV_PROC_MTD}"
     UBOOT_ENV_SYSFS_MTD_ROOT="${DCENT_SYSUPGRADE_UBOOT_ENV_SYSFS_MTD_ROOT:-$UBOOT_ENV_SYSFS_MTD_ROOT}"
@@ -237,7 +241,7 @@ fi
 
 dcent_ubi_attach_mtd() {
     dcent_ubi_node_admit /sys/class/misc/ubi_ctrl/dev /dev ubi_ctrl || return 1
-    ubiattach -m "$1" -d "$2"
+    ubiattach -m "$1" -d "$2" -O 2048 --max-beb-per1024=20
 }
 
 dcent_ubi_detach_device() {
@@ -296,7 +300,7 @@ fi
 # --- am2-s17plus expected UBI volume layout ---
 # Volumes: 0=kernel, 1=rootfs, 2=rootfs_data
 # NOTE: the LEB template below is inherited verbatim from the am2-s19j
-# probe of .139 (same Zynq 7007S NAND geometry). No live 17-series unit on
+# probe of a lab unit (same Zynq 7007S NAND geometry). No live 17-series unit on
 # the fleet, so this is UNCONFIRMED on real S17 hardware — the pre-flight
 # brick gate still refuses any inactive slot that doesn't match it.
 EXPECTED_BOARD="am2-s17plus"
@@ -765,6 +769,7 @@ for arg in "$@"; do
         -f|--force)    FORCE=1 ;;
         -T|--test)     TEST_ONLY=1 ;;
         -N|--dry-run)  DRY_RUN=1 ;;
+        --stop-miner) STOP_MINER=1 ;;
         -*) echo "Unknown option: $arg"; exit 1 ;;
         *) ROOTFS="$arg" ;;
     esac
@@ -850,6 +855,7 @@ if [ -z "$ROOTFS" ]; then
     echo "Options:"
     echo "  -f, --force    Skip confirmation prompt"
     echo "  -T, --test     Verify package/image only, do not write NAND"
+    echo "  --stop-miner   Gracefully stop the managed miner before updating"
     echo "  -N, --dry-run  Run every check (including UBI attach) but skip NAND writes"
     echo ""
     echo "Board:   $EXPECTED_BOARD (S17+ Zynq, BM1397)"
@@ -878,6 +884,8 @@ if ! dcent_sysupgrade_input_open "$ROOTFS_ORIGINAL"; then
     exit 1
 fi
 ROOTFS=$DCENT_SYSUPGRADE_INPUT_FD_PATH
+# Retain the measured package identity before descriptor close clears its state.
+AM2_OTA_PACKAGE_SHA256=$DCENT_SYSUPGRADE_INPUT_SHA256
 
 # --- Tar package handling ---
 if tar tf "$ROOTFS" >/dev/null 2>&1; then
@@ -1211,6 +1219,10 @@ echo "  Expected inactive UBI layout (LEBs):"
 echo "    kernel=$EXPECTED_KERNEL_LEBS  rootfs=$EXPECTED_ROOTFS_LEBS  rootfs_data=$EXPECTED_ROOTFS_DATA_LEBS"
 echo ""
 
+[ -r "$AM2_OTA_HELPER" ] || { echo 'Error: native AM2 OTA participant is missing' >&2; exit 1; }
+. "$AM2_OTA_HELPER"
+am2_ota_validate_package || { echo 'Error: native AM2 signed FPGA payload validation failed' >&2; exit 1; }
+
 if [ "$TEST_ONLY" = "1" ]; then
     verify_and_close_sysupgrade_input || exit 1
     echo "Verification succeeded — test mode, no NAND writes performed."
@@ -1244,20 +1256,24 @@ fi
 
 echo ""
 
-# Until a typed SafeOff receipt exists, flashing is manual-resolution-only.
-# Hold the same persistent admission lock as S82 while proving no unresolved
-# session exists; the /run update lock then prevents readmission until reboot.
+# Hold the update exclusion while S82 stops the managed daemon and proves
+# successful software SafeOff. The session admission prevents readmission.
 if [ "$DRY_RUN" = "0" ]; then
     dcent_persist_preflight "$PERSIST_SOURCE_ROOT" || {
         echo "Error: active persistent state failed preflight validation."
         echo "  Refusing before any inactive-slot mutation."
         exit 1
     }
+    if [ "$STOP_MINER" = 1 ]; then
+        /etc/init.d/S82dcentrald stop || {
+            echo "Error: managed daemon stop did not establish successful software SafeOff." >&2
+            exit 1
+        }
+    fi
     /bin/sh "$SESSION_LATCH_HELPER" admit-update \
         "$PERSIST_SOURCE_ROOT" "$SYSUPGRADE_LOCK_DIR" "$CURRENT_MTD" || {
-        echo "Error: sysupgrade requires a manually resolved hardware session."
-        echo "  Refusing before any inactive-slot mutation. Stop dcentrald, remove"
-        echo "  AC, verify approved rail SafeOff, resolve the session latch, then retry."
+        echo "Error: a stopped daemon with successful software SafeOff is required."
+        echo "  Use --stop-miner for a managed stop; failed or crashed sessions require diagnosis."
         exit 1
     }
     if ! dcent_zynq_uboot_env_admit \
@@ -1270,7 +1286,10 @@ if [ "$DRY_RUN" = "0" ]; then
 fi
 
 # --- Step 1: Attach inactive MTD as UBI (pre-flight + write target) ---
-echo "[1/5] Attaching inactive slot (mtd$INACTIVE_MTD) read-only probe..."
+# Authenticate native FPGA and complete boot tuple before any inactive write.
+am2_ota_prepare || { echo 'Error: native AM2 FPGA/boot preparation failed' >&2; exit 1; }
+
+echo "[1/5] Attaching inactive slot (mtd$INACTIVE_MTD) geometry probe..."
 
 if [ "$PACKAGE_INPUT_IS_TAR" -eq 0 ]; then
     verify_sysupgrade_input_unchanged || exit 1
@@ -1285,17 +1304,10 @@ if ! dcent_ubi_attachment_require_absent /sys/class/ubi 1 "$INACTIVE_MTD"; then
 fi
 
 # Attach as UBI device number 1 (ubi0 is the running slot)
-if ! dcent_ubi_attach_mtd "$INACTIVE_MTD" 1 2>/dev/null; then
-    echo "Error: Failed to attach mtd$INACTIVE_MTD as UBI device"
-    echo "The inactive slot may not have a valid UBI layout."
-    echo ""
-    echo "Recovery hint (manual, dangerous — make sure you are on the correct board):"
-    echo "  ubiformat /dev/mtd$INACTIVE_MTD -y"
-    echo "  ubiattach -m $INACTIVE_MTD -d 1"
-    echo "  UBI_LEB_SIZE=\$(cat /sys/class/ubi/ubi1/eraseblock_size)"
-    echo "  ubimkvol /dev/ubi1 -N kernel      -s \$(( $EXPECTED_KERNEL_LEBS * UBI_LEB_SIZE )) -t dynamic"
-    echo "  ubimkvol /dev/ubi1 -N rootfs      -s \$(( $EXPECTED_ROOTFS_LEBS * UBI_LEB_SIZE )) -t dynamic"
-    echo "  ubimkvol /dev/ubi1 -N rootfs_data -s \$(( $EXPECTED_ROOTFS_DATA_LEBS * UBI_LEB_SIZE )) -t dynamic"
+if ! dcent_ubi_attach_mtd "$INACTIVE_MTD" 1; then
+    echo "Error: inactive mtd$INACTIVE_MTD did not attach with the required 2048-byte VID offset."
+    echo "  No boot environment commit occurred. Retain the recovery backup and"
+    echo "  inspect the attachment diagnostics before provisioning this slot."
     exit 1
 fi
 
@@ -1317,7 +1329,7 @@ done
 
 # Verify the expected volumes exist — OR create them on a factory-blank slot.
 #
-# Phase 3 Agent P0b (2026-04-20) probed .139 and found the inactive slot is a
+# Phase 3 Agent P0b (2026-04-20) probed a lab unit and found the inactive slot is a
 # pristine UBI image with volumes_count=0 (factory state for an A/B slot that
 # has never been flipped). Capacity is correct (412 LEBs = 23+179+210). In
 # that state we must call `ubimkvol` to create kernel/rootfs/rootfs_data
@@ -1413,7 +1425,7 @@ if [ ! -e /dev/ubi1_0 ] || [ ! -e /dev/ubi1_1 ]; then
 fi
 
 # --- Step 1b: UBI volume layout pre-flight (CRITICAL brick-prevention) ---
-#  — refuse if inactive slot
+# ubi inactive slot volume mismatch rule — refuse if inactive slot
 # volumes don't mirror our template. This is the bulk of the am2-specific
 # safety work; the rest of the script is mechanically identical to S9.
 KERNEL_LEBS=$(ubi_vol_lebs 1 0)
@@ -1421,7 +1433,7 @@ ROOTFS_LEBS=$(ubi_vol_lebs 1 1)
 ROOTFS_DATA_LEBS=$(ubi_vol_lebs 1 2)
 
 echo ""
-echo "  Inactive slot UBI layout (read-only probe):"
+echo "  Inactive slot UBI layout:"
 echo "    ubi1_0 (kernel)       = ${KERNEL_LEBS:-missing} LEBs (expected $EXPECTED_KERNEL_LEBS)"
 echo "    ubi1_1 (rootfs)       = ${ROOTFS_LEBS:-missing} LEBs (expected $EXPECTED_ROOTFS_LEBS)"
 echo "    ubi1_2 (rootfs_data)  = ${ROOTFS_DATA_LEBS:-missing} LEBs (expected $EXPECTED_ROOTFS_DATA_LEBS)"
@@ -1620,6 +1632,7 @@ preflip_verify_volume rootfs /dev/ubi1_1 "$ROOTFS"
 verify_and_close_sysupgrade_input || preflip_fail "sysupgrade input stability checkpoint failed after inactive-slot readback."
 rm -f "$KERNEL_TEMP"
 echo "  Pre-flip readback verified; U-Boot env still points at firmware=$CURRENT_FW"
+am2_ota_write_fabric || preflip_fail "inactive FPGA write/readback or complete boot rollback custody failed."
 
 # --- Step 3.5: Durably stage persistent data before any slot flip ---
 echo "[3.5/5] Staging and verifying persistent data on inactive slot..."
@@ -1691,23 +1704,22 @@ dcent_ubi_detach_device 1 || preflip_fail "inactive UBI detach failed after pers
 # 0x20000).
 #
 # CODE-ONLY, LIVE-UNPROVEN: there is no live 17-series unit on the fleet. The
-# A/B logic + mtd4 env layout are inherited verbatim from the .139-proven
+# A/B logic + mtd4 env layout are inherited verbatim from the lab-unit-proven
 # am2-s19j path (same control board); this fw_setenv flip mechanism is the
 # proven-good am2-s19jpro model. Both must be live-verified before flashing
 # a S17+ (see the board pin / LEB-template caveats at the top of this file).
 #
-# AUTO-RECOVERY IS NOT A RELIABLE BACKSTOP ON THIS U-BOOT — DO NOT TRUST IT.
-# `upgrade_stage=0` is field-disproven as a power-cycle auto-revert (the .39
-# S9 brick incident). So the post-flip fw_printenv verify gate below IS the
-# primary brick defense and MUST fail-closed on every unknown. fw_setenv
-# being redundant-copy-atomic is STRICTLY SAFER than the old erase-both-then-
-# rewrite: a genuinely-failed transaction leaves the prior valid copy intact,
-# so the unit stays BraiinsOS-bootable.
+# The native AM2 dispatcher programs the authenticated slot-specific FPGA
+# before reading its kernel. It records the pending attempt and tries the
+# previous native slot once on a failed load, returned bootm or uncommitted
+# second boot. The old vendor upgrade_stage behavior is not relied upon.
+# Software fixture execution verifies these commands; physical cold boot and
+# power-loss behavior still require qualified tester hardware evidence.
 #
-# We KEEP the existing DCENT_OS A/B contract (first_boot yes + upgrade_stage 0
-# + firmware <inactive>) — only the WRITE MECHANISM changes, not the A/B
-# semantics. switch_firmware.py is no longer invoked (it built a raw mtd4
-# image for the banned nandwrite path).
+# The transaction replaces the complete authenticated boot environment plus
+# firmware/first_boot/upgrade_stage, preserving unrelated factory keys. The
+# full receipt is copied to both data volumes before this final environment
+# commit. A three-selector-only repair cannot restore the boot commands.
 
 # Pre-flight assertions — fail-closed if ANY fails. We do NOT fall back to
 # raw dd/flash_erase/nandwrite: that is the BANNED root cause that bricked
@@ -1791,7 +1803,7 @@ if [ "$_CUR_FW_NOW" != "$CURRENT_FW" ]; then
 fi
 # Forensic-only snapshot of the pre-flip env (harmless text; NOT a raw
 # ECC-blind image — we never restore a raw dd image, that worsened a
-# real incident). The genuine recovery is `fw_setenv firmware $CURRENT_FW`.
+# real incident). Recovery replays the complete authenticated boot environment.
 dcent_sysupgrade_workspace_require_absent "$ENV_PRE_TEMP" || exit 1
 printf '%s\n' "$_PRECHK" >"$ENV_PRE_TEMP" || exit 1
 
@@ -1799,99 +1811,26 @@ printf '%s\n' "$_PRECHK" >"$ENV_PRE_TEMP" || exit 1
 # return alone does not prove which complete tuple is durable, so readback and
 # the armed transaction journal resolve that ambiguity.
 dcent_sysupgrade_workspace_require_absent "$FW_SETENV_SCRIPT" || exit 1
-cat >"$FW_SETENV_SCRIPT" <<EOF
-first_boot=yes
-upgrade_stage=0
-firmware=${INACTIVE_FW}
-EOF
+am2_ota_commit_script || preflip_fail "native source environment changed before the complete boot commit."
 dcent_sysupgrade_lock_arm_env_commit || {
     rm -f "$FW_SETENV_SCRIPT"
     echo "Error: could not arm the boot-environment transaction journal."
     exit 1
 }
-if ! fw_setenv -c "$FW_ENV_CONFIG" --script "$FW_SETENV_SCRIPT"; then
-    rm -f "$FW_SETENV_SCRIPT"
-    _POSTFAIL_RC=0
-    _POSTFAIL=$(fw_printenv -c "$FW_ENV_CONFIG" 2>&1) || _POSTFAIL_RC=$?
-    _POSTFAIL_FW=$(printf '%s\n' "$_POSTFAIL" | sed -n 's/^firmware=//p')
-    _POSTFAIL_STG=$(printf '%s\n' "$_POSTFAIL" | sed -n 's/^upgrade_stage=//p')
-    _POSTFAIL_FIRST=$(printf '%s\n' "$_POSTFAIL" | sed -n 's/^first_boot=//p')
-    _POSTFAIL_FW_COUNT=$(printf '%s\n' "$_POSTFAIL" | sed -n 's/^firmware=//p' | wc -l | tr -d ' ')
-    _POSTFAIL_STG_COUNT=$(printf '%s\n' "$_POSTFAIL" | sed -n 's/^upgrade_stage=//p' | wc -l | tr -d ' ')
-    _POSTFAIL_FIRST_COUNT=$(printf '%s\n' "$_POSTFAIL" | sed -n 's/^first_boot=//p' | wc -l | tr -d ' ')
-    _POSTFAIL_OLD_TUPLE=0
-    case "$_POSTFAIL" in
-        *"Bad CRC"*|*"using default environment"*) ;;
-        *)
-            if [ "$_POSTFAIL_RC" -eq 0 ] && \
-               [ "$_POSTFAIL_FW_COUNT" = 1 ] && \
-               [ "$_POSTFAIL_STG_COUNT" = "$_CUR_STG_COUNT" ] && \
-               [ "$_POSTFAIL_FIRST_COUNT" = "$_CUR_FIRST_COUNT" ] && \
-               [ "$_POSTFAIL_FW" = "$_CUR_FW_NOW" ] && \
-               [ "$_POSTFAIL_STG" = "$_CUR_STG_NOW" ] && \
-               [ "$_POSTFAIL_FIRST" = "$_CUR_FIRST_BOOT_NOW" ]; then
-                _POSTFAIL_OLD_TUPLE=1
-            fi
-            ;;
-    esac
-    if [ "$_POSTFAIL_OLD_TUPLE" = 1 ]; then
+if ! am2_ota_apply_environment; then
+    if [ "$AM2_OTA_ENV_RESULT" = unchanged ]; then
         dcent_sysupgrade_lock_abort_env_commit || \
-            echo "WARNING: old env tuple is intact, but transaction journal disarm failed; same-boot retries remain blocked." >&2
-        echo "Error: fw_setenv failed, but one successful CRC-valid readback"
-        echo "  confirmed the complete prior boot-selector tuple. The active"
-        echo "  slot remains firmware=$CURRENT_FW."
+            echo "WARNING: complete prior environment is intact, but journal disarm failed; same-boot retries remain blocked." >&2
+        echo "Error: the environment commit did not apply. Complete CRC-valid readback"
+        echo "  proves the prior environment, including all boot commands and factory keys."
         _recovery_hint
     else
-        echo "Error: fw_setenv failed and readback did not prove either complete"
-        echo "  boot-selector tuple. The environment may select either slot."
-        echo "  The armed journal is retained to block unsafe same-boot retries."
-        echo "  DO NOT power-cycle. Inspect a complete CRC-valid firmware=,"
-        echo "  upgrade_stage=, and first_boot= tuple from serial/SD recovery."
+        echo "Error: readback did not prove the complete prior or new boot environment."
+        echo "  The armed journal is retained; do not reboot or retry this transaction."
+        echo "  Use serial/SD recovery to inspect the retained full environment receipt."
+        echo "  Restore the complete authenticated boot tuple through fw_setenv --script."
+        echo "  Changing only firmware, upgrade_stage and first_boot is insufficient."
     fi
-    exit 1
-fi
-rm -f "$FW_SETENV_SCRIPT"
-
-# --- Post-flip verify (replaces the raw-dd readback machinery) ---
-# Read U-Boot's OWN criterion via fw_printenv exactly as U-Boot reads it:
-# (1) the env is CRC-valid, (2) firmware=$INACTIVE_FW, (3) upgrade_stage=0,
-# and (4) first_boot=yes. All fields come from one env snapshot so verification
-# cannot mix redundant-copy generations. ANY fail → FAIL-CLOSED exit 1,
-# NO [5/5], NO reboot.
-_VERIFY_OK=0
-_FWP_RC=0
-_FWP=$(fw_printenv -c "$FW_ENV_CONFIG" 2>&1) || _FWP_RC=$?
-_FW_COUNT=$(printf '%s\n' "$_FWP" | sed -n 's/^firmware=//p' | wc -l | tr -d ' ')
-_STG_COUNT=$(printf '%s\n' "$_FWP" | sed -n 's/^upgrade_stage=//p' | wc -l | tr -d ' ')
-_FIRST_BOOT_COUNT=$(printf '%s\n' "$_FWP" | sed -n 's/^first_boot=//p' | wc -l | tr -d ' ')
-case "$_FWP" in
-    *"Bad CRC"*|*"using default environment"*)
-        _VERIFY_OK=0 ;;
-    *)
-        _FW_VAL=$(printf '%s\n' "$_FWP" | sed -n 's/^firmware=//p')
-        _STG_VAL=$(printf '%s\n' "$_FWP" | sed -n 's/^upgrade_stage=//p')
-        _FIRST_BOOT_VAL=$(printf '%s\n' "$_FWP" | sed -n 's/^first_boot=//p')
-        if [ "$_FWP_RC" -eq 0 ] && \
-           [ "$_FW_COUNT" = 1 ] && [ "$_STG_COUNT" = 1 ] && \
-           [ "$_FIRST_BOOT_COUNT" = 1 ] && \
-           [ "$_FW_VAL" = "$INACTIVE_FW" ] && \
-           [ "$_STG_VAL" = "0" ] && \
-           [ "$_FIRST_BOOT_VAL" = "yes" ]; then
-            _VERIFY_OK=1
-        fi
-        ;;
-esac
-
-if [ "$_VERIFY_OK" != "1" ]; then
-    echo "Error: U-Boot env verification FAILED — fw_printenv did NOT"
-    echo "  confirm a CRC-valid env with firmware=$INACTIVE_FW upgrade_stage=0 first_boot=yes"
-    echo "  after fw_setenv."
-    echo "WARNING: Firmware payload is written, but the boot-selector result"
-    echo "  is indeterminate. The env may select either slot; the armed journal"
-    echo "  remains to block unsafe same-boot retries. DO NOT power-cycle."
-    echo "  Inspect the complete CRC-valid firmware=, upgrade_stage=, and"
-    echo "  first_boot= tuple through serial/SD recovery. Repair all three"
-    echo "  fields in one fw_setenv --script transaction; never raw nandwrite."
     exit 1
 fi
 rm -f "$ENV_PRE_TEMP" 2>/dev/null
@@ -1907,9 +1846,8 @@ echo "  U-Boot env updated: firmware=$INACTIVE_FW"
 echo "[5/5] Update complete! Rebooting..."
 echo ""
 echo "  The miner will boot into firmware $INACTIVE_FW (mtd$INACTIVE_MTD)."
-echo "  Power-cycle ONLY reverts to firmware $CURRENT_FW if a serial/SD console"
-echo "  recovery path is staged — U-Boot auto-recovery is field-disproven here."
-echo "  SSH will reconnect in ~90 seconds."
+echo "  The verified native boot dispatcher tries firmware $CURRENT_FW if the new boot fails."
+echo "  Retain the recovery backup and the protected SSH credential for this unit."
 echo ""
 sleep 2
 reboot

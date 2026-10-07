@@ -1,6 +1,19 @@
+import { DCENT_FUND_CANONICAL_URL as FUND_URL } from '../../utils/links';
 // DonationFeeCard - transparent donation visibility and controls.
-// The dashboard presents the recommended 2% donation by default, keeps the
-// mechanism visible, and lets the operator lower it or disable it.
+//
+// C6 (operator decision 2026-09-01): DCENT_OS ships with ZERO mandatory
+// fee. This card is a NUDGE, not a toll booth: the default state is
+// disabled at 0%, one-tap 1/2/3% presets let an operator opt in, and the
+// mechanism stays fully visible and one-tap-off. The compact variant is
+// a DISMISSIBLE donate nudge (About page); the full variant (Settings)
+// is the always-available control surface.
+//
+// Copy truth-contract (load-bearing — enforced by donationNudge.honesty.test.ts):
+//   • never claim the donation "pays for itself" or that the autotuner
+//     offsets it (CLAIM_UNSAFE per COMPETITIVE_FEATURE_MATRIX);
+//   • no countdown / scarcity pressure patterns;
+//   • always state "no mandatory fee, ever";
+//   • the fund link https://d-central.tech/fund/ is always present.
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../../api/client';
@@ -13,12 +26,13 @@ const DEFAULT_PASSWORD = 'x';
 const DEFAULT_FALLBACK_POOL_URL = 'stratum+tcp://stratum.braiins.com:3333';
 const DEFAULT_FALLBACK_WORKER = 'DungeonMaster';
 const DEFAULT_CYCLE_S = 3600;
-const DEFAULT_PERCENT = 2.0;
+const DEFAULT_PERCENT = 0;
+const NUDGE_DISMISS_STORAGE_KEY = 'dcentos-donate-nudge-dismissed';
 
 type DonationState = DonationConfig;
 
 const DEFAULT_STATE: DonationState = {
-  enabled: true,
+  enabled: false,
   percent: DEFAULT_PERCENT,
   pool_url: DEFAULT_POOL_URL,
   worker: DEFAULT_WORKER,
@@ -79,6 +93,24 @@ function saveErrorMessage(err: unknown): string {
   return message || 'Failed to save donation settings';
 }
 
+function readNudgeDismissed(): boolean {
+  try {
+    if (typeof localStorage === 'undefined') return false;
+    return localStorage.getItem(NUDGE_DISMISS_STORAGE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function persistNudgeDismissed(): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(NUDGE_DISMISS_STORAGE_KEY, '1');
+  } catch {
+    /* ignore quota / private-mode */
+  }
+}
+
 export interface DonationFeeCardProps {
   variant?: 'full' | 'compact';
   onNavigateToSettings?: () => void;
@@ -94,12 +126,17 @@ export function DonationFeeCard({ variant = 'full', onNavigateToSettings }: Dona
   const [serverState, setServerState] = useState<DonationState>(DEFAULT_STATE);
   const [state, setState] = useState<DonationState>(DEFAULT_STATE);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [nudgeDismissed, setNudgeDismissed] = useState(false);
   // W9.5: trust-but-verify. Public donation pool disclosure (URL,
   // payout address, block-explorer link). Fetched read-only and
   // independently of the donation-config above so the Verify link
   // stays available even when /api/config/donation is missing on
   // older daemons.
   const [donationInfo, setDonationInfo] = useState<DonationInfoResponse | null>(null);
+
+  useEffect(() => {
+    setNudgeDismissed(readNudgeDismissed());
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -168,7 +205,7 @@ export function DonationFeeCard({ variant = 'full', onNavigateToSettings }: Dona
   const { donateS, userS } = formatCycleSplit(state.percent, state.cycle_duration_s);
   const enabledLabel = state.enabled
     ? `${formatPercent(state.percent)}% donation enabled`
-    : 'Donation disabled';
+    : 'Donation off — 0% fee';
 
   async function persist(patch: Partial<DonationState>) {
     const nextDonation = normalizeDonationConfig({ ...state, ...patch });
@@ -181,7 +218,7 @@ export function DonationFeeCard({ variant = 'full', onNavigateToSettings }: Dona
       setState(saved);
       addAlert('info', saved.enabled
         ? `Donation saved at ${formatPercent(saved.percent)}%. Thank you for supporting DCENT_OS.`
-        : 'Donation disabled. Thank you for running DCENT_OS.');
+        : 'Donation disabled. No mandatory fee, ever.');
     } catch (err) {
       addAlert('warning', saveErrorMessage(err));
     } finally {
@@ -191,20 +228,74 @@ export function DonationFeeCard({ variant = 'full', onNavigateToSettings }: Dona
 
   const handleSave = () => { void persist({}); };
   const handleDisable = () => { void persist({ enabled: false }); };
+  const handlePreset = (percent: number) => { void persist({ enabled: true, percent }); };
   const handleToggleEnabled = () => {
     setState(current => ({
       ...current,
       enabled: !current.enabled,
-      percent: !current.enabled && current.percent <= 0 ? DEFAULT_PERCENT : current.percent,
+      // Enabling at 0% would be a no-op; the smallest honest opt-in is 1%.
+      percent: !current.enabled && current.percent <= 0 ? 1 : current.percent,
     }));
   };
 
+  const dismissNudge = () => {
+    persistNudgeDismissed();
+    setNudgeDismissed(true);
+  };
+
   if (variant === 'compact') {
+    if (nudgeDismissed) {
+      return (
+        <div style={{ fontSize: '0.8rem', color: 'var(--text-dim)', lineHeight: 1.6 }}>
+          DCENT_OS stays 0% fee — donation stays off. Change it anytime under{' '}
+          {onNavigateToSettings ? (
+            <button
+              type="button"
+              className="ds-btn ghost"
+              onClick={onNavigateToSettings}
+              style={{ padding: '2px 6px' }}
+            >
+              Settings
+            </button>
+          ) : 'Settings'}
+          {' '}or{' '}
+          <a
+            href={FUND_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: 'var(--accent, #FAA500)' }}
+          >
+            fund development directly
+          </a>.
+        </div>
+      );
+    }
+
     return (
-      <div style={{ fontSize: '0.85rem', color: 'var(--text, #E8E8E8)', lineHeight: 1.7 }}>
+      <div style={{ fontSize: '0.85rem', color: 'var(--text, #E8E8E8)', lineHeight: 1.7, position: 'relative' }}>
+        <button
+          type="button"
+          onClick={dismissNudge}
+          aria-label="Dismiss donation nudge"
+          title="Dismiss — the donation stays fully available in Settings"
+          style={{
+            position: 'absolute',
+            top: -4,
+            right: -4,
+            background: 'none',
+            border: 'none',
+            color: 'var(--text-dim, #6B7280)',
+            fontSize: '1rem',
+            cursor: 'pointer',
+            padding: '2px 6px',
+            lineHeight: 1,
+          }}
+        >
+          ×
+        </button>
         <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
           <strong style={{ fontFamily: "var(--font-heading)", fontSize: '1.05rem', color: 'var(--accent, #FAA500)' }}>
-            {loaded && apiReportsDonation ? enabledLabel : '2% donation default'}
+            {loaded && apiReportsDonation ? enabledLabel : '0% fee — open source'}
           </strong>
           {poolDonating && (
             <span className="ds-chip ds-accent ds-live" aria-label="Currently mining on the donation pool">
@@ -213,14 +304,44 @@ export function DonationFeeCard({ variant = 'full', onNavigateToSettings }: Dona
           )}
         </div>
         <div style={{ fontSize: '0.8rem', color: 'var(--text-dim)', lineHeight: 1.6, marginBottom: 10 }}>
-          The donation is visible pool switching: at the recommended 2%, the miner
-          spends 72 seconds per hour on D-Central's donation pool and the rest on
-          your pool. You can lower it, increase it up to 5%, set it to 0%, or disable it.
+          DCENT_OS is 0% fee and open source — <strong>no mandatory fee, ever</strong>.
+          If it helps your miner, you can fund development with an optional,
+          always-visible time-sliced donation.
+        </div>
+        <div
+          role="group"
+          aria-label="One-tap donation presets"
+          style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}
+        >
+          {[1, 2, 3].map(p => (
+            <button
+              key={p}
+              type="button"
+              className="ds-btn ghost"
+              onClick={() => handlePreset(p)}
+              disabled={saving || !loaded}
+              style={{
+                padding: '4px 12px',
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: '0.78rem',
+                cursor: saving ? 'wait' : 'pointer',
+              }}
+              aria-label={`Opt in to a ${p} percent donation`}
+            >
+              Donate {p}%
+            </button>
+          ))}
         </div>
         <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', marginBottom: 12, lineHeight: 1.6 }}>
-          This voluntary donation can be changed or disabled, and it funds
-          open-source firmware work. Please leave at least 1% enabled if the
-          firmware helps your miner.
+          One tap on, one tap off, anytime. Or support the project directly:{' '}
+          <a
+            href={FUND_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: 'var(--accent, #FAA500)', textDecoration: 'underline' }}
+          >
+            d-central.tech/fund
+          </a>
         </div>
         <DonationVerifyLink info={donationInfo} compact />
         {onNavigateToSettings && (
@@ -285,7 +406,7 @@ export function DonationFeeCard({ variant = 'full', onNavigateToSettings }: Dona
           )}
         </div>
         <div className="ds-chip ds-info" style={{ fontSize: '0.62rem' }}>
-          Default 2%
+          0% fee · opt in
         </div>
       </div>
 
@@ -295,9 +416,9 @@ export function DonationFeeCard({ variant = 'full', onNavigateToSettings }: Dona
         lineHeight: 1.6,
         marginBottom: 18,
       }}>
-        DCENT_OS is open source. The donation is a visible, configurable pool
-        switch that funds firmware development. The recommended default is 2%;
-        1% still helps, you can increase it up to 5%, and disabling is always available.
+        DCENT_OS is 0% fee and open source — <strong>no mandatory fee, ever</strong>.
+        The donation below is optional, visible pool switching that funds firmware
+        development: 1% helps, you can go up to 5%, and one tap turns it off.
       </div>
 
       {!apiReportsDonation && loaded && (
@@ -311,11 +432,42 @@ export function DonationFeeCard({ variant = 'full', onNavigateToSettings }: Dona
           color: 'var(--amber, #F59E0B)',
           lineHeight: 1.5,
         }}>
-          This API response has not reported saved donation settings yet. Save
-          once to apply the transparent 2% default on firmware builds that expose
-          the donation config key.
+          This API response has not reported saved donation settings yet. The
+          firmware default is 0% (off); save once to record your choice on
+          firmware builds that expose the donation config key.
         </div>
       )}
+
+      <div
+        role="group"
+        aria-label="One-tap donation presets"
+        style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}
+      >
+        {[1, 2, 3].map(p => (
+          <button
+            key={p}
+            type="button"
+            className={`ds-btn${state.enabled && Math.abs(state.percent - p) < 0.05 ? ' primary' : ' ghost'}`}
+            onClick={() => handlePreset(p)}
+            disabled={saving || !loaded}
+            style={{ padding: '6px 16px', fontFamily: "'JetBrains Mono', monospace" }}
+            aria-label={`Opt in to a ${p} percent donation`}
+          >
+            {p}%
+          </button>
+        ))}
+        {state.enabled && (
+          <button
+            type="button"
+            className="ds-btn ghost"
+            onClick={handleDisable}
+            disabled={saving || !loaded}
+            style={{ padding: '6px 16px' }}
+          >
+            Turn off
+          </button>
+        )}
+      </div>
 
       <div style={{
         display: 'grid',
@@ -376,13 +528,13 @@ export function DonationFeeCard({ variant = 'full', onNavigateToSettings }: Dona
                   padding: '2px 4px',
                   fontFamily: "'JetBrains Mono', monospace",
                   fontSize: '0.7rem',
-                  color: t === 2 ? 'var(--accent, #FAA500)' : 'var(--text-dim, #6B7280)',
-                  fontWeight: t === 2 ? 700 : 500,
+                  color: state.enabled && t === state.percent ? 'var(--accent, #FAA500)' : 'var(--text-dim, #6B7280)',
+                  fontWeight: state.enabled && t === state.percent ? 700 : 500,
                   cursor: state.enabled ? 'pointer' : 'default',
                 }}
                 aria-label={`Set donation to ${t} percent`}
               >
-                {t}%{t === 2 ? ' rec' : ''}
+                {t}%
               </button>
             ))}
           </div>
@@ -421,7 +573,7 @@ export function DonationFeeCard({ variant = 'full', onNavigateToSettings }: Dona
           <div style={{ fontSize: '0.75rem', color: 'var(--text-dim, #9CA3AF)', marginTop: 2 }}>
             {state.enabled
               ? 'Briefly mines on the donation pool each cycle, then returns to your pool.'
-              : 'Your miner stays on your pool for the full cycle.'}
+              : 'Your miner stays on your pool for the full cycle. No mandatory fee, ever.'}
           </div>
         </div>
         <button
@@ -434,21 +586,6 @@ export function DonationFeeCard({ variant = 'full', onNavigateToSettings }: Dona
         >
           <span className="ds-toggle-knob" />
         </button>
-      </div>
-
-      <div style={{
-        marginTop: 14,
-        padding: '12px 14px',
-        background: 'var(--accent-glow, rgba(250, 165, 0, 0.08))',
-        border: '1px solid var(--accent-border, rgba(250, 165, 0, 0.25))',
-        borderRadius: 10,
-        fontSize: '0.82rem',
-        color: 'var(--text, #E8E8E8)',
-        lineHeight: 1.55,
-      }}>
-        <strong style={{ color: 'var(--accent, #FAA500)' }}>Please leave it on.</strong>{' '}
-        This donation is the firmware's revenue model. If DCENT_OS improves your
-        miner, leaving 1-2% enabled helps keep the project open and maintained.
       </div>
 
       <div style={{
@@ -475,6 +612,15 @@ export function DonationFeeCard({ variant = 'full', onNavigateToSettings }: Dona
         At {formatPercent(state.percent)}%, the miner spends {donateS} seconds
         every {Math.round(state.cycle_duration_s / 60)}-minute cycle on the
         donation pool. The remaining {userS} seconds mine to your pool.
+        Prefer to support the project without touching hashrate?{' '}
+        <a
+          href={FUND_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: 'var(--accent, #FAA500)', textDecoration: 'underline' }}
+        >
+          d-central.tech/fund
+        </a>
       </div>
 
       {/* W9.5: trust-but-verify. Public payout address + block-explorer link. */}
@@ -489,14 +635,14 @@ export function DonationFeeCard({ variant = 'full', onNavigateToSettings }: Dona
         >
           {saving ? 'Saving...' : dirty ? 'Save donation settings' : 'Saved'}
         </button>
-        {(serverState.enabled || state.enabled) && (
+        {state.enabled && (
           <button
             type="button"
             className="ds-btn ghost"
             onClick={handleDisable}
             disabled={saving || !loaded}
           >
-            Disable
+            Turn off
           </button>
         )}
         {!loaded && (

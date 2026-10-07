@@ -26,6 +26,10 @@
 //! - [`atomic_file`] — bounded same-filesystem state replacement and durable
 //!   deletion with directory fsync plus explicit publication/failure evidence.
 
+/// AM1 framed dsPIC33EP16GS202 controller adapter (T9+ class) — pure wire
+/// codec + admission law cited to held stock bytes. The S9/S9i/S9j PIC16
+/// bare law is a refused negative fixture here, never a reuse.
+pub mod am1_dspic_adapter;
 pub mod am2_topology;
 /// Canonical build target and published filename for each artifact claim.
 pub mod artifact_producer;
@@ -33,6 +37,38 @@ pub mod artifact_producer;
 pub mod asic_protocol;
 pub mod at3_rail;
 pub mod atomic_file;
+pub mod release_channel;
+pub mod amlogic_gpio437;
+pub mod lab_env;
+pub mod runtime_hardware_recipe;
+pub mod runtime_policy;
+pub use release_channel::ReleaseChannel;
+/// Per-platform parameters for the BM1366 direct-serial runtime (Gauntlet B8):
+/// dispatch-admitted rows for am3-s19k (77) and the XP pair (110 each).
+pub mod bm1366_serial_platform;
+/// Exact per-bin BM1366 XP-pair profiles (S19 XP / S19j XP, 110 exact per
+/// chain), per-model measured-PSU dialect law (APW12 75..77 vs APW17 c1),
+/// population admission, init sequencing, session cancel/stale composition
+/// and all-chain distribution planning; pure and no-I/O.
+pub mod bm1366_xp_board_profiles;
+/// Exact base-S21 (am3-s21, BM1368) full-unit profile, 3x108 population
+/// admission, all-chain distribution planning and per-route nonce
+/// accounting; pure and no-I/O (campaign lane R13).
+pub mod bm1368_s21_board_profiles;
+/// Exact per-bin BM1370 board profiles (Pro65/Plus55/XP91), population
+/// admission and all-chain distribution planning; pure and no-I/O.
+pub mod bm1370_board_profiles;
+pub mod bm1370_work_geometry;
+pub mod bm1396_s17e_factory;
+/// Exact BM1360 S19i (NBS2003) + BM1398S S19a (BHB28611) legacy four-chain
+/// Zynq admission profiles from held first-party topol.conf bytes; pure and
+/// no-I/O (campaign lane R17).
+pub mod s19_legacy_zynq_profiles;
+/// Exact framed-dsPIC33EP16GS202 "S9 plus plus" AM1 generation evidence (S9
+/// Hydro + S11 builds): analog-voltage telemetry wire law, compile-time
+/// predicate table, S11 payload-selection law and inference-freedom pin;
+/// pure and no-I/O (campaign lane R17).
+pub mod s9_plus_plus_pic_generation;
 /// Exact S7-45/S7-54 factory profiles and BM1385 FIL response contract; pure and no-I/O.
 pub mod bm1385_s7_offline;
 /// Exact S15/T15 APW8-adjacent software/guide evidence; pure and no-I/O.
@@ -49,6 +85,7 @@ pub mod bm1391_stock_return;
 pub mod bm1391_stock_startup;
 /// Exact-release S15/T15 stock job decoder and pure FPGA publication planner.
 pub mod bm1391_stock_work;
+pub mod bm1393_native;
 pub mod bm1396_auto_adapt_voltage;
 /// Exact stock-module and userspace-mapping BM1396 carrier preflight facts.
 pub mod bm1396_carrier_preflight;
@@ -241,6 +278,10 @@ pub mod stock_fpga_carrier_preflight;
 pub mod stock_fpga_policy;
 /// Exact held T21 Amlogic direct-UART/GPIO/PWM route; evidence only, no I/O.
 pub mod t21_aml_production_route;
+/// Exact evidence-scoped T21 (am3-t21, BM1368) stock profile: controller,
+/// PSU and geometry pinned only to held T21 bytes; pure and no-I/O
+/// (campaign lane R13 deliverable 2).
+pub mod t21_bm1368_profile;
 /// Pure ASIC ticket-mask encode (G24).
 pub mod ticket_mask;
 /// Exact offline S17/T17+ AMTC factory profiles; no production or I/O authority.
@@ -255,6 +296,19 @@ pub mod xil_dual_chain_desk;
 pub use dspic_heartbeat::{build_pic_temp_chain_map, heartbeat_extra_addrs};
 /// Honest diagnostic snapshot vs active-stim labels (P2-5).
 pub mod diagnostic_mode;
+/// Hydro coolant-loop feedback composition + external cutoff gate (R15):
+/// monitored inlet/outlet/flow laws from the held hydro stock bytes, the
+/// stock water-permit analog, and a one-way latched, fail-closed,
+/// operator-reset-only cutoff the mining path can never bypass; pure and
+/// no-I/O (campaign lane R15).
+pub mod hydro_cooling_feedback;
+/// Exact hydro/immersion board-PSU-cooling runtime profiles (R15): the 27
+/// held topol.conf machine tuples (S19 Hydro → S21 XP Hydro), ZYNQ7007
+/// transport facts (PIC1704 @0x20, AT24C02D @0x50, PSU 0x10/GPIO907),
+/// population admission and fail-closed transport/startup composition;
+/// pure and no-I/O. Hydro rows are excluded from beta kits — runtime
+/// profiles only, no install/registration claim (campaign lane R15).
+pub mod hydro_immersion_profiles;
 /// Pure hashrate-from-geometry math (P2-9).
 pub mod hashrate_geometry;
 /// Install/packaging matrix from BoardDesc (toolbox/CI/docs generators).

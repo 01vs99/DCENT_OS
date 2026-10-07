@@ -208,13 +208,13 @@ pub struct ValidShare {
     /// The 32-bit nonce that produced a valid hash (hex, 8 chars).
     pub nonce: String,
 
-    /// Version bits delta set by the miner (hex, 8 chars).
+    /// Full header version bits within the negotiated mask (hex, 8 chars).
     /// Only present when version rolling (BIP 310) is active.
-    /// This is the XOR delta from the base version — used by V1 mining.submit.
+    /// V1 reconstructs `(job_version & !mask) | (version_bits & mask)`.
     pub version_bits: Option<String>,
 
     /// Full block header version (base version with rolled bits applied).
-    /// Used by SV2 SubmitSharesStandard which needs the actual version, not the delta.
+    /// Used by SV2 SubmitSharesStandard, which carries the full version.
     pub version: u32,
 
     /// Locally computed achieved pool difficulty for this share hash, when the
@@ -368,7 +368,8 @@ pub struct PoolFailoverStatus {
     pub stale_jobs_flushed_on_switch: bool,
     /// Number of pending submit correlation records cleared at the last session end.
     pub pending_submit_correlations_cleared: u64,
-    /// Current unresolved mining.submit correlation records awaiting pool replies.
+    /// Submitted shares without a definitive verdict, including retired sessions
+    /// and evicted correlation metadata. Reconnect does not turn them into rejects.
     pub shares_unresolved: u64,
     /// Cumulative pending submit correlation records dropped by the cap.
     pub pending_submit_dropped: u64,
@@ -417,16 +418,18 @@ pub struct HashrateSplitStatus {
 
 /// Donation configuration — voluntary, transparent, disableable.
 ///
-/// DCENT_OS replaces the industry-standard 2.8% mandatory fee with a
-/// transparent 2% donation. Our autotuner saves more than 2% in energy —
-/// the donation can pay for itself. Fully configurable (0-5%), fully disableable.
+/// DCENT_OS ships with ZERO mandatory fee: donation is DISABLED and 0% by
+/// default (operator decision 2026-09-01). Operators who want to fund
+/// development opt in with a transparent, time-sliced donation (1-5%,
+/// always visible, one tap off). Unlike the industry-standard 2-3%
+/// mandatory dev fee, nothing is ever taken without an explicit opt-in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DonationConfig {
-    /// Whether donation is enabled. Default: true.
-    #[serde(default = "default_true")]
+    /// Whether donation is enabled. Default: false (0% fee posture).
+    #[serde(default)]
     pub enabled: bool,
 
-    /// Donation percentage (0.0 to 5.0). Default: 2.0.
+    /// Donation percentage (0.0 to 5.0). Default: 0.0.
     #[serde(default = "default_donation_percent")]
     pub percent: f32,
 
@@ -462,13 +465,13 @@ pub struct DonationConfig {
 
     /// Total cycle duration in seconds. Default: 3600 (1 hour).
     /// At 2% donation with 3600s cycle: mine user pool for 3528s,
-    /// then donation pool for 72s.
+    /// then donation pool for 72s. (Only applies when opted in.)
     #[serde(default = "default_donation_cycle")]
     pub cycle_duration_s: u64,
 }
 
 fn default_donation_percent() -> f32 {
-    2.0
+    0.0
 }
 fn default_donation_pool_url() -> String {
     "stratum+tcp://pool.d-central.tech:3333".into()
@@ -492,8 +495,8 @@ fn default_donation_cycle() -> u64 {
 impl Default for DonationConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            percent: 2.0,
+            enabled: false,
+            percent: 0.0,
             pool_url: default_donation_pool_url(),
             worker: default_donation_worker(),
             password: default_donation_password(),
@@ -506,9 +509,37 @@ impl Default for DonationConfig {
     }
 }
 
+/// V1 session policy. Wire targets always remain pool-controlled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct V1Policy {
+    /// Maximum age of any transmitted share with no definitive verdict.
+    /// Runtime bounds this to 1..600 seconds; zero cannot disable liveness.
+    pub submit_response_timeout_secs: u64,
+    /// Consecutive malformed jobs tolerated before reconnect (bounded 1..64).
+    pub max_invalid_jobs: u32,
+    /// Opt into hints derived from runtime-admitted active capacity. Requires
+    /// a runtime capacity receiver; configured/nameplate rate alone is unused.
+    pub dynamic_difficulty: bool,
+}
+
+impl Default for V1Policy {
+    fn default() -> Self {
+        Self {
+            submit_response_timeout_secs: 60,
+            max_invalid_jobs: 8,
+            dynamic_difficulty: false,
+        }
+    }
+}
+
 /// Full stratum client configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StratumConfig {
+    /// V1 reliability and optional runtime capacity hints. Defaults preserve
+    /// static difficulty suggestions while bounding unanswered requests/jobs.
+    #[serde(default)]
+    pub v1_policy: V1Policy,
     /// Primary pool (required).
     pub pool1: PoolConfig,
 
@@ -1121,7 +1152,8 @@ pub struct StratumStats {
     /// Total shares submitted.
     pub shares_submitted: u64,
 
-    /// Submitted shares still awaiting pool accept/reject responses.
+    /// Submitted shares without a definitive verdict, including requests retired
+    /// by reconnect or correlation eviction. Never fabricated as accepted/rejected.
     pub shares_unresolved: u64,
 
     /// Submit correlation records dropped because the pending queue hit its cap.
@@ -1767,25 +1799,37 @@ mod tests {
     // and percentage donations go to. A refactor that changed any of
     // these without explicit operator coordination would silently
     // redirect donations to a different recipient. Pin every field.
+    //
+    // RE-ANCHORED 2026-09-01 (C6, operator decision): DCENT_OS ships with
+    // ZERO mandatory fee — donation is DISABLED and 0% by default. The
+    // opt-in route still targets D-Central's pool/worker below. The prior
+    // pins (enabled=true @ 2.0%) described the old default-on posture and
+    // were flipped as part of that decision, not silently weakened: the
+    // opt-in recipient pins are preserved unchanged.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn donation_default_donates_two_percent_to_d_central_pool() {
+    fn donation_default_is_zero_fee_and_opt_in() {
         let donation = DonationConfig::default();
 
-        // Enabled by default — donations are opt-out, not opt-in.
-        assert!(donation.enabled);
-
-        // 2.0% donation.
+        // Disabled by default — donations are strictly opt-in. This is the
+        // 0%-fee posture: nothing is ever taken without an explicit opt-in.
         assert!(
-            (donation.percent - 2.0).abs() < f32::EPSILON,
-            "donation percent must default to 2.0%, got {}",
+            !donation.enabled,
+            "donation must default to disabled (0% mandatory-fee posture)"
+        );
+
+        // 0.0% — an enabled-but-inherited percent must never leak through
+        // the default path.
+        assert!(
+            (donation.percent - 0.0).abs() < f32::EPSILON,
+            "donation percent must default to 0.0%, got {}",
             donation.percent
         );
 
-        // Primary recipient is D-Central's pool with the "DungeonMaster"
-        // worker name. A refactor that flipped either of these would
-        // silently redirect donations.
+        // The opt-in recipient is still D-Central's pool with the
+        // "DungeonMaster" worker name. A refactor that flipped either of
+        // these would silently redirect opted-in donations.
         assert_eq!(donation.pool_url, "stratum+tcp://pool.d-central.tech:3333");
         assert_eq!(donation.worker, "DungeonMaster");
         assert_eq!(donation.password, "x");
@@ -1810,8 +1854,8 @@ mod tests {
 
     #[test]
     fn donation_default_cycle_is_one_hour() {
-        // 3600s cycle at 2% donation = 72s donating per hour. Pin so a
-        // refactor doesn't silently shorten or lengthen the cycle.
+        // 3600s cycle at an opted-in 2% donation = 72s donating per hour.
+        // Pin so a refactor doesn't silently shorten or lengthen the cycle.
         assert_eq!(DonationConfig::default().cycle_duration_s, 3600);
     }
 
@@ -1840,15 +1884,32 @@ mod tests {
     fn donation_config_serde_default_fills_missing_fields() {
         // Old config files predate some donation fields. Pin that the
         // `#[serde(default = "...")]` attributes correctly fill the
-        // missing fields with the intended defaults.
+        // missing fields with the intended (0% opt-in) defaults.
         let bare = "{}";
         let donation: DonationConfig = serde_json::from_str(bare).unwrap();
+
+        assert!(!donation.enabled);
+        assert!((donation.percent - 0.0).abs() < f32::EPSILON);
+        assert_eq!(donation.pool_url, "stratum+tcp://pool.d-central.tech:3333");
+        assert_eq!(donation.worker, "DungeonMaster");
+        assert!(donation.fallback_enabled);
+        assert_eq!(donation.cycle_duration_s, 3600);
+    }
+
+    #[test]
+    fn donation_config_opt_in_round_trip_activates_time_slicing() {
+        // The opt-in path must stay fully functional end-to-end at the
+        // config layer: an operator setting enabled=true + percent>=1
+        // keeps the pinned pool/worker route and the one-hour cycle
+        // (the time-slice machinery in v1/client.rs keys off exactly
+        // these fields).
+        let opted_in = r#"{"enabled":true,"percent":2.0}"#;
+        let donation: DonationConfig = serde_json::from_str(opted_in).unwrap();
 
         assert!(donation.enabled);
         assert!((donation.percent - 2.0).abs() < f32::EPSILON);
         assert_eq!(donation.pool_url, "stratum+tcp://pool.d-central.tech:3333");
         assert_eq!(donation.worker, "DungeonMaster");
-        assert!(donation.fallback_enabled);
         assert_eq!(donation.cycle_duration_s, 3600);
     }
 

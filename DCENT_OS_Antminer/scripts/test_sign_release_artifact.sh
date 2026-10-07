@@ -112,9 +112,9 @@ grep -Fq 'durable_input=True' "$SCRIPT_DIR/sign_release_artifact.py" ||
     fail_test "artifact signer does not request durable input"
 grep -Fq 'sign_release_artifact.py' "$SCRIPT_DIR/build_in_docker.sh" ||
     fail_test "AM3 tar path does not invoke the exact artifact signer"
-grep -Fq 'sign_release_artifact.py" "$PORTABLE_EVIDENCE_PATH"' \
-    "$SCRIPT_DIR/build_s9_release_capsule.sh" ||
-    fail_test "portable evidence path does not invoke the exact artifact signer"
+grep -Fq 'sign_release_artifact.py" "$RELEASE_SET_STAGE/producer-result.json"' \
+    "$SCRIPT_DIR/build_release_capsule.sh" ||
+    fail_test "canonical producer result does not invoke the exact artifact signer"
 grep -Fq 'sign_release_artifact.py' \
     "$SCRIPT_DIR/lib/sysupgrade_package_common.sh" ||
     fail_test "shared sysupgrade manifest path does not invoke the exact signer"
@@ -135,6 +135,40 @@ find "$SCRIPT_DIR/../br2_external_dcentos/board" -name post-image.sh \
     > "$TEST_ROOT/legacy-post-image-signers" || true
 if [ -s "$TEST_ROOT/legacy-post-image-signers" ]; then
     fail_test "board post-image path still contains a legacy direct signer"
+fi
+
+# Staged-tier wiring: capsule flow signatures must enter release-set stages
+# private on Windows (--staged-output); dropping the flag resurfaces the
+# drop1-20260917-g8duudz5 seal admission failure.
+capsule_flags=$(grep -c -- '--staged-output' "$SCRIPT_DIR/build_release_capsule.sh" || true)
+docker_flags=$(grep -c -- '--staged-output' "$SCRIPT_DIR/build_in_docker.sh" || true)
+[ "$capsule_flags" -ge 2 ] ||
+    fail_test "build_release_capsule.sh lost a staged-output signer site"
+[ "$docker_flags" -ge 1 ] ||
+    fail_test "build_in_docker.sh lost its staged-output signer site"
+
+STAGED_SIG="$TEST_ROOT/release.staged.sig"
+"$PYTHON" "$SCRIPT_DIR/sign_release_artifact.py" "$ARTIFACT" \
+    --key "$PRIVATE_KEY" --pubkey "$PUBLIC_KEY" \
+    --output-sig "$STAGED_SIG" --staged-output >/dev/null ||
+    fail_test "staged-output signing failed"
+"$PYTHON" "$SCRIPT_DIR/sign_release_artifact.py" "$ARTIFACT" \
+    --key "$PRIVATE_KEY" --pubkey "$PUBLIC_KEY" \
+    --output-sig "$STAGED_SIG" --staged-output >/dev/null ||
+    fail_test "staged-output idempotent retry failed"
+if [ "$("$PYTHON" -c 'import os; print(os.name)')" = nt ]; then
+    "$PYTHON" - "$SCRIPT_DIR" "$STAGED_SIG" <<'PY'
+import os
+from pathlib import Path
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import release_set_publication as release_io
+
+release_io.require_private_windows_acl(
+    Path(sys.argv[2]), "staged capsule signature", require_protected=False
+)
+PY
 fi
 
 echo "release artifact signing tests passed"

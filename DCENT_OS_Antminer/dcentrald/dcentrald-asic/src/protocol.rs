@@ -220,6 +220,13 @@ pub fn bm13xx_command_response_crc5(data: &[u8]) -> u8 {
     bm13xx_response_crc5_with_init(data, 0x03)
 }
 
+/// Seven-byte job-body CRC from the held FPGA contract, with init 0x1B.
+/// Do not apply to extended BM136x UART job bodies: those use full-body
+/// remainder zero, as pinned by held captures in s19k_bm1366_uart_rx.
+pub fn bm13xx_job_response_crc5(data: &[u8]) -> u8 {
+    bm13xx_response_crc5_with_init(data, 0x1b)
+}
+
 fn bm13xx_response_crc5_with_init(data: &[u8], init: u8) -> u8 {
     let mut crc = init & 0x1F;
     for &byte in data {

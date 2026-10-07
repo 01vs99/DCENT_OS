@@ -265,13 +265,11 @@ use dcentrald_silicon_profiles::hashboards::Hashboard;
 
 /// Is the EEPROM-authoritative PIC-vs-NoPic detection gate ON?
 ///
-/// `DCENT_AM2_EEPROM_PIC_DETECT=1` (or `=true`) enables it. Default OFF
-/// for first-deploy rollout, matching `strict_sku_refuse_enabled()` /
-/// `accept_degraded_hardware_enabled()`. The operator flips this on after
-/// confirming a known unit (`a lab unit`/`a lab unit` BHB42601, S19k Pro BHB56902)
-/// classifies as expected with no false NoPic/PIC override logged.
+/// Compiled lab builds can set `DCENT_AM2_EEPROM_PIC_DETECT=1` (or `=true`)
+/// to test this alternate controller resolver. Release builds retain the
+/// declared controller composition and its independent physical identity checks.
 pub fn eeprom_pic_detect_enabled() -> bool {
-    std::env::var("DCENT_AM2_EEPROM_PIC_DETECT")
+    dcentrald_common::lab_env::var("DCENT_AM2_EEPROM_PIC_DETECT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -1464,9 +1462,9 @@ mod tests {
     fn env_helper_recognizes_truthy_values() {
         let _guard = EEPROM_PIC_DETECT_ENV_LOCK.lock().unwrap();
         std::env::set_var("DCENT_AM2_EEPROM_PIC_DETECT", "1");
-        assert!(eeprom_pic_detect_enabled());
+        assert_eq!(eeprom_pic_detect_enabled(), dcentrald_common::lab_env::compiled());
         std::env::set_var("DCENT_AM2_EEPROM_PIC_DETECT", "true");
-        assert!(eeprom_pic_detect_enabled());
+        assert_eq!(eeprom_pic_detect_enabled(), dcentrald_common::lab_env::compiled());
         std::env::set_var("DCENT_AM2_EEPROM_PIC_DETECT", "0");
         assert!(!eeprom_pic_detect_enabled());
         std::env::remove_var("DCENT_AM2_EEPROM_PIC_DETECT");

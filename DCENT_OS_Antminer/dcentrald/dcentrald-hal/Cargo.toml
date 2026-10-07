@@ -6,12 +6,14 @@ description = "Hardware Abstraction Layer for dcentrald - UIO, I2C, GPIO, Fan, W
 license = "GPL-3.0"
 
 [features]
+# Hardware environment overrides; excluded from signed Beta/Stable builds.
+lab = ["dcentrald-common/lab", "dcentrald-silicon-profiles?/lab"]
 # Opt-in research/test escape hatch for diagnostic examples that need raw
 # `I2cBus::open` access outside `dcentrald-hal::platform`. No shipped binary,
 # including the diagnostic-only `pic-recovery` package, enables this feature.
 # The default HAL surface exposes only the `I2cServiceHandle` family. See W2.3
 # single-I2C-owner lockdown 2026-05-07.
-recovery-tool = ["dcentrald-common/recovery-tool"]
+recovery-tool = ["dcentrald-common/lab", "dcentrald-common/recovery-tool"]
 
 # Opt-in dev/debug ABI for the bitmain_axi.ko IOCTL surface
 # (`stock_fpga_axi_ioctl.rs`).
@@ -37,6 +39,7 @@ axi-ioctl-debug = []
 # This feature is intentionally absent from every default and firmware build
 # profile. Runtime use is guarded independently in `platform::sim`.
 sim-hal = [
+    "dcentrald-common/lab",
     "dep:dcentrald-silicon-profiles",
     "dcentrald-silicon-profiles/experimental_chips",
 ]

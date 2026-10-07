@@ -28,12 +28,13 @@ EXPECTED_COUNTS = {
     "bm1387": 12,
     "bm1393": 16,
     "chain": 18,
-    "drivers": 178,
+    "drivers": 181,
     "dspic": 156,
     "hw_err_tracker": 6,
     "pic": 12,
     "pic1704": 29,
     "protocol": 6,
+    "register_transaction": 6,
     "serial_chip_address": 6,
     "uart_trans": 15,
     "voltage_rail_adapters": 3,
@@ -76,7 +77,7 @@ class DcentraldAsicModuleRegistryTests(unittest.TestCase):
             {name: row["tests"] for name, row in self.modules.items()},
             EXPECTED_COUNTS,
         )
-        self.assertEqual(sum(EXPECTED_COUNTS.values()), 589)
+        self.assertEqual(sum(EXPECTED_COUNTS.values()), 598)
         self.assertEqual(
             self.registry["crate_root_test_prefixes"],
             [
@@ -84,9 +85,9 @@ class DcentraldAsicModuleRegistryTests(unittest.TestCase):
                 {"prefix": "process_environment_source_contract", "tests": 2},
             ],
         )
-        self.assertEqual(self.registry["module_scoped_tests"], 589)
+        self.assertEqual(self.registry["module_scoped_tests"], 598)
         self.assertEqual(self.registry["crate_root_tests"], 3)
-        self.assertEqual(self.registry["total_tests"], 592)
+        self.assertEqual(self.registry["total_tests"], 601)
 
     def test_source_retains_high_risk_non_authority_boundaries(self) -> None:
         sources = {

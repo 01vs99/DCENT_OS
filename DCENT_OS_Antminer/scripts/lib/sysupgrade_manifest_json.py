@@ -27,7 +27,26 @@ MAX_VERSION_BYTES = 128
 MAX_VERSION_PARTS = 16
 MAX_VERSION_PART_BYTES = 32
 PACKAGE_ONLY_DENIED_TARGETS = frozenset(
-    {"am3-s19xp", "am3-s19jxp", "am3-s21xp", "am3-t21"}
+    {
+        "am3-s19xp",
+        "am3-s19jxp",
+        "am3-s21xp",
+        "am3-t21",
+        # A126/bm1362-nopic and S19j Pro+ emit package_only_denied too
+        # (post-image-family: MTD writer incompatibility; no persistent
+        # writer authority) — reconciled with the emitters after producer
+        # run drop1-20260918-xtleogkg. am3-s19jpro-aml emits the same
+        # denied contract unconditionally (its post-image: boot selection
+        # and restore remain unimplemented).
+        "am3-s19jproa",
+        "am3-s19jproplus",
+        "am3-s19jpro-aml",
+        # The nopic lane's manifest identity is am3-s19kpro (its overlay,
+        # post-build and post-image all hard-pin that board_target) and
+        # its post-image denies in EVERY mode; the installable am3-s19k
+        # lane never consults this set (installable=true path).
+        "am3-s19kpro",
+    }
 )
 
 KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
@@ -37,6 +56,19 @@ VERSION_RE = re.compile(
     rf"v?({DECIMAL}\.{DECIMAL}(?:\.{DECIMAL})?)"
     rf"(?:-({IDENTIFIER}(?:\.{IDENTIFIER})*))?"
     rf"(?:\+({IDENTIFIER}(?:\.{IDENTIFIER})*))?\Z"
+)
+
+#: Admitted toolbox.install_mode values (the typed operator-route contract
+#: shared with scripts/lib/sysupgrade_package_common.sh
+#: dcent_require_toolbox_{install,update}_contract and the toolbox
+#: PackageManifest.toolbox_install_mode reader).
+INSTALL_MODES = frozenset(
+    {
+        "target_sysupgrade",
+        "host_driven_rootfs_window_lab",
+        "first_install_only",
+        "package_only_denied",
+    }
 )
 
 
@@ -189,6 +221,66 @@ def require_payload_binding(
             )
 
 
+def _toolbox_install_mode(manifest: dict[str, Any]) -> str | None:
+    """Return the typed toolbox.install_mode, or None when the field is absent.
+
+    Raises AdmissionError for a non-string, empty, or unadmitted mode value.
+    """
+
+    toolbox = manifest.get("toolbox")
+    if toolbox is None:
+        return None
+    if not isinstance(toolbox, dict):
+        return None
+    if "install_mode" not in toolbox:
+        return None
+    mode = toolbox.get("install_mode")
+    if not isinstance(mode, str) or mode != mode.strip() or not mode:
+        raise AdmissionError("toolbox.install_mode must be an exact non-empty string")
+    if mode not in INSTALL_MODES:
+        raise AdmissionError(
+            f"toolbox.install_mode {mode!r} is not an admitted route contract"
+        )
+    return mode
+
+
+def require_install_mode_contract(manifest: dict[str, Any]) -> str | None:
+    """Validate the typed operator-route contract carried by a manifest.
+
+    ``first_install_only`` (AM1-A Drop-1 route scoping; owner adjudication
+    AM1_S9_ROOTFS_WINDOW_ADJUDICATION Option A, ratified 2026-09-15) is an
+    INSTALLABLE package whose contract
+    explicitly DENIES the live-sysupgrade (self-update) route. The denial is
+    machine-checkable, not an omitted field: update_command must be JSON null
+    and install_command must remain the target-bound ``dcent install`` rail.
+    Returns the admitted mode string (or None when the toolbox block carries
+    no install_mode, which keeps legacy manifests inspectable).
+    """
+
+    mode = _toolbox_install_mode(manifest)
+    if mode != "first_install_only":
+        return mode
+
+    toolbox = manifest.get("toolbox")
+    if not isinstance(toolbox, dict):
+        raise AdmissionError("first_install_only contract requires a toolbox object")
+    update_command = toolbox.get("update_command")
+    if update_command is not None:
+        raise AdmissionError(
+            "first_install_only contract must not advertise an update_command "
+            "(self-update is explicitly denied)"
+        )
+    install_command = toolbox.get("install_command")
+    if not isinstance(install_command, str) or not install_command.startswith(
+        "dcent install <ip> -f "
+    ):
+        raise AdmissionError(
+            "first_install_only contract requires a target-bound "
+            "'dcent install <ip> -f ' install_command"
+        )
+    return mode
+
+
 def require_package_authority(
     manifest: dict[str, Any], expected_board: str
 ) -> None:
@@ -216,6 +308,9 @@ def require_package_authority(
             raise AdmissionError(
                 "installable=true contradicts toolbox.install_mode=package_only_denied"
             )
+        # Typed route contract (first_install_only carries an explicit
+        # self-update denial that every update consumer must refuse).
+        require_install_mode_contract(manifest)
         return
 
     if expected_board not in PACKAGE_ONLY_DENIED_TARGETS:
@@ -379,6 +474,8 @@ def main(argv: list[str] | None = None) -> int:
     authority_parser = subparsers.add_parser("verify-package-authority")
     authority_parser.add_argument("manifest", type=Path)
     authority_parser.add_argument("expected_board")
+    mode_parser = subparsers.add_parser("query-install-mode")
+    mode_parser.add_argument("manifest", type=Path)
     args = parser.parse_args(argv)
     try:
         if args.command == "validate":
@@ -395,6 +492,12 @@ def main(argv: list[str] | None = None) -> int:
                 args.expected_size,
                 args.expected_sha256,
             )
+        elif args.command == "query-install-mode":
+            # Typed route-contract query for shell gates (host pre-flash and
+            # packagers). Prints the admitted install_mode, or "absent" when
+            # the toolbox block carries none (legacy manifests).
+            mode = require_install_mode_contract(admit_manifest(args.manifest))
+            print(mode if mode is not None else "absent")
         else:
             require_package_authority(
                 admit_manifest(args.manifest),

@@ -74,4 +74,7 @@ enabled = false
 enabled = false
 
 [autotuner]
+# Autotune default-ON (operator decision 2026-09-01) applies to shipped
+# /etc/dcentrald.toml. This MANAGEMENT-ONLY image keeps it disabled:
+# mining is disabled here, so the tuner has nothing to tune.
 enabled = false

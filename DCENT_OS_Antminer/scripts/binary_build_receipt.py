@@ -72,7 +72,7 @@ BUILD_ENV_KEYS = (
     "DCENT_MANIFEST_PUBLIC_KEY_HEX",
     "DCENT_MANIFEST_KEY_ID",
 )
-RELEASE_STATUSES = {"release", "production", "stable"}
+RELEASE_STATUSES = {"release", "production", "beta", "stable"}
 V4_RECEIPT_KEYS = {
     "binary",
     "build_inputs",
@@ -116,7 +116,7 @@ _AFTER_EXPORT_VERIFY_HOOK: Callable[[], None] | None = None
 def lexical_absolute(path: Path) -> Path:
     """Return an absolute lexical path without dereferencing symlinks."""
 
-    return Path(os.path.abspath(os.fspath(path)))
+    return Path(os.path.abspath(host_path_text(os.fspath(path))))
 
 
 def _is_windows_reparse(status: os.stat_result) -> bool:
@@ -1802,6 +1802,49 @@ def check_override_policy(args: argparse.Namespace) -> None:
     )
 
 
+def host_path_text(value: str) -> str:
+    """Rewrite Git-Bash (MSYS) drive paths (/d/dir) and long-path prefixes.
+
+    MSYS automatic argument conversion is per-argument and inconsistent on
+    long release command lines (producer runs drop1-20260916-cyg3sjwi and
+    drop1-20260917-gnscaudk; the same fix landed in rust_dependency_inventory
+    commit b1ae659fa and source_closure commit 4fd3d8b0e). Receipt/export
+    arguments include repeated ``--binary`` and ``--pair`` values on the
+    longest command lines in the pipeline, so every Path-typed option is
+    normalized in the type converter at the parse layer. Receipt-internal
+    relative selectors (``--source-workspace``, ``--source-path``,
+    ``--binary-name``) are deliberately plain strings and stay untouched.
+    POSIX and native inputs are returned unchanged; on non-Windows hosts
+    this is the identity.
+    """
+    if os.name != "nt" or not isinstance(value, str):
+        return value
+    text = value
+    if text.startswith("\\\\?\\UNC\\"):
+        text = "\\\\" + text[8:]
+    elif text.startswith("//?/UNC/"):
+        text = "//" + text[8:]
+    else:
+        for prefix in ("\\\\?\\", "//?/"):
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+                break
+    if (
+        len(text) >= 2
+        and text[0] == "/"
+        and text[1].isascii()
+        and text[1].isalpha()
+        and (len(text) == 2 or text[2] == "/")
+    ):
+        return text[1].upper() + ":/" + text[3:]
+    return text
+
+
+def host_path(path_text: str) -> Path:
+    """argparse Path type normalized through host_path_text."""
+    return Path(host_path_text(path_text))
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     subparsers = result.add_subparsers(dest="command", required=True)
@@ -1809,13 +1852,13 @@ def parser() -> argparse.ArgumentParser:
     def add_snapshot_context(sub: argparse.ArgumentParser) -> None:
         sub.add_argument(
             "--git-object-repo",
-            type=Path,
+            type=host_path,
             required=True,
             help="trusted repository used only to authenticate exact Git objects",
         )
         sub.add_argument(
             "--source-snapshot",
-            type=Path,
+            type=host_path,
             required=True,
             help="source-snapshot.json in a verified immutable snapshot stage",
         )
@@ -1831,45 +1874,45 @@ def parser() -> argparse.ArgumentParser:
         )
         sub.add_argument(
             "--release-invocation",
-            type=Path,
+            type=host_path,
             required=True,
             help="verified release invocation control stage",
         )
         sub.add_argument(
             "--result-root",
-            type=Path,
+            type=host_path,
             required=True,
             help="invocation-private root containing evidence and built binaries",
         )
         sub.add_argument(
             "--build-input-snapshot",
-            type=Path,
+            type=host_path,
             required=True,
             help="active cargo-workspace v2 external-input snapshot descriptor",
         )
         sub.add_argument("--target", required=True)
         sub.add_argument("--profile", required=True)
         sub.add_argument("--build-variant", required=True)
-        sub.add_argument("--metadata", type=Path, required=True)
-        sub.add_argument("--toolchain-context", type=Path, required=True)
-        sub.add_argument("--compile-environment", type=Path, required=True)
+        sub.add_argument("--metadata", type=host_path, required=True)
+        sub.add_argument("--toolchain-context", type=host_path, required=True)
+        sub.add_argument("--compile-environment", type=host_path, required=True)
 
     for command in ("create", "verify"):
         sub = subparsers.add_parser(command)
         add_snapshot_context(sub)
-        sub.add_argument("--binary", action="append", type=Path, required=True)
+        sub.add_argument("--binary", action="append", type=host_path, required=True)
     inspect = subparsers.add_parser(
         "inspect-receipt",
         help="verify canonical v3/v4 receipt evidence without admitting it to a new release",
     )
-    inspect.add_argument("--receipt", type=Path, required=True)
-    inspect.add_argument("--binary", type=Path)
+    inspect.add_argument("--receipt", type=host_path, required=True)
+    inspect.add_argument("--binary", type=host_path)
     export = subparsers.add_parser(
         "export-snapshot-set",
         help="capture verified binary/receipt pairs in an atomic private stage",
     )
     add_snapshot_context(export)
-    export.add_argument("--stage-parent", type=Path, required=True)
+    export.add_argument("--stage-parent", type=host_path, required=True)
     export.add_argument(
         "--require-immutable-builder",
         action="store_true",
@@ -1879,7 +1922,7 @@ def parser() -> argparse.ArgumentParser:
         "--pair",
         action="append",
         nargs=2,
-        type=Path,
+        type=host_path,
         metavar=("BINARY", "RECEIPT"),
         required=True,
         help="exact binary and matching receipt pair; repeat for the full set",
@@ -1888,18 +1931,18 @@ def parser() -> argparse.ArgumentParser:
         "verify-export-snapshot-set", help="verify a detached private export stage"
     )
     verify_stage.add_argument(
-        "--stage", type=Path, required=True, help="private stage path"
+        "--stage", type=host_path, required=True, help="private stage path"
     )
     destroy_stage = subparsers.add_parser(
         "destroy-export-snapshot-set",
         help="destroy only a capability-bound, fully verified private export stage",
     )
     destroy_stage.add_argument(
-        "--stage", type=Path, required=True, help="private stage path"
+        "--stage", type=host_path, required=True, help="private stage path"
     )
     destroy_stage.add_argument(
         "--capability",
-        type=Path,
+        type=host_path,
         required=True,
         help="out-of-stage destruction capability returned by the path query",
     )
@@ -1908,14 +1951,14 @@ def parser() -> argparse.ArgumentParser:
         help="print the deterministic out-of-stage capability path",
     )
     capability_query.add_argument(
-        "--stage", type=Path, required=True, help="private stage path"
+        "--stage", type=host_path, required=True, help="private stage path"
     )
     path_query = subparsers.add_parser(
         "query-export-snapshot-path",
         help="fully verify a stage and print one canonical relative artifact path",
     )
     path_query.add_argument(
-        "--stage", type=Path, required=True, help="private stage path"
+        "--stage", type=host_path, required=True, help="private stage path"
     )
     selector = path_query.add_mutually_exclusive_group(required=True)
     selector.add_argument(
@@ -1940,8 +1983,8 @@ def parser() -> argparse.ArgumentParser:
         "retain-export-snapshot-set",
         help="copy every verified export pair to release-scoped flat sidecars",
     )
-    retain_stage.add_argument("--stage", type=Path, required=True)
-    retain_stage.add_argument("--output-dir", type=Path, required=True)
+    retain_stage.add_argument("--stage", type=host_path, required=True)
+    retain_stage.add_argument("--output-dir", type=host_path, required=True)
     retain_stage.add_argument(
         "--artifact-prefix",
         required=True,

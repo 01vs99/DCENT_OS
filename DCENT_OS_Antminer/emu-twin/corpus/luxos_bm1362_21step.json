@@ -1,0 +1,282 @@
+{
+ "_provenance": {
+  "doc": "LuxOS 21-step BM1362 silicon-characterization profile table (Step -16..+4), digitized",
+  "label": "[LUXOS-proprietary, captured from own .79 unit running LuxOS]",
+  "capture_date": "2026-04-29 (live capture session); digitized 2026-10-05",
+  "source_path": " (sections 1.1-1.4)",
+  "upstream_captures": "captures/08-cgminer-api.txt (cgminer-API 'profiles' output, truncated mid-table) + operator-confirmed anchors",
+  "unit_hardware": {
+   "miner": "Antminer S19j Pro (nameplate 104 TH/s, 3068 W)",
+   "asic": "BM1362",
+   "hashboard": "BHB42601",
+   "chips_per_board": 126,
+   "boards": 3,
+   "voltage_rail": "single-rail (IsSingleVoltage=true), dsPIC-mediated, DAC granularity ~0.03 V",
+   "firmware": "LUXminer 2026.4.3.192353-6ab4e5077 (compiled 2026-04-03)"
+  },
+  "units": {
+   "freq_mhz": "chain frequency, identical across chains (combine mode)",
+   "voltage_v": "chain voltage target (V)",
+   "wall_watts_ac": "AC wall power, all 3 boards summed, PSU losses included (~12%)",
+   "hashrate_ths": "expected nameplate hashrate, all boards summed",
+   "efficiency_j_per_th_wall": "computed = wall_watts_ac / hashrate_ths"
+  },
+  "caveats": [
+   "Steps -4..-1 and +1..+4 are RECONSTRUCTED by linear cadence (+25 MHz, +0.150 V per step; watts/hashrate extrapolated) proven from the 12 live-verbatim rows; they MUST be re-verified against a full 21-line 'profiles' capture (captured run was truncated mid-output)",
+   "Step +4 voltage may saturate at the APW PSU 14.5 V ceiling rather than 14.400 V \u2014 unverified",
+   "dsPIC voltage controller resolves only ~0.03 V: table values are targets, not achievable absolutes (live log: requested=13.81 got=13.84)",
+   "single-unit single-silicon sample: these are BOUNDS/sanity oracles for the emulation twin and autotuner convergence tests, not law and not a per-bin guarantee",
+   "watts are AC-side: do not mix with DC-side (silicon) J/TH (~25 J/TH at Step 0 after PSU losses)"
+  ]
+ },
+ "oracle_class_banner": "ORACLE-CLASS-ONLY (plan.md 11 C2-F2): measured-anchor := measured by DCENT_OS instrumentation on DCENT_OS-controlled hardware. This vendor capture is an emulation-twin golden target / sanity bound and MUST NEVER be shipped as a DCENT_OS default profile.",
+ "table_schedule": {
+  "step_range": [
+   -16,
+   4
+  ],
+  "n_steps": 21,
+  "freq_cadence_mhz_per_step": 25,
+  "voltage_cadence_v_per_step": 0.15,
+  "voltage_floor_v": {
+   "value": 11.88,
+   "applies_to_steps": "<= -13 (four lowest steps clamp)"
+  },
+  "default_step": 0,
+  "special_names": "Step 0 profile_name='default' (word); all other steps named '<Freq>MHz' (pyasic-compat convention)"
+ },
+ "steps": [
+  {
+   "step": -16,
+   "profile_name": "145MHz",
+   "freq_mhz": 145,
+   "voltage_v": 11.88,
+   "wall_watts_ac": 997,
+   "hashrate_ths": 28.1,
+   "efficiency_j_per_th_wall": 35.48,
+   "row_provenance": "live-verbatim"
+  },
+  {
+   "step": -15,
+   "profile_name": "170MHz",
+   "freq_mhz": 170,
+   "voltage_v": 11.88,
+   "wall_watts_ac": 1079,
+   "hashrate_ths": 33.0,
+   "efficiency_j_per_th_wall": 32.7,
+   "row_provenance": "live-verbatim"
+  },
+  {
+   "step": -14,
+   "profile_name": "195MHz",
+   "freq_mhz": 195,
+   "voltage_v": 11.88,
+   "wall_watts_ac": 1162,
+   "hashrate_ths": 37.8,
+   "efficiency_j_per_th_wall": 30.74,
+   "row_provenance": "live-verbatim"
+  },
+  {
+   "step": -13,
+   "profile_name": "220MHz",
+   "freq_mhz": 220,
+   "voltage_v": 11.88,
+   "wall_watts_ac": 1244,
+   "hashrate_ths": 42.7,
+   "efficiency_j_per_th_wall": 29.13,
+   "row_provenance": "live-verbatim"
+  },
+  {
+   "step": -12,
+   "profile_name": "245MHz",
+   "freq_mhz": 245,
+   "voltage_v": 12.0,
+   "wall_watts_ac": 1349,
+   "hashrate_ths": 47.6,
+   "efficiency_j_per_th_wall": 28.34,
+   "row_provenance": "live-verbatim"
+  },
+  {
+   "step": -11,
+   "profile_name": "270MHz",
+   "freq_mhz": 270,
+   "voltage_v": 12.15,
+   "wall_watts_ac": 1466,
+   "hashrate_ths": 52.4,
+   "efficiency_j_per_th_wall": 27.98,
+   "row_provenance": "live-verbatim"
+  },
+  {
+   "step": -10,
+   "profile_name": "295MHz",
+   "freq_mhz": 295,
+   "voltage_v": 12.3,
+   "wall_watts_ac": 1588,
+   "hashrate_ths": 57.3,
+   "efficiency_j_per_th_wall": 27.71,
+   "row_provenance": "live-verbatim"
+  },
+  {
+   "step": -9,
+   "profile_name": "320MHz",
+   "freq_mhz": 320,
+   "voltage_v": 12.45,
+   "wall_watts_ac": 1714,
+   "hashrate_ths": 62.1,
+   "efficiency_j_per_th_wall": 27.6,
+   "row_provenance": "live-verbatim"
+  },
+  {
+   "step": -8,
+   "profile_name": "345MHz",
+   "freq_mhz": 345,
+   "voltage_v": 12.6,
+   "wall_watts_ac": 1852,
+   "hashrate_ths": 67.0,
+   "efficiency_j_per_th_wall": 27.64,
+   "row_provenance": "live-verbatim"
+  },
+  {
+   "step": -7,
+   "profile_name": "370MHz",
+   "freq_mhz": 370,
+   "voltage_v": 12.75,
+   "wall_watts_ac": 1994,
+   "hashrate_ths": 71.8,
+   "efficiency_j_per_th_wall": 27.77,
+   "row_provenance": "live-verbatim"
+  },
+  {
+   "step": -6,
+   "profile_name": "395MHz",
+   "freq_mhz": 395,
+   "voltage_v": 12.9,
+   "wall_watts_ac": 2142,
+   "hashrate_ths": 76.7,
+   "efficiency_j_per_th_wall": 27.93,
+   "row_provenance": "live-verbatim"
+  },
+  {
+   "step": -5,
+   "profile_name": "420MHz",
+   "freq_mhz": 420,
+   "voltage_v": 13.05,
+   "wall_watts_ac": 2297,
+   "hashrate_ths": 81.6,
+   "efficiency_j_per_th_wall": 28.15,
+   "row_provenance": "live-verbatim"
+  },
+  {
+   "step": -4,
+   "profile_name": "445MHz",
+   "freq_mhz": 445,
+   "voltage_v": 13.2,
+   "wall_watts_ac": 2459,
+   "hashrate_ths": 86.5,
+   "efficiency_j_per_th_wall": 28.43,
+   "row_provenance": "reconstructed-linear-cadence"
+  },
+  {
+   "step": -3,
+   "profile_name": "470MHz",
+   "freq_mhz": 470,
+   "voltage_v": 13.35,
+   "wall_watts_ac": 2627,
+   "hashrate_ths": 91.4,
+   "efficiency_j_per_th_wall": 28.74,
+   "row_provenance": "reconstructed-linear-cadence"
+  },
+  {
+   "step": -2,
+   "profile_name": "495MHz",
+   "freq_mhz": 495,
+   "voltage_v": 13.5,
+   "wall_watts_ac": 2802,
+   "hashrate_ths": 96.2,
+   "efficiency_j_per_th_wall": 29.13,
+   "row_provenance": "reconstructed-linear-cadence"
+  },
+  {
+   "step": -1,
+   "profile_name": "520MHz",
+   "freq_mhz": 520,
+   "voltage_v": 13.65,
+   "wall_watts_ac": 2960,
+   "hashrate_ths": 101.0,
+   "efficiency_j_per_th_wall": 29.31,
+   "row_provenance": "reconstructed-linear-cadence"
+  },
+  {
+   "step": 0,
+   "profile_name": "default",
+   "freq_mhz": 545,
+   "voltage_v": 13.8,
+   "wall_watts_ac": 3126,
+   "hashrate_ths": 105.8,
+   "efficiency_j_per_th_wall": 29.55,
+   "row_provenance": "live-operator-anchor"
+  },
+  {
+   "step": 1,
+   "profile_name": "570MHz",
+   "freq_mhz": 570,
+   "voltage_v": 13.95,
+   "wall_watts_ac": 3296,
+   "hashrate_ths": 110.6,
+   "efficiency_j_per_th_wall": 29.8,
+   "row_provenance": "reconstructed-linear-cadence"
+  },
+  {
+   "step": 2,
+   "profile_name": "595MHz",
+   "freq_mhz": 595,
+   "voltage_v": 14.1,
+   "wall_watts_ac": 3470,
+   "hashrate_ths": 115.4,
+   "efficiency_j_per_th_wall": 30.07,
+   "row_provenance": "reconstructed-linear-cadence"
+  },
+  {
+   "step": 3,
+   "profile_name": "620MHz",
+   "freq_mhz": 620,
+   "voltage_v": 14.25,
+   "wall_watts_ac": 3648,
+   "hashrate_ths": 120.2,
+   "efficiency_j_per_th_wall": 30.35,
+   "row_provenance": "reconstructed-linear-cadence"
+  },
+  {
+   "step": 4,
+   "profile_name": "645MHz",
+   "freq_mhz": 645,
+   "voltage_v": 14.4,
+   "wall_watts_ac": 3830,
+   "hashrate_ths": 125.0,
+   "efficiency_j_per_th_wall": 30.64,
+   "row_provenance": "reconstructed-linear-cadence"
+  }
+ ],
+ "efficiency_basin": {
+  "sweet_spot": {
+   "step": -9,
+   "freq_mhz": 320,
+   "voltage_v": 12.45,
+   "wall_watts_ac": 1714,
+   "hashrate_ths": 62.1,
+   "j_per_th": 27.6
+  },
+  "basin_steps": [
+   -11,
+   -10,
+   -9,
+   -8,
+   -7
+  ],
+  "sweet_spot_gain_vs_nameplate_pct": 6.6
+ },
+ "consumption_notes": {
+  "twin_use": "expected-power/TH curve oracle for BM1362 emulation; convergence bound: autotuner at Step 0 should not exceed ~29.55 J/TH wall; heater-mode target ~27.6-27.8 J/TH basin",
+  "gating": "per C2-F2 this fixture may back TEST oracles and DISPLAYED vendor-comparison references only; shipped defaults require DCENT_OS-measured anchors"
+ }
+}

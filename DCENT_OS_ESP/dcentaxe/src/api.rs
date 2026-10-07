@@ -2263,6 +2263,16 @@ fn register_system_config(server: &mut EspHttpServer, state: SharedState) {
             "manualFanSpeed": config.fan_speed_pct,
             "minFanSpeed": 20,
             "temptarget": config.fan_target_temp_c,
+            // XPSAFE-8: which fan headers the operator declares populated, and
+            // how many. Read surface for the dashboard so a single-fan unit can
+            // show WHY only one tach is reported instead of looking like a
+            // dead fan. Values: both | fan1_only | fan2_only.
+            "fansPopulated": match config.fans_populated {
+                dcentaxe_hal::board::FanPopulation::Both => "both",
+                dcentaxe_hal::board::FanPopulation::Fan1Only => "fan1_only",
+                dcentaxe_hal::board::FanPopulation::Fan2Only => "fan2_only",
+            },
+            "fansPopulatedCount": config.fans_populated.count(),
 
             // Display
             "overheat_mode": 0,
@@ -2799,6 +2809,43 @@ fn apply_config_updates(state: &SharedState, body: &[u8]) -> Result<(), String> 
                 config.display_inverted, new_val
             );
             config.display_inverted = new_val;
+        }
+
+        // ---- XPSAFE-8: declared fan population (dual-fan boards) ----
+        // Operator states which fan headers are physically populated. This does
+        // NOT relax the mandatory-tach requirement — it scopes which fans the
+        // proof is demanded from, so a unit legitimately running one fan is not
+        // blocked forever by an empty header. Unknown values are REFUSED rather
+        // than silently defaulting: quietly falling back to `Both` would leave
+        // the operator believing a declaration was saved while the board stayed
+        // blocked, and quietly falling back to a single fan would be worse.
+        if let Some(v) = updates
+            .get("fansPopulated")
+            .or_else(|| updates.get("fans_populated"))
+            .and_then(|v| v.as_str())
+        {
+            use dcentaxe_hal::board::FanPopulation;
+            let parsed = match v.trim().to_ascii_lowercase().as_str() {
+                "both" => Some(FanPopulation::Both),
+                "fan1_only" | "fan1only" | "fan1" => Some(FanPopulation::Fan1Only),
+                "fan2_only" | "fan2only" | "fan2" => Some(FanPopulation::Fan2Only),
+                _ => None,
+            };
+            match parsed {
+                Some(p) => {
+                    info!(
+                        "API: fans_populated {:?} -> {:?} (takes effect on next boot; the tach \
+                         gate still requires proof from every declared fan)",
+                        config.fans_populated, p
+                    );
+                    config.fans_populated = p;
+                }
+                None => {
+                    warn!("API: rejected unknown fansPopulated value '{}'", v);
+                    return Err(("invalid fansPopulated (expected both|fan1_only|fan2_only)")
+                        .to_string());
+                }
+            }
         }
 
         // ---- Overclock ----

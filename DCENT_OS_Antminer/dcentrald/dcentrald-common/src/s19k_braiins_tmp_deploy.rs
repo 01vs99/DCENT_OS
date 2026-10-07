@@ -1081,6 +1081,312 @@ pub fn admit_s19k_tmp_deploy_script_musl_static(script: &str) -> Result<(), &'st
 /// backup while leaving the persistent mutation behind. Both environment
 /// guards are required independently so the daemon disables persistence and
 /// performs checked reset-before-power-cut on every terminal path.
+/// Trial-root prefix of every ephemeral Track-1 trial directory.
+pub const S19K_EPHEMERAL_TRIAL_PREFIX: &str = "/tmp/dcentrald_bench_t1_";
+/// Global custody lock directory (`owner` is its only admitted journal).
+pub const S19K_GLOBAL_RUNTIME_LOCK_DIR: &str = "/tmp/dcent-s19k-track1-runtime-lock";
+/// Basename of the global custody owner record.
+pub const S19K_GLOBAL_RUNTIME_LOCK_OWNER: &str = "owner";
+/// Trial-relative directory holding the runner's endurance acknowledgements.
+pub const S19K_ENDURANCE_ACK_SUBDIR: &str = "endurance_evidence/acks";
+/// Scratch prefix of an endurance acknowledgement before publication.
+pub const S19K_ENDURANCE_ACK_SCRATCH_PREFIX: &str = ".ack.";
+
+/// Trial-relative journal basenames the daemon's `publisher-v1` bootstrap may
+/// no-clobber hard-link.
+///
+/// This is the single admission set: `dcentrald`'s
+/// `s19k_publish_ephemeral_journal_from_cli` classifies every destination with
+/// [`classify_s19k_ephemeral_journal_destination`], and
+/// [`admit_s19k_tmp_remote_runner_ephemeral`] resolves every
+/// `publish_no_clobber_journal*` destination in the runner against the same
+/// set. The two sides drifted once (2026-09-01 live bounded-work proof on
+/// `a lab unit`): the runner published five post-SafeOff receipt names the sealed
+/// daemon had never admitted, so every transcript seal failed with
+/// `S19k journal destination is not an admitted startup authority path` while
+/// the offline fake daemon linked anything. Add a runner destination here and
+/// the daemon admits it; forget to, and the runner contract fails at host-test
+/// time instead of on the bench.
+pub const S19K_EPHEMERAL_JOURNAL_TRIAL_DESTINATIONS: &[&str] = &[
+    "runtime_startup_c1_child_identity",
+    "runtime_startup_j2_child_bound",
+    "runtime_startup_release",
+    "runtime_startup_retired_terminal",
+    "runtime_startup_retire_cleanup_commit",
+    "runtime_startup_prefix_pre_safeoff",
+    "runtime_safeoff_terminal_receipt",
+    "runtime_install_custody_transcript",
+    "runtime_handoff_no_work_transcript",
+    "runtime_bounded_work_transcript",
+    "runtime_endurance_work_receipt",
+    "runtime_endurance_failure_receipt",
+];
+
+/// Which admitted publication form a `publisher-v1` request takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S19kEphemeralJournalDestination {
+    /// `<trial>/<name>` with `<name>` in [`S19K_EPHEMERAL_JOURNAL_TRIAL_DESTINATIONS`].
+    TrialJournal,
+    /// `<trial>/endurance_evidence/acks/ack.NNNNNN.kv` from a `.ack.*` scratch in that directory.
+    EnduranceAck,
+    /// `/tmp/dcent-s19k-track1-runtime-lock/owner` from a trial-root scratch.
+    GlobalOwner,
+}
+
+pub const S19K_EPHEMERAL_JOURNAL_REFUSAL: &str =
+    "S19k journal destination is not an admitted startup authority path";
+
+fn s19k_split_journal_path(path: &str) -> Result<(&str, &str), &'static str> {
+    if !path.starts_with('/') || path.ends_with('/') || path.contains("//") {
+        return Err("S19k journal source/destination must be absolute normalized paths");
+    }
+    let (parent, name) = path
+        .rsplit_once('/')
+        .ok_or("S19k journal path has no parent")?;
+    if name.is_empty() || name == "." || name == ".." || parent.is_empty() {
+        return Err("S19k journal path has no admissible basename");
+    }
+    if path
+        .split('/')
+        .skip(1)
+        .any(|component| component == "." || component == "..")
+    {
+        return Err("S19k journal path must not contain dot components");
+    }
+    Ok((parent, name))
+}
+
+fn s19k_trial_suffix_is_safe(suffix: &str) -> bool {
+    !suffix.is_empty()
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+/// Trial root of a publication parent: either the trial directory itself or
+/// its `endurance_evidence/acks` subdirectory. Returns `(root, in_ack_dir)`.
+fn s19k_journal_parent_kind(parent: &str) -> Result<(&str, bool), &'static str> {
+    let suffix = parent
+        .strip_prefix(S19K_EPHEMERAL_TRIAL_PREFIX)
+        .ok_or("S19k ephemeral publication is outside the trial namespace")?;
+    let ack_tail = format!("/{S19K_ENDURANCE_ACK_SUBDIR}");
+    if let Some(trial) = suffix.strip_suffix(ack_tail.as_str()) {
+        if s19k_trial_suffix_is_safe(trial) {
+            let root_len = S19K_EPHEMERAL_TRIAL_PREFIX.len() + trial.len();
+            return Ok((&parent[..root_len], true));
+        }
+        return Err("S19k ephemeral publication trial suffix is unsafe");
+    }
+    if s19k_trial_suffix_is_safe(suffix) {
+        return Ok((parent, false));
+    }
+    Err("S19k ephemeral publication trial suffix is unsafe")
+}
+
+fn s19k_endurance_ack_name_is_exact(name: &str) -> bool {
+    name.strip_prefix("ack.")
+        .and_then(|rest| rest.strip_suffix(".kv"))
+        .map(|digits| digits.len() >= 6 && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .unwrap_or(false)
+}
+
+/// Pure admission of a `publisher-v1` request. Path strings only; the caller
+/// still proves ownership/mode/inode facts on the filesystem.
+pub fn classify_s19k_ephemeral_journal_destination(
+    source: &str,
+    destination: &str,
+) -> Result<S19kEphemeralJournalDestination, &'static str> {
+    let (source_parent, source_name) = s19k_split_journal_path(source)?;
+    let (destination_parent, destination_name) = s19k_split_journal_path(destination)?;
+    let (_trial_root, source_in_ack_dir) = s19k_journal_parent_kind(source_parent)?;
+    if destination_parent == S19K_GLOBAL_RUNTIME_LOCK_DIR {
+        if !source_in_ack_dir && destination_name == S19K_GLOBAL_RUNTIME_LOCK_OWNER {
+            return Ok(S19kEphemeralJournalDestination::GlobalOwner);
+        }
+        return Err(S19K_EPHEMERAL_JOURNAL_REFUSAL);
+    }
+    if destination_parent != source_parent {
+        return Err(S19K_EPHEMERAL_JOURNAL_REFUSAL);
+    }
+    if source_in_ack_dir {
+        if source_name.starts_with(S19K_ENDURANCE_ACK_SCRATCH_PREFIX)
+            && s19k_endurance_ack_name_is_exact(destination_name)
+        {
+            return Ok(S19kEphemeralJournalDestination::EnduranceAck);
+        }
+        return Err(S19K_EPHEMERAL_JOURNAL_REFUSAL);
+    }
+    if S19K_EPHEMERAL_JOURNAL_TRIAL_DESTINATIONS.contains(&destination_name) {
+        return Ok(S19kEphemeralJournalDestination::TrialJournal);
+    }
+    Err(S19K_EPHEMERAL_JOURNAL_REFUSAL)
+}
+
+/// Every `(source_var, destination_var)` pair the runner hands to its journal
+/// publisher, in script order. Only call sites are collected; the wrapper's
+/// own `JOURNAL_SOURCE`/`JOURNAL_DESTINATION` delegation is excluded and must
+/// occur exactly once.
+pub fn s19k_runner_journal_publications(
+    script: &str,
+) -> Result<Vec<(String, String)>, &'static str> {
+    let mut publications = Vec::new();
+    let mut delegations = 0usize;
+    for line in script.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let rest =
+            if let Some(rest) = trimmed.strip_prefix("publish_no_clobber_journal_keep_source ") {
+                rest
+            } else if let Some(rest) = trimmed.strip_prefix("publish_no_clobber_journal ") {
+                rest
+            } else {
+                continue;
+            };
+        let mut vars = Vec::new();
+        let mut cursor = rest;
+        for _ in 0..2 {
+            let after_open = cursor
+                .strip_prefix("\"$")
+                .ok_or("Track-1 journal publication must pass two \"$VAR\" arguments")?;
+            let close = after_open
+                .find('"')
+                .ok_or("Track-1 journal publication argument is unterminated")?;
+            let var = &after_open[..close];
+            if var.is_empty()
+                || !var
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte == b'_' || byte.is_ascii_digit())
+            {
+                return Err("Track-1 journal publication must name plain shell variables");
+            }
+            vars.push(var.to_string());
+            cursor = after_open[close + 1..].trim_start();
+        }
+        if vars[0] == "JOURNAL_SOURCE" && vars[1] == "JOURNAL_DESTINATION" {
+            delegations += 1;
+            continue;
+        }
+        publications.push((vars[0].clone(), vars[1].clone()));
+    }
+    if delegations != 1 {
+        return Err(
+            "Track-1 runner must delegate exactly once from publish_no_clobber_journal to its keep-source form",
+        );
+    }
+    if publications.is_empty() {
+        return Err("Track-1 runner publishes no journals");
+    }
+    Ok(publications)
+}
+
+/// Every non-empty `VAR=...` assignment of a runner variable, in script
+/// order. Bare `VAR=` initialisers are ignored.
+fn s19k_runner_assignments<'a>(script: &'a str, var: &str) -> Vec<&'a str> {
+    let prefix = format!("{var}=");
+    script
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix(prefix.as_str()))
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+/// The single admitted assignment of a runner variable: at least one
+/// non-empty assignment, all identical.
+fn s19k_runner_assignment<'a>(script: &'a str, var: &str) -> Option<&'a str> {
+    let assignments = s19k_runner_assignments(script, var);
+    let first = *assignments.first()?;
+    assignments
+        .iter()
+        .all(|assignment| *assignment == first)
+        .then_some(first)
+}
+
+fn s19k_runner_assignments_start_with(script: &str, var: &str, prefix: &str) -> bool {
+    let assignments = s19k_runner_assignments(script, var);
+    !assignments.is_empty()
+        && assignments
+            .iter()
+            .all(|assignment| assignment.starts_with(prefix))
+}
+
+/// Resolve each runner journal destination variable to its admitted form and
+/// return the trial basenames the runner publishes, in script order.
+pub fn admit_s19k_runner_journal_destinations(script: &str) -> Result<Vec<String>, &'static str> {
+    let mut names = Vec::new();
+    let lock_dir = s19k_runner_assignment(script, "RUNTIME_LOCK")
+        .ok_or("Track-1 runner must define RUNTIME_LOCK")?;
+    if lock_dir != S19K_GLOBAL_RUNTIME_LOCK_DIR {
+        return Err(
+            "Track-1 runner RUNTIME_LOCK must be the daemon's admitted global lock directory",
+        );
+    }
+    for (source_var, destination_var) in s19k_runner_journal_publications(script)? {
+        if s19k_runner_assignments(script, &source_var).is_empty() {
+            return Err("Track-1 journal publication source variable is never assigned");
+        }
+        match destination_var.as_str() {
+            "RUNTIME_LOCK_OWNER" => {
+                if s19k_runner_assignment(script, "RUNTIME_LOCK_OWNER")
+                    != Some("\"$RUNTIME_LOCK/owner\"")
+                {
+                    return Err(
+                        "Track-1 runner RUNTIME_LOCK_OWNER must be the global lock owner record",
+                    );
+                }
+                if !s19k_runner_assignments_start_with(script, &source_var, "\"$TRIAL_DIR/.") {
+                    return Err(
+                        "Track-1 global owner publication must originate from a trial-root scratch",
+                    );
+                }
+            }
+            "ENDURANCE_ACK" => {
+                if s19k_runner_assignment(script, "ENDURANCE_ACK")
+                    != Some("$(endurance_ack_path \"$ENDURANCE_SEQUENCE\") || exit 1")
+                    || !script.contains(
+                        "printf '%s/ack.%s.kv\\n' \"$ENDURANCE_ACK_DIR\" \"$ENDURANCE_ACK_SUFFIX\"",
+                    )
+                    || s19k_runner_assignment(script, "ENDURANCE_ACK_DIR")
+                        != Some("\"$ENDURANCE_EVIDENCE_DIR/acks\"")
+                    || s19k_runner_assignment(script, "ENDURANCE_EVIDENCE_DIR")
+                        != Some("\"$TRIAL_DIR/endurance_evidence\"")
+                {
+                    return Err(
+                        "Track-1 endurance acknowledgement path must be <trial>/endurance_evidence/acks/ack.NNNNNN.kv",
+                    );
+                }
+                if !s19k_runner_assignments_start_with(
+                    script,
+                    &source_var,
+                    "\"$ENDURANCE_ACK_DIR/.ack.",
+                ) {
+                    return Err("Track-1 endurance acknowledgement scratch must live beside its destination");
+                }
+            }
+            _ => {
+                let assignment = s19k_runner_assignment(script, &destination_var)
+                    .ok_or("Track-1 journal publication destination variable is never assigned")?;
+                let name = assignment
+                    .strip_prefix("\"$TRIAL_DIR/")
+                    .and_then(|rest| rest.strip_suffix('"'))
+                    .ok_or("Track-1 journal destination must be a fixed trial-root basename")?;
+                if !S19K_EPHEMERAL_JOURNAL_TRIAL_DESTINATIONS.contains(&name) {
+                    return Err(
+                        "Track-1 runner publishes a journal destination the daemon publisher does not admit",
+                    );
+                }
+                if !s19k_runner_assignments_start_with(script, &source_var, "\"$TRIAL_DIR/.") {
+                    return Err("Track-1 trial journal publication must originate from a trial-root scratch");
+                }
+                names.push(name.to_string());
+            }
+        }
+    }
+    Ok(names)
+}
+
 pub fn admit_s19k_tmp_remote_runner_ephemeral(script: &str) -> Result<(), &'static str> {
     // Policy comments are expected to name the paths they forbid. Inspect only
     // executable shell lines so those comments cannot either false-positive or
@@ -1128,7 +1434,7 @@ pub fn admit_s19k_tmp_remote_runner_ephemeral(script: &str) -> Result<(), &'stat
             "[ \"$(wc -l < \"$NO_WORK_TRANSCRIPT_RECEIPT\" | tr -d ' \\t\\r\\n')\" -eq 65 ]",
         )
         || !script.contains(
-            "if [ \"$DEPLOY_MODE\" = handoff-no-work ] || [ \"$DEPLOY_MODE\" = bounded-work-proof ]; then\n    exec 6< \"$STARTUP_DAEMON_TRANSCRIPT\"",
+            "if [ \"$DEPLOY_MODE\" = install-custody-safeoff ] \\\n    || [ \"$DEPLOY_MODE\" = handoff-no-work ] \\\n    || [ \"$DEPLOY_MODE\" = bounded-work-proof ]; then\n    exec 6< \"$STARTUP_DAEMON_TRANSCRIPT\"",
         )
         || !script.contains("\"$@\" 6>&- 9>&-")
     {
@@ -1165,26 +1471,82 @@ pub fn admit_s19k_tmp_remote_runner_ephemeral(script: &str) -> Result<(), &'stat
             return Err("Track-1 no-work receipt must bind exact target bytes and safety evidence");
         }
     }
-    let no_work_calls = script
-        .match_indices("publish_handoff_no_work_transcript_receipt \"$")
+    // 2026-08-30 (f2d3b9bc6) consolidated the per-mode receipt publishes into
+    // one fail-closed publish_mode_specific_receipts_after_safeoff() invoked on
+    // every checked-SafeOff exit path. The no-work publisher is therefore
+    // called exactly once, from inside that function, and the function itself
+    // must follow checked SafeOff + the typed stock-restart transition on both
+    // the signal ($EXIT_CODE) and ordinary child ($CHILD_STATUS) exits.
+    let unified_start = script
+        .find("publish_mode_specific_receipts_after_safeoff() {")
+        .ok_or(
+            "Track-1 runner must publish mode-specific receipts from one fail-closed function",
+        )?;
+    let unified_tail = &script[unified_start..];
+    let unified_end = unified_tail
+        .find("\n}\n")
+        .ok_or("Track-1 mode-specific receipt publisher is unterminated")?;
+    let unified = &unified_tail[..unified_end];
+    for publisher in [
+        "publish_install_custody_transcript_receipt \"$MODE_WRAPPER_EXIT_STATUS\"",
+        "publish_handoff_no_work_transcript_receipt \"$MODE_WRAPPER_EXIT_STATUS\"",
+        "publish_bounded_work_transcript_receipt \"$MODE_WRAPPER_EXIT_STATUS\"",
+        "publish_endurance_work_receipt \"$MODE_WRAPPER_EXIT_STATUS\"",
+    ] {
+        if unified.matches(publisher).count() != 1 {
+            return Err("Track-1 mode-specific receipt publisher must call each receipt publisher exactly once");
+        }
+    }
+    if script
+        .matches("publish_handoff_no_work_transcript_receipt \"$")
+        .count()
+        != 1
+    {
+        return Err("Track-1 no-work receipt must be published only through the unified publisher");
+    }
+    let unified_calls = script
+        .match_indices("publish_mode_specific_receipts_after_safeoff \"$")
         .map(|(offset, _)| offset)
         .collect::<Vec<_>>();
-    if no_work_calls.len() != 2 {
-        return Err("Track-1 no-work receipt must cover signal and ordinary child exits");
-    }
-    for call in no_work_calls {
+    let mut checked_signal_exit = false;
+    let mut checked_child_exit = false;
+    for call in unified_calls {
         let prefix = &script[..call];
-        let checked_safeoff = prefix
-            .rfind("if perform_checked_safeoff; then")
-            .ok_or("Track-1 no-work receipt must follow checked SafeOff")?;
-        let pending_transition = prefix
-            .rfind("clear_runtime_obligation_after_safeoff || exit 1")
-            .ok_or("Track-1 no-work receipt must follow the typed stock-restart transition")?;
-        if checked_safeoff > pending_transition || pending_transition > call {
-            return Err(
-                "Track-1 no-work receipt must follow checked SafeOff and typed stock-restart publication",
-            );
+        let argument = &script[call..];
+        let signal_exit =
+            argument.starts_with("publish_mode_specific_receipts_after_safeoff \"$EXIT_CODE\"");
+        let child_exit =
+            argument.starts_with("publish_mode_specific_receipts_after_safeoff \"$CHILD_STATUS\"");
+        if !signal_exit && !child_exit {
+            return Err("Track-1 mode-specific receipts must bind the signal or child exit status");
         }
+        let previous_line = prefix.trim_end().rsplit('\n').next().unwrap_or("").trim();
+        match previous_line {
+            "clear_runtime_obligation_after_safeoff || exit 1" => {
+                let checked_safeoff = prefix
+                    .rfind("if perform_checked_safeoff; then")
+                    .ok_or("Track-1 mode-specific receipts must follow checked SafeOff")?;
+                let pending_transition = prefix
+                    .rfind("clear_runtime_obligation_after_safeoff || exit 1")
+                    .ok_or("Track-1 mode-specific receipts must follow the typed stock-restart transition")?;
+                if checked_safeoff > pending_transition {
+                    return Err(
+                        "Track-1 mode-specific receipts must follow checked SafeOff and typed stock-restart publication",
+                    );
+                }
+                checked_signal_exit |= signal_exit;
+                checked_child_exit |= child_exit;
+            }
+            "transition_startup_stock_loss_to_pending || exit 1" => {}
+            _ => {
+                return Err(
+                    "Track-1 mode-specific receipts must directly follow the typed stock-restart or stock-loss transition",
+                );
+            }
+        }
+    }
+    if !checked_signal_exit || !checked_child_exit {
+        return Err("Track-1 mode-specific receipts must cover signal and ordinary child exits after checked SafeOff");
     }
     if !script.contains("DCENT_S19K_TRACK1_STOP_SAFEOFF=1") {
         return Err("Track-1 runner must require checked terminal SafeOff");
@@ -1380,8 +1742,11 @@ pub fn admit_s19k_tmp_remote_runner_ephemeral(script: &str) -> Result<(), &'stat
     {
         return Err("Track-1 recovery must reject stock ownership before SafeOff mutation");
     }
+    // 2026-08-30 (f2d3b9bc6): the receipt schema/resets/GPIO expectations are
+    // bound per SafeOff source mode. The Track-1 (non-install) branch must
+    // still pin the exact identity-bound reset+GPIO437 receipt.
     if !script.contains(
-        "EXPECTED_SAFEOFF_RECEIPT=\"DCENT_S19K_TRACK1_SAFEOFF_RECEIPT schema=dcentos.s19k-track1-safeoff/v1 live_identity_sha256=$EXPECTED_LIVE_IDENTITY_SHA live_identity_profile=$EXPECTED_LIVE_IDENTITY_PROFILE live_identity_model_sha256=$LIVE_IDENTITY_MODEL_SHA live_identity_board_count=$BOARD_COUNT live_identity_physical_addresses=$LIVE_IDENTITY_PHYSICAL_ADDRESSES live_identity_board_names=$LIVE_IDENTITY_BOARD_NAMES live_identity_eeprom=$LIVE_IDENTITY_EEPROM_SLOTS resets=454:0,455:0,456:0 psu=437:1\"",
+        "    else\n        EXPECTED_SAFEOFF_SCHEMA=dcentos.s19k-track1-safeoff/v1\n        EXPECTED_SAFEOFF_RESETS=454:0,455:0,456:0\n        EXPECTED_SAFEOFF_GPIO_RAW=437:1,454:0,455:0,456:0\n        EXPECTED_SAFEOFF_RECEIPT=\"DCENT_S19K_TRACK1_SAFEOFF_RECEIPT schema=$EXPECTED_SAFEOFF_SCHEMA live_identity_sha256=$EXPECTED_LIVE_IDENTITY_SHA live_identity_profile=$EXPECTED_LIVE_IDENTITY_PROFILE live_identity_model_sha256=$LIVE_IDENTITY_MODEL_SHA live_identity_board_count=$BOARD_COUNT live_identity_physical_addresses=$LIVE_IDENTITY_PHYSICAL_ADDRESSES live_identity_board_names=$LIVE_IDENTITY_BOARD_NAMES live_identity_eeprom=$LIVE_IDENTITY_EEPROM_SLOTS resets=$EXPECTED_SAFEOFF_RESETS psu=437:1\"\n    fi\n}",
     ) {
         return Err("Track-1 recovery must require the exact identity-bound reset/GPIO437 SafeOff receipt");
     }
@@ -1746,6 +2111,7 @@ pub fn admit_s19k_tmp_remote_runner_ephemeral(script: &str) -> Result<(), &'stat
     {
         return Err("Track-1 receiptless recovery must refuse owners, bind identity, then SafeOff");
     }
+    admit_s19k_runner_journal_destinations(script)?;
     Ok(())
 }
 
@@ -1934,8 +2300,8 @@ mod tests {
                 "semantic_verification=target-only",
             ),
             trial_sh.replace(
-                "publish_handoff_no_work_transcript_receipt \"$EXIT_CODE\"",
-                "true \"$EXIT_CODE\"",
+                "publish_mode_specific_receipts_after_safeoff \"$EXIT_CODE\" || exit 1",
+                "true \"$EXIT_CODE\" || exit 1",
             ),
             trial_sh.replace(
                 "DCENT_S19K_LIVE_IDENTITY_SHA256=\"$EXPECTED_LIVE_IDENTITY_SHA\"",
@@ -1985,8 +2351,8 @@ mod tests {
                 "owner_kind=receiptless-unbound",
             ),
             trial_sh.replace(
-                "resets=454:0,455:0,456:0 psu=437:1",
-                "resets=453:0,455:0,456:0 psu=437:1",
+                "EXPECTED_SAFEOFF_RESETS=454:0,455:0,456:0",
+                "EXPECTED_SAFEOFF_RESETS=453:0,455:0,456:0",
             ),
             trial_sh.replacen("/usr/bin/env -i", "/usr/bin/env", 1),
             trial_sh.replacen(
@@ -2533,5 +2899,158 @@ mod tests {
         assert!(trial_sh.contains("verify_bound_file \"$TRIAL_BIN\""));
         assert!(trial_sh.contains("verify_bound_file \"$TRIAL_CFG\""));
         assert!(trial_sh.contains("verify_bound_file \"$TRIAL_RUNNER\""));
+    }
+}
+
+#[cfg(test)]
+mod s19k_ephemeral_journal_admission_tests {
+    use super::*;
+
+    const TRIAL: &str = "/tmp/dcentrald_bench_t1_20260901133057_320";
+
+    #[test]
+    fn every_runner_journal_destination_is_admitted_by_the_daemon_set() {
+        let runner = include_str!("../../../scripts/dcentrald_s19k_tmp_remote_run.sh");
+        let names = admit_s19k_runner_journal_destinations(runner)
+            .expect("runner journal destinations must all be admitted");
+        for required in [
+            "runtime_install_custody_transcript",
+            "runtime_handoff_no_work_transcript",
+            "runtime_bounded_work_transcript",
+            "runtime_endurance_work_receipt",
+            "runtime_endurance_failure_receipt",
+            "runtime_safeoff_terminal_receipt",
+            "runtime_startup_prefix_pre_safeoff",
+        ] {
+            assert!(names.iter().any(|name| name == required), "{required}");
+        }
+        let publications = s19k_runner_journal_publications(runner).unwrap();
+        assert!(publications
+            .iter()
+            .any(|(_, destination)| destination == "RUNTIME_LOCK_OWNER"));
+        assert!(publications
+            .iter()
+            .any(|(_, destination)| destination == "ENDURANCE_ACK"));
+    }
+
+    #[test]
+    fn runner_contract_fails_when_a_receipt_name_leaves_the_daemon_set() {
+        let runner = include_str!("../../../scripts/dcentrald_s19k_tmp_remote_run.sh");
+        let mutated = runner.replace(
+            "BOUNDED_TRANSCRIPT_RECEIPT=\"$TRIAL_DIR/runtime_bounded_work_transcript\"",
+            "BOUNDED_TRANSCRIPT_RECEIPT=\"$TRIAL_DIR/runtime_bounded_work_transcript_v2\"",
+        );
+        assert_ne!(mutated, runner);
+        assert_eq!(
+            admit_s19k_runner_journal_destinations(&mutated),
+            Err("Track-1 runner publishes a journal destination the daemon publisher does not admit")
+        );
+        assert!(admit_s19k_tmp_remote_runner_ephemeral(&mutated).is_err());
+        let relocated = runner.replace(
+            "ENDURANCE_ACK_DIR=\"$ENDURANCE_EVIDENCE_DIR/acks\"",
+            "ENDURANCE_ACK_DIR=\"$TRIAL_DIR/acks\"",
+        );
+        assert!(admit_s19k_runner_journal_destinations(&relocated).is_err());
+    }
+
+    #[test]
+    fn classifier_admits_exactly_the_three_publication_forms() {
+        for name in S19K_EPHEMERAL_JOURNAL_TRIAL_DESTINATIONS {
+            assert_eq!(
+                classify_s19k_ephemeral_journal_destination(
+                    &format!("{TRIAL}/.{name}.tmp.32685.350473"),
+                    &format!("{TRIAL}/{name}"),
+                ),
+                Ok(S19kEphemeralJournalDestination::TrialJournal),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            classify_s19k_ephemeral_journal_destination(
+                &format!("{TRIAL}/.runtime_lock_owner.tmp.1.2"),
+                "/tmp/dcent-s19k-track1-runtime-lock/owner",
+            ),
+            Ok(S19kEphemeralJournalDestination::GlobalOwner)
+        );
+        assert_eq!(
+            classify_s19k_ephemeral_journal_destination(
+                &format!("{TRIAL}/endurance_evidence/acks/.ack.7.tmp.32685.350473"),
+                &format!("{TRIAL}/endurance_evidence/acks/ack.000007.kv"),
+            ),
+            Ok(S19kEphemeralJournalDestination::EnduranceAck)
+        );
+    }
+
+    #[test]
+    fn classifier_refuses_the_2026_09_01_shape_and_its_neighbours() {
+        let refusals = [
+            // A name outside the set (the pre-fix failure shape).
+            (
+                format!("{TRIAL}/.runtime_bounded_work_transcript.tmp.1.2"),
+                format!("{TRIAL}/runtime_bounded_work_transcript.sealed"),
+            ),
+            // Cross-trial publication.
+            (
+                format!("{TRIAL}/.runtime_bounded_work_transcript.tmp.1.2"),
+                "/tmp/dcentrald_bench_t1_other/runtime_bounded_work_transcript".to_string(),
+            ),
+            // Ack destination from the trial root, or a trial journal from the ack dir.
+            (
+                format!("{TRIAL}/.ack.7.tmp.1.2"),
+                format!("{TRIAL}/ack.000007.kv"),
+            ),
+            (
+                format!("{TRIAL}/endurance_evidence/acks/.runtime_bounded_work_transcript.tmp.1.2"),
+                format!("{TRIAL}/endurance_evidence/acks/runtime_bounded_work_transcript"),
+            ),
+            // Malformed ack names and scratch prefixes.
+            (
+                format!("{TRIAL}/endurance_evidence/acks/.ack.7.tmp.1.2"),
+                format!("{TRIAL}/endurance_evidence/acks/ack.7.kv"),
+            ),
+            (
+                format!("{TRIAL}/endurance_evidence/acks/segment.000007.kv"),
+                format!("{TRIAL}/endurance_evidence/acks/ack.000007.kv"),
+            ),
+            // Global owner from the ack dir or under another name.
+            (
+                format!("{TRIAL}/endurance_evidence/acks/.ack.7.tmp.1.2"),
+                "/tmp/dcent-s19k-track1-runtime-lock/owner".to_string(),
+            ),
+            (
+                format!("{TRIAL}/.runtime_lock_owner.tmp.1.2"),
+                "/tmp/dcent-s19k-track1-runtime-lock/owner2".to_string(),
+            ),
+        ];
+        for (source, destination) in refusals {
+            assert_eq!(
+                classify_s19k_ephemeral_journal_destination(&source, &destination),
+                Err(S19K_EPHEMERAL_JOURNAL_REFUSAL),
+                "{source} -> {destination}"
+            );
+        }
+        for (source, destination) in [
+            (
+                "/tmp/dcentrald_bench_t1_x/../y/.a.tmp",
+                "/tmp/dcentrald_bench_t1_x/runtime_startup_release",
+            ),
+            (
+                "/tmp/other_t1_x/.a.tmp",
+                "/tmp/other_t1_x/runtime_startup_release",
+            ),
+            (
+                "/tmp/dcentrald_bench_t1_x/sub/.a.tmp",
+                "/tmp/dcentrald_bench_t1_x/sub/runtime_startup_release",
+            ),
+            (
+                "tmp/dcentrald_bench_t1_x/.a.tmp",
+                "/tmp/dcentrald_bench_t1_x/runtime_startup_release",
+            ),
+        ] {
+            assert!(
+                classify_s19k_ephemeral_journal_destination(source, destination).is_err(),
+                "{source} -> {destination}"
+            );
+        }
     }
 }

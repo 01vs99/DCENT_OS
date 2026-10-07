@@ -13,6 +13,12 @@ path = "src/main.rs"
 name = "dcentos-discovery"
 path = "src/bin/dcentos_discovery.rs"
 
+[[bin]]
+name = "dcentos-sim"
+path = "src/bin/dcentos_sim.rs"
+required-features = ["sim-hal"]
+test = false
+
 [dependencies]
 dcentrald-hal = { path = "../dcentrald-hal" }
 dcentrald-asic = { path = "../dcentrald-asic" }
@@ -65,6 +71,7 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 sha2.workspace = true
+hex = "0.4"
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rumqttc.workspace = true
@@ -73,6 +80,8 @@ rumqttc.workspace = true
 proptest = { workspace = true }
 
 [features]
+# Hardware environment overrides; excluded from signed Beta/Stable builds.
+lab = ["dcentrald-common/lab", "dcentrald-hal/lab", "dcentrald-asic/lab", "dcentrald-thermal/lab", "dcentrald-autotuner/lab", "dcentrald-silicon-profiles/lab", "dcentrald-api/lab"]
 default = []
 # Host-only daemon emulation. Never enabled by Buildroot/release profiles.
 sim-hal = [

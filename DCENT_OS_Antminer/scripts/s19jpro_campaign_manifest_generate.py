@@ -197,11 +197,11 @@ PHASES: list[dict[str, object]] = [
     ),
     phase(
         "bb-safety-bench",
-        "BB GPIO59/watchdog safety bench",
+        "BB PSU65/watchdog safety bench",
         "operator",
         "DCENT_EE",
         ["offline-repo-contract"],
-        "Under fresh operator authorization, run the BP-AM3-BB-GPIO59-WATCHDOG safety bench (retained checked-LOW GPIO59 owner, watchdog teardown) on the BB unit.",
+        "Under fresh operator authorization, run the BP-AM3-BB-PSU65-WATCHDOG safety bench (runtime-bound checked-LOW GPIO65 owner, complete EEPROM identity, watchdog teardown) on the BB unit.",
     ),
     phase(
         "bb-stock-ssh-unlock-live",

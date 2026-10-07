@@ -1,0 +1,297 @@
+{
+  "status": "PASS",
+  "hardware_contact": false,
+  "scope": "Actual supply42 initializer followed by complete low/high/low steppers.\n\nThe same original software context survives each call. Physical voltage frame\ntransport and disabled rail verification are seams; no prior voltage is invented.\n",
+  "cases": [
+    {
+      "transport_result": 0,
+      "acquisition": {
+        "kind": 66,
+        "defect": null,
+        "initializer": true,
+        "response": "55aa060242004a00",
+        "returned": 0,
+        "frames": [
+          "55aa04020600"
+        ],
+        "read_bytes": [
+          85,
+          170,
+          6,
+          2,
+          66,
+          0,
+          74,
+          0
+        ],
+        "waits_us": [
+          500000
+        ],
+        "source_profile_words": [
+          0,
+          0,
+          2000,
+          1800,
+          1850,
+          1800
+        ]
+      },
+      "rail_verification_enabled": false,
+      "stages": [
+        {
+          "entry": 385940,
+          "before": [
+            0,
+            0,
+            2000,
+            1800,
+            1850,
+            1800
+          ],
+          "frames": [
+            "55aa0683ec007501",
+            "55aa0683db006401",
+            "55aa0683ca005301",
+            "55aa0683b9004201",
+            "55aa0683a8003101",
+            "55aa068397002001",
+            "55aa068386000f01",
+            "55aa068378000101"
+          ],
+          "codes": [
+            236,
+            219,
+            202,
+            185,
+            168,
+            151,
+            134,
+            120
+          ],
+          "after": [
+            1,
+            1800,
+            2000,
+            1800,
+            1850,
+            1800
+          ],
+          "returned": 0
+        },
+        {
+          "entry": 387792,
+          "before": [
+            1,
+            1800,
+            2000,
+            1800,
+            1850,
+            1800
+          ],
+          "frames": [
+            "55aa06836700f000",
+            "55aa06835600df00",
+            "55aa06834500ce00",
+            "55aa06833400bd00",
+            "55aa06833000b900"
+          ],
+          "codes": [
+            103,
+            86,
+            69,
+            52,
+            48
+          ],
+          "after": [
+            1,
+            2000,
+            2000,
+            1800,
+            1850,
+            1800
+          ],
+          "returned": 0
+        },
+        {
+          "entry": 385940,
+          "before": [
+            1,
+            2000,
+            2000,
+            1800,
+            1850,
+            1800
+          ],
+          "frames": [
+            "55aa06834100ca00",
+            "55aa06835200db00",
+            "55aa06836300ec00",
+            "55aa06837400fd00",
+            "55aa068378000101"
+          ],
+          "codes": [
+            65,
+            82,
+            99,
+            116,
+            120
+          ],
+          "after": [
+            1,
+            1800,
+            2000,
+            1800,
+            1850,
+            1800
+          ],
+          "returned": 0
+        }
+      ]
+    },
+    {
+      "transport_result": 4294967295,
+      "acquisition": {
+        "kind": 66,
+        "defect": null,
+        "initializer": true,
+        "response": "55aa060242004a00",
+        "returned": 0,
+        "frames": [
+          "55aa04020600"
+        ],
+        "read_bytes": [
+          85,
+          170,
+          6,
+          2,
+          66,
+          0,
+          74,
+          0
+        ],
+        "waits_us": [
+          500000
+        ],
+        "source_profile_words": [
+          0,
+          0,
+          2000,
+          1800,
+          1850,
+          1800
+        ]
+      },
+      "rail_verification_enabled": false,
+      "stages": [
+        {
+          "entry": 385940,
+          "before": [
+            0,
+            0,
+            2000,
+            1800,
+            1850,
+            1800
+          ],
+          "frames": [
+            "55aa0683ec007501",
+            "55aa0683db006401",
+            "55aa0683ca005301",
+            "55aa0683b9004201",
+            "55aa0683a8003101",
+            "55aa068397002001",
+            "55aa068386000f01",
+            "55aa068378000101"
+          ],
+          "codes": [
+            236,
+            219,
+            202,
+            185,
+            168,
+            151,
+            134,
+            120
+          ],
+          "after": [
+            1,
+            1800,
+            2000,
+            1800,
+            1850,
+            1800
+          ],
+          "returned": 0
+        },
+        {
+          "entry": 387792,
+          "before": [
+            1,
+            1800,
+            2000,
+            1800,
+            1850,
+            1800
+          ],
+          "frames": [
+            "55aa06836700f000",
+            "55aa06835600df00",
+            "55aa06834500ce00",
+            "55aa06833400bd00",
+            "55aa06833000b900"
+          ],
+          "codes": [
+            103,
+            86,
+            69,
+            52,
+            48
+          ],
+          "after": [
+            1,
+            2000,
+            2000,
+            1800,
+            1850,
+            1800
+          ],
+          "returned": 0
+        },
+        {
+          "entry": 385940,
+          "before": [
+            1,
+            2000,
+            2000,
+            1800,
+            1850,
+            1800
+          ],
+          "frames": [
+            "55aa06834100ca00",
+            "55aa06835200db00",
+            "55aa06836300ec00",
+            "55aa06837400fd00",
+            "55aa068378000101"
+          ],
+          "codes": [
+            65,
+            82,
+            99,
+            116,
+            120
+          ],
+          "after": [
+            1,
+            1800,
+            2000,
+            1800,
+            1850,
+            1800
+          ],
+          "returned": 0
+        }
+      ]
+    }
+  ]
+}

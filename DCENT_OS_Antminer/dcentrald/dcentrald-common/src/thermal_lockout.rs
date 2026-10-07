@@ -640,13 +640,25 @@ mod tests {
         );
         assert!(
             supervisor.contains("expected zero-status exit for PID $CHILD_PID remains unresolved"),
-            "even an expected typed-closeout exit must not clear physical disposition"
+            "expected exit status alone must not clear physical disposition"
         );
+        let consumer = supervisor.split_once("clear_orderly_software_session() {").unwrap().1
+            .split_once("\n}\n").unwrap().0;
+        let checked_receipt = consumer.find("\"$CLOSEOUT_VALIDATOR\" --check-software-closeout").unwrap();
+        let clear = consumer.find("rm -f \"$UNRESOLVED_FILE\"").unwrap();
+        assert!(checked_receipt < clear, "only a checked exact-session receipt may remove admission");
+        assert!(consumer.contains("[ \"$SAFETY_OK\" -eq 1 ]"));
+        let fallback = supervisor.split_once("promote_unresolved_locked() {").unwrap().1
+            .split_once("\n}\n").unwrap().0;
+        let failed_write = fallback.find("could not publish crash latch; unresolved state still blocks admission").unwrap();
+        let failed_return = fallback[failed_write..].find("return 1").unwrap() + failed_write;
+        let remove_unresolved = fallback.find("rm -f \"$UNRESOLVED_FILE\"").unwrap();
+        assert!(failed_return < remove_unresolved, "failed marker persistence must preserve the prelaunch boundary");
         assert!(
             supervisor.contains(
-                "no exit status is a hardware SafeOff receipt; operator resolution is required before another start"
+                "no valid exact-session software closeout receipt; operator resolution is required before another start"
             ),
-            "failed thermal-marker persistence must fall back to an unresolved operator boundary"
+            "absent closeout proof must retain the unresolved operator boundary"
         );
     }
 

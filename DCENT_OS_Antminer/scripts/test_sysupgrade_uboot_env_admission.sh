@@ -56,10 +56,24 @@ caller_has_uboot_env_contract()
     grep -Fq '. "$UBOOT_ENV_ADMISSION_HELPER"' "$_dcent_test_caller" || return 1
     ! grep -Fq "grep -q '/dev/mtd4' /etc/fw_env.config" "$_dcent_test_caller" || return 1
     [ "$(grep -Fc 'if ! dcent_zynq_uboot_env_admit' "$_dcent_test_caller")" -eq 2 ] || return 1
-    # shellcheck disable=SC2016
-    [ "$(grep -Fc '=$(fw_printenv -c "$FW_ENV_CONFIG"' "$_dcent_test_caller")" -eq 3 ] || return 1
-    # shellcheck disable=SC2016
-    [ "$(grep -Fc 'if ! fw_setenv -c "$FW_ENV_CONFIG" --script' "$_dcent_test_caller")" -eq 1 ] || return 1
+    case "$_dcent_test_caller" in
+        */zynq/am2-*/rootfs-overlay/usr/sbin/sysupgrade)
+            # AM2's real complete-environment classifier is executed against
+            # redundant files in test_am2_native_ota.py. Require its caller
+            # join here while preserving the shared S9 inline writer checks.
+            [ "$(grep -Fc '=$(fw_printenv -c "$FW_ENV_CONFIG"' "$_dcent_test_caller")" -eq 1 ] || return 1
+            [ "$(grep -Fc 'if ! am2_ota_apply_environment; then' "$_dcent_test_caller")" -eq 1 ] || return 1
+            grep -Fq '. "$AM2_OTA_HELPER"' "$_dcent_test_caller" || return 1
+            grep -Fq 'am2_ota_commit_script || preflip_fail' "$_dcent_test_caller" || return 1
+            grep -Fq 'ubiattach -m "$1" -d "$2" -O 2048 --max-beb-per1024=20' "$_dcent_test_caller" || return 1
+            ;;
+        *)
+            # shellcheck disable=SC2016
+            [ "$(grep -Fc '=$(fw_printenv -c "$FW_ENV_CONFIG"' "$_dcent_test_caller")" -eq 3 ] || return 1
+            # shellcheck disable=SC2016
+            [ "$(grep -Fc 'if ! fw_setenv -c "$FW_ENV_CONFIG" --script' "$_dcent_test_caller")" -eq 1 ] || return 1
+            ;;
+    esac
     awk '
         /^dcent_ubi_attach_mtd\(\) \{/ {
             in_attach_wrapper = 1
@@ -85,7 +99,7 @@ caller_has_uboot_env_contract()
             if (admissions == 1) first_admission = NR
             if (admissions == 2) second_admission = NR
         }
-        /^[[:space:]]*if ! dcent_ubi_attach_mtd "\$INACTIVE_MTD" 1 2>\/dev\/null; then$/ && !first_mutation {
+        /^[[:space:]]*if ! dcent_ubi_attach_mtd "\$INACTIVE_MTD" 1( 2>\/dev\/null)?; then$/ && !first_mutation {
             first_mutation = NR
         }
         /_PRECHK=\$\(fw_printenv -c "\$FW_ENV_CONFIG"/ { first_env_read = NR }
@@ -276,6 +290,11 @@ expect_success "am2-s19pro caller binds and orders exact environment admission" 
 expect_success "am2-s17pro caller binds and orders exact environment admission" \
     caller_has_uboot_env_contract \
     "$PROJECT_ROOT/br2_external_dcentos/board/zynq/am2-s17pro/rootfs-overlay/usr/sbin/sysupgrade"
+for target in am2-s17plus am2-t17 am2-t17plus; do
+    expect_success "$target caller binds and orders exact environment admission" \
+        caller_has_uboot_env_contract \
+        "$PROJECT_ROOT/br2_external_dcentos/board/zynq/$target/rootfs-overlay/usr/sbin/sysupgrade"
+done
 
 if [ "$failures" -ne 0 ]; then
     printf '\nU-Boot environment admission tests failed: %s/%s failed\n' \

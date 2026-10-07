@@ -207,7 +207,7 @@ cgminer_bind_lan = false
 metrics_require_auth = true
 
 [donation]
-# Bring-up: off. Re-enable (2% default) for production deploys.
+# 0% default posture: donation is opt-in everywhere (enabled=true, percent 1-5).
 enabled = false
 
 [watchdog]

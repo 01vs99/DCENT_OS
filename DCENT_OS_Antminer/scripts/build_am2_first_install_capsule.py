@@ -6,16 +6,16 @@
 
 Packages operator-reviewed transition inputs into the typed capsule
 contract enforced by ``dcent am2-first-install inspect`` (toolbox
-``core/am2_xil_first_install.py`` — the single source of truth for the
+``core/am2_xil_first_install.py`` â€” the single source of truth for the
 contract). This script is the packager ONLY: it never invents payload
 content, never contacts a miner, and never authorizes an install. Trust
 comes exclusively from the release signature:
 
 * the manifest is signed with the EXACT release signer
-  (``sign_release_artifact.py`` → ``sign_release_receipt.py`` — the same
+  (``sign_release_artifact.py`` â†’ ``sign_release_receipt.py`` â€” the same
   durable no-replace ceremony as sysupgrade packages);
 * the trusted public key must be supplied explicitly (``--pubkey`` or
-  ``DCENT_RELEASE_PUBKEY_FILE``) — trust is never derived from the
+  ``DCENT_RELEASE_PUBKEY_FILE``) â€” trust is never derived from the
   signing key;
 * output is no-replace: an existing capsule path is an error.
 
@@ -23,8 +23,8 @@ Determinism: identical inputs produce a byte-identical capsule (sorted
 members, mtime-0 tar, mtime-0 gzip, sorted manifest keys).
 
 The transition mechanism is DERIVED from the source layout (single-slot
-sources → boot_chain_repartition + mandatory ``transition/stage1.sh``;
-dual-UBI sources → inactive_slot_write) — there is no ``--mechanism``
+sources â†’ boot_chain_repartition + mandatory ``transition/stage1.sh``;
+dual-UBI sources â†’ inactive_slot_write) â€” there is no ``--mechanism``
 flag to get wrong.
 """
 
@@ -79,15 +79,15 @@ def _fail(message: str) -> None:
     raise CapsuleBuildError(message)
 
 
+def _member_bytes(path: Path, maximum: int = MAX_MEMBER_BYTES) -> bytes:
+    # Reuse the established bounded no-follow/single-link snapshot. Validate
+    # the exact retained bytes rather than reopening a caller-controlled path.
+    from runtime_image_manifest import regular_bytes
+    return regular_bytes(path, maximum)
+
+
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while True:
-            chunk = handle.read(64 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
+    return hashlib.sha256(_member_bytes(path)).hexdigest()
 
 
 def _validate_member_name(name: str) -> str:
@@ -98,7 +98,7 @@ def _validate_member_name(name: str) -> str:
         or name.startswith("\\")
         or "\\" in name
         or ":" in name.split("/")[0]
-        or ".." in name.split("/")
+        or any(part in ("", ".", "..") for part in name.split("/"))
         or "//" in name
     ):
         raise ValueError(f"unsafe member name: {name!r}")
@@ -145,7 +145,7 @@ def parser() -> argparse.ArgumentParser:
         )
     )
     result.add_argument("--board-target", required=True,
-                        help="am2-s19pro | am2-s19jpro-zynq (aliases accepted)")
+                        help="am2-s19pro | am2-s19jpro-zynq | am2-s17p | am2-s17plus | am2-t17 | am2-t17plus (aliases accepted)")
     result.add_argument("--source-layout", required=True,
                         help="one source storage dialect (see `dcent am2-first-install contract`)")
     result.add_argument("--version", required=True,
@@ -155,8 +155,19 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--migration-scope", required=True,
                         help="declared persistent-state migration (explicit 'none' allowed)")
     result.add_argument("--stage1", type=Path,
-                        help="on-target transition script (required for single-slot sources); packaged as "
+                        help="on-target transition script (required for executable capsules); packaged as "
                              + STAGE1_MEMBER)
+    result.add_argument("--dual-ubi-kernel", type=Path,
+                        help="embed kernel and canonical dual-UBI stage1; requires --dual-ubi-rootfs")
+    result.add_argument("--dual-ubi-rootfs", type=Path,
+                        help="embed rootfs for the executable dual-UBI first-install capsule")
+    result.add_argument("--dual-ubi-fpga", type=Path,
+                        help="exact am2-fabric.itb for the inactive 2 MiB FPGA partition")
+    result.add_argument("--dual-ubi-writer", type=Path,
+                        help="static ARM am2-nand-window helper built from the canonical source")
+    for name in ("kernel", "rootfs", "fpga", "writer", "transition", "receipt", "recovery-fpga", "closure-dir"):
+        result.add_argument("--stock8-" + name, type=Path,
+                            help="exact stock8 executable capsule input: " + name)
     result.add_argument("--member", action="append", default=[], metavar="NAME=PATH",
                         help="additional payload member (repeatable; NAME is the in-capsule path)")
     result.add_argument("--key", default=os.environ.get("DCENT_RELEASE_SIGNING_KEY", ""),
@@ -186,7 +197,7 @@ def build(args: argparse.Namespace) -> int:
     mechanism = facts["transition_mechanism"]
     needs_stage1 = mechanism == MECHANISM_BOOT_CHAIN_REPARTITION
 
-    if not _VERSION_CHARS.match(args.version):
+    if not 0 < len(args.version) <= 128 or not _VERSION_CHARS.fullmatch(args.version):
         raise _fail(f"version contains characters outside [A-Za-z0-9._+:-]: {args.version!r}")
     if not args.post_install_artifact or "/" in args.post_install_artifact or "\\" in args.post_install_artifact:
         raise _fail("post-install artifact must be a bare artifact ID (no path separators)")
@@ -194,6 +205,72 @@ def build(args: argparse.Namespace) -> int:
         raise _fail("migration scope must be declared (explicit 'none' allowed, never empty)")
 
     members: dict[str, Path] = {}
+    generated: dict[str, bytes] = {}
+    kernel = getattr(args, "dual_ubi_kernel", None)
+    rootfs = getattr(args, "dual_ubi_rootfs", None)
+    fpga = getattr(args, "dual_ubi_fpga", None)
+    writer = getattr(args, "dual_ubi_writer", None)
+    stock_names = ("kernel", "rootfs", "fpga", "writer", "transition", "receipt", "recovery_fpga", "closure_dir")
+    stock = {name: getattr(args, "stock8_" + name, None) for name in stock_names}
+    if any(stock.values()):
+        from dcent_toolbox.core.am2_stock8_executor import (
+            STAGE1_PATH as STOCK_STAGE1, HELD_CLOSURE, SOURCE as STOCK_SOURCE,
+        )
+        from dcent_toolbox.core.am2_first_install_executor import (
+            validate_kernel_image, validate_rootfs_image, validate_fpga_image,
+            validate_static_arm_writer, VENDOR_BOOT_PLACEHOLDER,
+        )
+        from prepare_am2_fabric_boot import nand_boot_environment
+        if (not all(stock.values()) or source != STOCK_SOURCE or args.stage1 is not None
+                or any((kernel, rootfs, fpga, writer))):
+            raise _fail("stock8 requires all eight stock8 inputs, the exact stock8 source and no other stage1 override")
+        validate_kernel_image(_member_bytes(stock["kernel"], 2920448), board_target)
+        validate_rootfs_image(_member_bytes(stock["rootfs"], 22728704))
+        validate_fpga_image(_member_bytes(stock["fpga"], 2097152))
+        validate_static_arm_writer(_member_bytes(stock["writer"], 4 * 1024**2))
+        for name, expected in HELD_CLOSURE.items():
+            path = stock["closure_dir"] / name
+            if not path.is_file() or path.is_symlink() or _sha256_file(path) != expected:
+                raise _fail("stock8 executable closure differs from the exercised held donor")
+            members["tools/" + name] = path
+        firmware_dir = SCRIPT_DIR / "first_install"
+        members.update({STAGE1_MEMBER: STOCK_STAGE1,
+                        "payload/kernel": stock["kernel"], "payload/rootfs": stock["rootfs"],
+                        "payload/am2-fabric.itb": stock["fpga"],
+                        "tools/am2-nand-window-armv7": stock["writer"],
+                        "payload/stock8-transition.itb": stock["transition"],
+                        "payload/stock8-template.json": stock["receipt"],
+                        "payload/system.bit.gz": stock["recovery_fpga"],
+                        "payload/stock8-boot-defaults.env": firmware_dir / "stock8-boot-defaults.env",
+                        "transition/stock8-stage2.sh": firmware_dir / "am2_stock_stage2.sh",
+                        "transition/stock8-bootstrap.sh": firmware_dir / "am2_stock_bootstrap.sh"})
+        generated["payload/bootenv1.json"] = (json.dumps(
+            nand_boot_environment(1, VENDOR_BOOT_PLACEHOLDER), sort_keys=True, indent=2) + "\n").encode()
+        # The source is still a boot-chain transition; this only satisfies its
+        # canonical stage1 requirement instead of accepting a caller override.
+        needs_stage1 = False
+    if kernel or rootfs or fpga or writer:
+        from dcent_toolbox.core.am2_first_install_executor import (
+            STAGE1_PATH, validate_kernel_image, validate_rootfs_image,
+            FPGA_MEMBER, WRITER_MEMBER, VENDOR_BOOT_PLACEHOLDER,
+            validate_fpga_image, validate_static_arm_writer,
+        )
+        from prepare_am2_fabric_boot import nand_boot_environment
+        if not all((kernel, rootfs, fpga, writer)) or needs_stage1 or args.stage1 is not None:
+            raise _fail("dual-UBI requires kernel/rootfs/FPGA/static writer, a dual-UBI source and no --stage1 override")
+        members.update({STAGE1_MEMBER: STAGE1_PATH, "payload/kernel": kernel,
+                        "payload/rootfs": rootfs, FPGA_MEMBER: fpga, WRITER_MEMBER: writer})
+        for path, ceiling in ((kernel, 2920448), (rootfs, 22728704)):
+            if not path.is_file() or not 0 < path.stat().st_size <= ceiling:
+                raise _fail("dual-UBI payload exceeds exact AM2 geometry")
+        validate_kernel_image(_member_bytes(kernel, 2920448), board_target)
+        validate_rootfs_image(_member_bytes(rootfs, 22728704))
+        validate_fpga_image(_member_bytes(fpga, 2097152))
+        validate_static_arm_writer(_member_bytes(writer, 4 * 1024**2))
+        for firmware in (1, 2):
+            generated[f"payload/bootenv{firmware}.json"] = (
+                json.dumps(nand_boot_environment(firmware, VENDOR_BOOT_PLACEHOLDER),
+                           sort_keys=True, indent=2) + "\n").encode()
     if needs_stage1:
         if args.stage1 is None:
             raise _fail(
@@ -204,18 +281,19 @@ def build(args: argparse.Namespace) -> int:
     elif args.stage1 is not None:
         raise _fail(
             f"--stage1 applies only to {MECHANISM_BOOT_CHAIN_REPARTITION} "
-            f"capsules (source {source} derives {mechanism})"
+            f"capsules; use --dual-ubi-kernel/--dual-ubi-rootfs for canonical dual-UBI execution"
         )
     try:
         for spec in args.member:
             name, path = _parse_member(spec)
-            if name in members:
+            if name in members or name in generated:
                 raise ValueError(f"duplicate member name: {name!r}")
             members[name] = path
     except ValueError as exc:
         raise _fail(str(exc))
 
     checksums: dict[str, str] = {}
+    payloads = dict(generated)
     total = 0
     for name in sorted(members):
         path = members[name]
@@ -230,9 +308,33 @@ def build(args: argparse.Namespace) -> int:
         if size > limit:
             raise _fail(f"member exceeds its {limit}-byte bound: {name} ({size} bytes)")
         total += size
-        checksums[name] = _sha256_file(path)
+        payloads[name] = _member_bytes(path, limit)
+        checksums[name] = hashlib.sha256(payloads[name]).hexdigest()
+    for name, data in generated.items():
+        checksums[name] = hashlib.sha256(data).hexdigest()
+        total += len(data)
     if total > MAX_TOTAL_PAYLOAD_BYTES:
         raise _fail(f"total payload exceeds {MAX_TOTAL_PAYLOAD_BYTES} bytes")
+    if any(stock.values()):
+        from dcent_toolbox.core.am2_stock8_executor import MEMBERS, validate_stock8_files
+        validate_stock8_files({name: payloads[member] for name, member in MEMBERS.items()}, board_target)
+    elif kernel:
+        # Admit the retained bytes that will actually be signed. A path may
+        # have changed since the preliminary input checks above.
+        validate_kernel_image(payloads["payload/kernel"], board_target)
+        validate_rootfs_image(payloads["payload/rootfs"])
+        validate_fpga_image(payloads[FPGA_MEMBER])
+        validate_static_arm_writer(payloads[WRITER_MEMBER])
+    if "payload/rootfs" in payloads:
+        if not args.pubkey:
+            raise _fail("executable capsule requires an explicit trusted runtime public key, including --plan")
+        import runtime_image_manifest as runtime
+        from dcent_toolbox.core.am2_first_install_executor import runtime_board_target
+        board = runtime_board_target(board_target)
+        runtime.registry_channel(board, "beta")
+        runtime.signed_runtime.verify_files(
+            runtime.signed_runtime.squashfs_files(payloads["payload/rootfs"]),
+            runtime.public_key_bytes(Path(args.pubkey).expanduser()), board, "beta", args.version, "board-default")
 
     manifest = {
         "schema": CAPSULE_SCHEMA,
@@ -257,8 +359,8 @@ def build(args: argparse.Namespace) -> int:
             "transition_mechanism": mechanism,
             "dialect_proven": facts["dialect_proven"],
             "members": [
-                {"name": name, "bytes": members[name].stat().st_size, "sha256": checksums[name]}
-                for name in sorted(members)
+                {"name": name, "bytes": len(payloads[name]), "sha256": checksums[name]}
+                for name in sorted(payloads)
             ],
             "manifest": manifest,
             "signing": {
@@ -313,13 +415,12 @@ def build(args: argparse.Namespace) -> int:
             raise _fail(f"signer produced a {len(signature)}-byte signature (expected 64)")
 
         files: dict[str, bytes] = {MANIFEST_MEMBER: manifest_bytes, SIGNATURE_MEMBER: signature}
-        for name in members:
-            files[name] = members[name].read_bytes()
+        files.update(payloads)
         capsule_bytes = _deterministic_tar(files)
 
         # write no-replace: create exclusively, then fsync
         try:
-            descriptor = os.open(str(output), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_BINARY, 0o644)
+            descriptor = os.open(str(output), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o644)
         except FileExistsError:
             raise _fail(f"output appeared during build (no-replace): {output}")
         with os.fdopen(descriptor, "wb") as handle:
@@ -336,13 +437,13 @@ def build(args: argparse.Namespace) -> int:
         "source_layout": source,
         "transition_mechanism": mechanism,
         "version": args.version,
-        "members": sorted(members),
+        "members": sorted(payloads),
         "verify_command": f"dcent am2-first-install inspect --capsule {output}",
     }
     print(json.dumps(payload, indent=2) if args.json else (
         f"Built capsule: {output}\n"
         f"  board: {board_target} | source: {source} | mechanism: {mechanism}\n"
-        f"  version: {args.version} | members: {', '.join(sorted(members)) or '(manifest-only)'}\n"
+        f"  version: {args.version} | members: {', '.join(sorted(payloads)) or '(manifest-only)'}\n"
         f"  size: {len(capsule_bytes)} bytes | sha256: {payload['sha256']}\n"
         f"  verify: dcent am2-first-install inspect --capsule {output}"
     ))
@@ -359,6 +460,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return build(parser().parse_args(argv))
     except CapsuleBuildError:
+        return 2
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        print(f"ERROR: capsule input validation failed: {error}", file=sys.stderr)
         return 2
 
 

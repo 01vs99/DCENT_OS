@@ -21,6 +21,18 @@ use tracing::{error, info, warn};
 
 use dcentrald_hal::watchdog::Watchdog;
 
+mod c43;
+pub(crate) use c43::C43WatchdogShutdownManifest;
+mod bm1391;
+pub(crate) use bm1391::{Bm1391ActorSlot, Bm1391Actors, Bm1391WatchdogShutdownManifest};
+mod bm1396;
+pub(crate) use bm1396::{Bm1396ActorSlot, Bm1396Actors, Bm1396WatchdogShutdownManifest};
+mod classic_aml;
+pub(crate) use classic_aml::{
+    ClassicAmlActorSlot, ClassicAmlActors, ClassicAmlWatchdogRouteScope,
+    ClassicAmlWatchdogShutdownManifest,
+};
+
 use crate::config::WatchdogConfig;
 use crate::runtime::task_guard::StandardMiningActorQuiescenceReceipt;
 use crate::runtime::teardown_budget::{
@@ -331,10 +343,16 @@ enum WatchdogTeardownAuthority {
 /// interchangeable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatchdogComposition {
+    ClassicAml,
+    C43Native,
+    Bm1391Native,
+    Bm1396Native,
     NoPicSerial,
     S19kTrack1Serial,
     Am2Bm1362Serial,
     HybridAm2,
+    S17Hybrid,
+    Bm1398Native,
     Am3Bb,
     #[cfg(test)]
     TestOnly,
@@ -468,6 +486,18 @@ pub(crate) struct HybridWatchdogRouteScope {
     scope: WatchdogRunScope,
     actor_owner: Option<ThreadRosterOwner<HybridThreadSlot>>,
     actor_expectation: ThreadRosterExpectation<HybridThreadSlot>,
+}
+
+/// S17 uses one serialized hardware lifecycle, including PIC keepalive and
+/// temperature reads. It has no S19j heartbeat-thread roster to manufacture.
+pub(crate) struct S17WatchdogRouteScope {
+    scope: WatchdogRunScope,
+}
+
+/// NBP1901 has one retained I2C fabric for its PIC, PSU and temperature
+/// operations. Its shutdown evidence cannot disarm another AM2 composition.
+pub(crate) struct Bm1398WatchdogRouteScope {
+    scope: WatchdogRunScope,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1072,6 +1102,109 @@ pub(crate) struct HybridWatchdogShutdownManifest {
     teardown: TeardownDisarmAuthority,
 }
 
+/// Exact S17 closeout. The hardware owner constructs `safe_off` only after
+/// dispatch has stopped, the I2C fabric is terminal, GPIO907 was read off,
+/// every PIC disable completed and the Stratum task was observed terminated.
+pub(crate) struct S17WatchdogShutdownManifest {
+    route_scope: S17WatchdogRouteScope,
+    api_drain: dcentrald_hal::platform::HardwareMutationBarrierReceipt,
+    api_final_commit: dcentrald_hal::platform::HardwareMutationCommitFenceReceipt,
+    fabric: dcentrald_hal::i2c::TerminalSafeOffTransition,
+    psu_fabric: dcentrald_hal::i2c::TerminalSafeOffTransition,
+    safe_off: crate::s17_hybrid_mining::S17SafeOffEvidence,
+    teardown: TeardownDisarmAuthority,
+}
+
+impl S17WatchdogShutdownManifest {
+    pub(crate) fn new(
+        route_scope: S17WatchdogRouteScope,
+        api_drain: dcentrald_hal::platform::HardwareMutationBarrierReceipt,
+        api_final_commit: dcentrald_hal::platform::HardwareMutationCommitFenceReceipt,
+        fabric: dcentrald_hal::i2c::TerminalSafeOffTransition,
+        psu_fabric: dcentrald_hal::i2c::TerminalSafeOffTransition,
+        safe_off: crate::s17_hybrid_mining::S17SafeOffEvidence,
+        teardown: TeardownDisarmAuthority,
+    ) -> Self {
+        Self {
+            route_scope,
+            api_drain,
+            api_final_commit,
+            fabric,
+            psu_fabric,
+            safe_off,
+            teardown,
+        }
+    }
+
+    fn into_validated_parts(self) -> Result<(WatchdogRunScope, TeardownDisarmAuthority)> {
+        require_mutation_barrier("S17 API drain", &self.api_drain)?;
+        require_mutation_barrier("S17 API final commit", &self.api_final_commit)?;
+        require_mutation_barrier("S17 controller fabric", &self.fabric)?;
+        require_mutation_barrier("S17 APW9 fabric", &self.psu_fabric)?;
+        validate_s17_safe_off(&self.safe_off, &self.teardown)?;
+        Ok((self.route_scope.scope, self.teardown))
+    }
+}
+
+fn validate_s17_safe_off(
+    evidence: &crate::s17_hybrid_mining::S17SafeOffEvidence,
+    teardown: &TeardownDisarmAuthority,
+) -> Result<()> {
+    anyhow::ensure!(
+        evidence.completed(),
+        "S17 physical cutoff/actor closeout incomplete"
+    );
+    anyhow::ensure!(
+        evidence.same_teardown_budget(teardown),
+        "S17 cutoff evidence belongs to another watchdog teardown budget"
+    );
+    Ok(())
+}
+
+pub(crate) struct Bm1398WatchdogShutdownManifest {
+    route_scope: Bm1398WatchdogRouteScope,
+    api_drain: dcentrald_hal::platform::HardwareMutationBarrierReceipt,
+    api_final_commit: dcentrald_hal::platform::HardwareMutationCommitFenceReceipt,
+    fabric: dcentrald_hal::i2c::TerminalSafeOffTransition,
+    safe_off: crate::s19_bm1398_native_mining::Bm1398SafeOffEvidence,
+    teardown: TeardownDisarmAuthority,
+}
+
+impl Bm1398WatchdogShutdownManifest {
+    pub(crate) fn new(
+        route_scope: Bm1398WatchdogRouteScope,
+        api_drain: dcentrald_hal::platform::HardwareMutationBarrierReceipt,
+        api_final_commit: dcentrald_hal::platform::HardwareMutationCommitFenceReceipt,
+        fabric: dcentrald_hal::i2c::TerminalSafeOffTransition,
+        safe_off: crate::s19_bm1398_native_mining::Bm1398SafeOffEvidence,
+        teardown: TeardownDisarmAuthority,
+    ) -> Self {
+        Self {
+            route_scope,
+            api_drain,
+            api_final_commit,
+            fabric,
+            safe_off,
+            teardown,
+        }
+    }
+
+    fn into_validated_parts(self) -> Result<(WatchdogRunScope, TeardownDisarmAuthority)> {
+        require_mutation_barrier("BM1398 API drain", &self.api_drain)?;
+        require_mutation_barrier("BM1398 API final commit", &self.api_final_commit)?;
+        require_mutation_barrier("BM1398 controller fabric", &self.fabric)?;
+        anyhow::ensure!(
+            self.safe_off.completed(),
+            "BM1398 cutoff/actor closeout incomplete"
+        );
+        anyhow::ensure!(
+            self.safe_off.same_teardown_budget(&self.teardown),
+            "BM1398 cutoff evidence belongs to another watchdog teardown budget"
+        );
+        Ok((self.route_scope.scope, self.teardown))
+    }
+}
+
 impl HybridWatchdogShutdownManifest {
     pub(crate) fn new(
         route_scope: HybridWatchdogRouteScope,
@@ -1279,6 +1412,24 @@ impl WatchdogDisarmPermit {
         Ok(Self {
             scope,
             composition: WatchdogComposition::HybridAm2,
+            teardown: WatchdogTeardownAuthority::Absolute(teardown),
+        })
+    }
+
+    pub(crate) fn from_s17_manifest(manifest: S17WatchdogShutdownManifest) -> Result<Self> {
+        let (scope, teardown) = manifest.into_validated_parts()?;
+        Ok(Self {
+            scope,
+            composition: WatchdogComposition::S17Hybrid,
+            teardown: WatchdogTeardownAuthority::Absolute(teardown),
+        })
+    }
+
+    pub(crate) fn from_bm1398_manifest(manifest: Bm1398WatchdogShutdownManifest) -> Result<Self> {
+        let (scope, teardown) = manifest.into_validated_parts()?;
+        Ok(Self {
+            scope,
+            composition: WatchdogComposition::Bm1398Native,
             teardown: WatchdogTeardownAuthority::Absolute(teardown),
         })
     }
@@ -1629,6 +1780,18 @@ impl SafetyWatchdogOwner {
         })
     }
 
+    pub(crate) fn claim_s17_route_scope(&mut self) -> Result<S17WatchdogRouteScope> {
+        Ok(S17WatchdogRouteScope {
+            scope: self.claim_composition(WatchdogComposition::S17Hybrid)?,
+        })
+    }
+
+    pub(crate) fn claim_bm1398_route_scope(&mut self) -> Result<Bm1398WatchdogRouteScope> {
+        Ok(Bm1398WatchdogRouteScope {
+            scope: self.claim_composition(WatchdogComposition::Bm1398Native)?,
+        })
+    }
+
     pub(crate) fn claim_am3_bb_route_scope(&mut self) -> Result<Am3BbWatchdogRouteScope> {
         let (actor_owner, actor_expectation) =
             issue_thread_roster([ThreadSlotDeclaration::required(
@@ -1859,6 +2022,8 @@ impl SafetyWatchdogOwner {
             !matches!(
                 self.composition,
                 Some(WatchdogComposition::NoPicSerial)
+                    | Some(WatchdogComposition::Bm1396Native)
+                    | Some(WatchdogComposition::ClassicAml)
                     | Some(WatchdogComposition::S19kTrack1Serial)
                     | Some(WatchdogComposition::Am2Bm1362Serial)
             ),
@@ -3044,6 +3209,69 @@ mod tests {
         .unwrap();
         assert!(matches!(admission, WatchdogAdmission::Armed(_)));
         (owner, liveness)
+    }
+
+    #[test]
+    fn s17_cutoff_evidence_requires_every_actual_outcome_and_its_own_issuer() {
+        let scope = WatchdogRunScope::new();
+        let (mut issuer, _) = issue_teardown_budget_authority(scope.clone());
+        let (mut foreign_issuer, _) = issue_teardown_budget_authority(scope);
+        let budget = issuer
+            .issue_at(Instant::now(), TeardownBudgetPolicy::watchdog_default())
+            .unwrap();
+        let view = budget.view();
+        let authority = budget.begin_disarm_at(Instant::now()).unwrap();
+        let foreign = foreign_issuer
+            .issue_at(Instant::now(), TeardownBudgetPolicy::watchdog_default())
+            .unwrap();
+        for outcomes in [
+            (false, true, true, true),
+            (true, false, true, true),
+            (true, true, false, true),
+            (true, true, true, false),
+        ] {
+            let evidence = crate::s17_hybrid_mining::S17SafeOffEvidence::outcomes_for_test(
+                view.clone(),
+                outcomes.0,
+                outcomes.1,
+                outcomes.2,
+                outcomes.3,
+            );
+            assert!(validate_s17_safe_off(&evidence, &authority).is_err());
+        }
+        let complete = crate::s17_hybrid_mining::S17SafeOffEvidence::outcomes_for_test(
+            view, true, true, true, true,
+        );
+        assert!(validate_s17_safe_off(&complete, &authority).is_ok());
+        assert!(
+            validate_s17_safe_off(&complete, &foreign.begin_disarm_at(Instant::now()).unwrap())
+                .is_err(),
+            "even another budget for the same nominal run must not substitute its issuer"
+        );
+    }
+
+    #[test]
+    fn s17_route_scope_cannot_be_claimed_as_another_composition() {
+        let mut owner = SafetyWatchdogOwner::inert_for_pre_hardware_test();
+        owner.claim_s17_route_scope().unwrap();
+        assert!(owner.claim_s17_route_scope().is_err());
+        assert!(owner.claim_hybrid_route_scope().is_err());
+        assert!(owner.claim_am3_bb_route_scope().is_err());
+    }
+
+    #[test]
+    fn bm1398_route_scope_cannot_be_reused_or_claimed_by_another_composition() {
+        let mut owner = SafetyWatchdogOwner::inert_for_pre_hardware_test();
+        owner.claim_bm1398_route_scope().unwrap();
+        assert!(owner.claim_bm1398_route_scope().is_err());
+        assert!(owner.claim_s17_route_scope().is_err());
+        assert!(owner.claim_hybrid_route_scope().is_err());
+        assert!(owner
+            .claim_serial_route_scope(SerialWatchdogComposition::Am2Bm1362)
+            .is_err());
+        let mut s17 = SafetyWatchdogOwner::inert_for_pre_hardware_test();
+        s17.claim_s17_route_scope().unwrap();
+        assert!(s17.claim_bm1398_route_scope().is_err());
     }
 
     fn test_feed_gate() -> (WatchdogFeedGateOwner, WatchdogFeedGate) {
@@ -4257,3 +4485,7 @@ mod tests {
         assert_eq!(state.drops_armed.load(Ordering::SeqCst), 0);
     }
 }
+
+#[cfg(all(test, feature = "sim-hal"))]
+#[path = "bm1396_sim_watchdog.rs"]
+pub(crate) mod bm1396_sim;

@@ -62,11 +62,20 @@ while IFS= read -r line; do
     # Cross-field consistency the harness relies on. AM335x is ARMv7 but is a
     # distinct external-media-only route, never a Zynq A/B alias.
     case "$arch/$soc" in armv7/zynq | armv7/am335x | aarch64/amlogic) : ;; *) bad "row $rows ($sku): arch/soc mismatch '$arch/$soc'" ;; esac
-    case "$soc/$bc" in zynq/nand-ab | amlogic/single-image | am335x/external-media) : ;; *) bad "row $rows ($sku): soc/boot_chain mismatch '$soc/$bc'" ;; esac
+    case "$soc/$bc" in
+        zynq/nand-ab | amlogic/single-image | am335x/external-media) : ;;
+        zynq/external-media)
+            case "$sku/$bt" in
+                S15/am1-s15 | T15/am1-t15) : ;;
+                *) bad "row $rows ($sku): unadmitted Zynq external-media target '$bt'" ;;
+            esac
+            ;;
+        *) bad "row $rows ($sku): soc/boot_chain mismatch '$soc/$bc'" ;;
+    esac
     case "$soc/$bt" in am335x/am3-bb-*) : ;; am335x/*) bad "row $rows ($sku): AM335x board_target '$bt' must start am3-bb-" ;; esac
 done < "$tmp"
 
-[ "$rows" -eq 25 ] || bad "expected exactly 25 target SKU rows, found $rows"
+[ "$rows" -eq 28 ] || bad "expected exactly 28 target SKU rows, found $rows"
 
 if [ "$fails" -eq 0 ]; then
     echo "PASS: skus.conf structurally valid — $rows SKU rows; columns, vocabulary, and arch/soc/boot_chain consistency all OK"

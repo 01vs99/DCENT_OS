@@ -1,4 +1,8 @@
 # DCENTos shared Buildroot config fragment — workspace-wide common.
+# Rust executables arrive stripped from the architecture build. Preserve the
+# final daemon bytes bound by post-build runtime-image.json through Buildroot's
+# target-finalize strip pass (dcentos-init is installed as /sbin/init).
+BR2_STRIP_EXCLUDE_FILES="dcentrald dcentos-init dcentos-discovery init"
 # D-Central Technologies, 2026.
 #
 # This fragment owns the package set + system identity bits that are
@@ -32,6 +36,14 @@ BR2_ENABLE_LTO=y
 #
 # Per-product defconfigs override BR2_TARGET_GENERIC_HOSTNAME and
 # BR2_TARGET_GENERIC_ISSUE. The root password and DHCP iface are shared.
+#
+# WS-A4 (2026-09-01): RELEASE is the DEFAULT image posture. The
+# "dcentral" root password below is the DEV/LAB base value only —
+# scripts/build_in_docker.sh appends BR2_TARGET_GENERIC_ROOT_PASSWD="*"
+# LAST on the (default) RELEASE posture, locking root, and
+# scripts/lib/release_image_provision.sh fails closed in post-build unless
+# the lock landed. DEV/LAB builds keep this value by opting out explicitly
+# (DCENT_DEV_IMAGE=1 / DCENT_RELEASE_IMAGE=0).
 # =============================================================================
 BR2_TARGET_GENERIC_ROOT_PASSWD="dcentral"
 BR2_SYSTEM_DHCP="eth0"
@@ -71,9 +83,11 @@ BR2_PACKAGE_DROPBEAR=y
 # mtd-utils  : NAND flash partition read/write (nandwrite, ubiformat, etc.).
 # ethtool    : network diagnostics.
 # strace     : DEV/LAB convenience for FPGA / serial / I2C debugging. RELEASE
-#              images prune usr/bin/strace (and any leftover i2cget) in
-#              board/common/prune-runtime-research-tools.sh when
-#              DCENT_RELEASE_IMAGE=1. Do not re-enable BR2_PACKAGE_I2C_TOOLS.
+#              images — the default posture since WS-A4 — prune
+#              usr/bin/strace (and any leftover i2cget) in
+#              board/common/prune-runtime-research-tools.sh (canonical posture
+#              via scripts/lib/release_posture.sh; DCENT_DEV_IMAGE=1 opts out).
+#              Do not re-enable BR2_PACKAGE_I2C_TOOLS.
 # util-linux : standard system utilities (lsblk, dmesg, etc.).
 # Zynq devmem remains a boot-lifecycle dependency until typed early-safety
 # helpers replace it; normal profiles, MCP, and REST do not invoke it.
@@ -110,6 +124,7 @@ BR2_PACKAGE_LIBUBOOTENV_TOOLS=y
 BR2_PACKAGE_PYTHON3=y
 BR2_PACKAGE_PYTHON3_READLINE=y
 BR2_PACKAGE_PYTHON3_PYEXPAT=y
+BR2_PACKAGE_PYTHON3_SSL=y
 
 # OpenSSL — TLS for pool connections, ed25519 verification of stock-Bitmain
 # manifests at runtime, and `openssl` CLI for in-the-field debugging.

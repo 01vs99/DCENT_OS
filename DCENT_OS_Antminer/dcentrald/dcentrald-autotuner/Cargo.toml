@@ -6,6 +6,8 @@ description = "Per-chip frequency auto-tuning for DCENTos — TABS algorithm (Th
 license = "GPL-3.0"
 
 [features]
+# Hardware environment overrides; excluded from signed Beta/Stable builds.
+lab = ["dcentrald-common/lab", "dcentrald-asic/lab", "dcentrald-silicon-profiles/lab"]
 # W13-A: opt-in surface for the runtime-command + state-injection
 # helpers used by the wave-13 integration tests (`tests/test_autotuner_runtime.rs`
 # in `dcentrald-api`). Default off so production builds do not link

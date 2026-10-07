@@ -46,6 +46,7 @@ EXPECTED_FUNCTION_GROUPS = {
         "mount_virtual_fs",
     ],
     "console_and_process": [
+        "console_profile",
         "find_shell",
         "fork_exec",
         "fork_exec_with_tty",
@@ -92,6 +93,7 @@ EXPECTED_FUNCTION_GROUPS = {
 }
 
 EXPECTED_TESTS = {
+    "exact_bm1362_aml_uses_kernel_console_without_naming_an_asic_uart",
     "absolute_deadline_wait_retries_every_eintr",
     "console_only_posture_admits_no_start_or_stop_scripts",
     "emergency_path_has_no_blocking_userspace_work_before_reboot",
@@ -100,6 +102,7 @@ EXPECTED_TESTS = {
     "external_missing_readiness_gate_refuses_the_whole_pass",
     "external_nonexecutable_readiness_gate_refuses_the_whole_pass",
     "external_nonzero_readiness_gate_bars_every_later_service",
+    "optional_external_failure_retains_network_but_never_starts_mining",
     "external_readiness_gate_runs_first_before_remaining_services",
     "external_shutdown_is_limited_to_successfully_admitted_services",
     "external_symlink_readiness_gate_refuses_the_whole_pass",
@@ -392,8 +395,8 @@ class DcentosInitSurfaceRegistryTests(unittest.TestCase):
             for name in names
         }
         self.assertEqual(functions, grouped)
-        self.assertEqual(len(functions), 38)
-        self.assertEqual(self.registry["private_function_count"], 38)
+        self.assertEqual(len(functions), 39)
+        self.assertEqual(self.registry["private_function_count"], 39)
         for needle in (
             "enum ExternalMediaMarkerState",
             "enum ServicePosture",
@@ -412,8 +415,8 @@ class DcentosInitSurfaceRegistryTests(unittest.TestCase):
             re.findall(r"#\[test\]\s*fn\s+([A-Za-z0-9_]+)\s*\(", self.source)
         )
         self.assertEqual(tests, EXPECTED_TESTS)
-        self.assertEqual(self.registry["compile_profiles"][0]["unit_tests"], 27)
-        self.assertEqual(self.registry["compile_profiles"][0]["package_tests"], 27)
+        self.assertEqual(self.registry["compile_profiles"][0]["unit_tests"], 29)
+        self.assertEqual(self.registry["compile_profiles"][0]["package_tests"], 29)
         self.assertEqual(
             self.registry["test_boundary"]["production_action_functions_executed"],
             [],

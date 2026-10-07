@@ -4,9 +4,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
-import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,74 +23,14 @@ WORKSPACE = Path(__file__).resolve().parents[3]
 DONOR = WORKSPACE / ""
 
 
-def _its(kernel_ref: str = "kernel@1", dtb_ref: str = "fdt@1") -> str:
-    return f'''/dts-v1/;
-/ {{
-    description = "DCENT_OS S17 model-bound UBI kernel FIT";
-    #address-cells = <1>;
-    images {{
-        kernel@1 {{
-            description = "DCENT_OS S17 UBI kernel";
-            data = /incbin/("kernel.bin");
-            type = "kernel";
-            arch = "arm";
-            os = "linux";
-            compression = "none";
-            load = <0x00008000>;
-            entry = <0x00008000>;
-            hash@1 {{ algo = "crc32"; }};
-            hash@2 {{ algo = "sha1"; }};
-        }};
-        fdt@1 {{
-            description = "Antminer S17 model-bound device tree";
-            data = /incbin/("s17.dtb");
-            type = "flat_dt";
-            arch = "arm";
-            compression = "none";
-            hash@1 {{ algo = "crc32"; }};
-            hash@2 {{ algo = "sha1"; }};
-        }};
-    }};
-    configurations {{
-        default = "config@1";
-        config@1 {{
-            description = "DCENT_OS S17 kernel plus exact S17 DTB";
-            kernel = "{kernel_ref}";
-            fdt = "{dtb_ref}";
-        }};
-    }};
-}};
-'''
-
-
-def _build_fit(
-    root: Path,
-    kernel: bytes,
-    dtb: bytes,
-    *,
-    kernel_ref: str = "kernel@1",
-    dtb_ref: str = "fdt@1",
-) -> Path:
-    mkimage = shutil.which("mkimage")
-    if mkimage is None:
-        raise unittest.SkipTest("mkimage with FIT support is not installed")
+def _build_fit(root: Path, kernel: bytes, dtb: bytes) -> Path:
     root.mkdir()
-    (root / "kernel.bin").write_bytes(kernel)
-    (root / "s17.dtb").write_bytes(dtb)
-    (root / "s17.its").write_text(_its(kernel_ref, dtb_ref), encoding="ascii")
+    kernel_path = root / "kernel.bin"
+    dtb_path = root / "s17.dtb"
+    kernel_path.write_bytes(kernel)
+    dtb_path.write_bytes(dtb)
     output = root / "s17.itb"
-    environment = dict(os.environ)
-    environment["SOURCE_DATE_EPOCH"] = str(subject.SOURCE_FIT_TIMESTAMP)
-    result = subprocess.run(
-        [mkimage, "-f", "s17.its", output.name],
-        cwd=root,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise AssertionError(f"mkimage failed: {result.stdout}\n{result.stderr}")
+    subject.build_ubi_fit(kernel_path, dtb_path, output)
     return output
 
 
@@ -191,6 +129,47 @@ class S17DonorAdmissionTests(unittest.TestCase):
                     subject.AdmissionError, "selects the wrong kernel"
                 ):
                     subject.verify_ubi_fit(wrong_config)
+
+    def test_canonical_builder_reproduces_exact_bytes_and_refuses_overwrite(self) -> None:
+        kernel, dtb, _ = subject.admit_donor(DONOR)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = _build_fit(root / "first", kernel, dtb)
+            second = _build_fit(root / "second", kernel, dtb)
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            self.assertEqual(subject.OUTPUT_FIT_SHA256, subject.sha256_bytes(first.read_bytes()))
+            before = first.read_bytes()
+            with self.assertRaisesRegex(subject.AdmissionError, "must be absent"):
+                subject.build_ubi_fit(first.parent / "kernel.bin", first.parent / "s17.dtb", first)
+            self.assertEqual(before, first.read_bytes())
+
+    def test_canonical_builder_refuses_changed_real_inputs_before_output(self) -> None:
+        kernel, dtb, _ = subject.admit_donor(DONOR)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for label, raw in (("kernel", kernel), ("dtb", dtb)):
+                with self.subTest(input=label):
+                    altered = bytearray(raw)
+                    altered[len(altered) // 2] ^= 1
+                    k, d, out = root / "kernel.bin", root / "s17.dtb", root / (label + ".itb")
+                    k.write_bytes(bytes(altered) if label == "kernel" else kernel)
+                    d.write_bytes(bytes(altered) if label == "dtb" else dtb)
+                    with self.assertRaisesRegex(subject.AdmissionError, "exact pin"):
+                        subject.build_ubi_fit(k, d, out)
+                    self.assertFalse(out.exists())
+
+    def test_cli_canonical_build_rechecks_actual_output(self) -> None:
+        kernel, dtb, _ = subject.admit_donor(DONOR)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            k, d, out = root / "kernel.bin", root / "s17.dtb", root / "s17.itb"
+            k.write_bytes(kernel)
+            d.write_bytes(dtb)
+            result = subprocess.run([sys.executable, "-B", str(Path(subject.__file__)),
+                "build-fit", "--kernel", str(k), "--dtb", str(d), "--output", str(out)],
+                check=False, capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(subject.verify_ubi_fit(out), json.loads(result.stdout))
 
     def test_cli_extract_emits_machine_readable_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

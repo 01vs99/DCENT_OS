@@ -1,0 +1,1026 @@
+{
+  "source": "native-operational-baud-vectors-v1.json",
+  "cases": [
+    {
+      "model": "s17e",
+      "entry": 388620,
+      "fixed_default": true,
+      "baud": 6000000,
+      "old_misc": 0,
+      "old_host": 0,
+      "divisor": 7,
+      "events": [
+        [
+          "asic_write",
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          40,
+          100663311
+        ],
+        [
+          "asic_write",
+          24,
+          67328
+        ],
+        [
+          "source_delay_us",
+          50000,
+          0
+        ],
+        [
+          "host_read",
+          0
+        ],
+        [
+          "host_write",
+          50529027
+        ]
+      ]
+    },
+    {
+      "model": "s17e",
+      "entry": 388620,
+      "fixed_default": true,
+      "baud": 6000000,
+      "old_misc": 4030742576,
+      "old_host": 3248137242,
+      "divisor": 7,
+      "events": [
+        [
+          "asic_write",
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          40,
+          100663311
+        ],
+        [
+          "asic_write",
+          24,
+          4030809904
+        ],
+        [
+          "source_delay_us",
+          50000,
+          0
+        ],
+        [
+          "host_read",
+          3248137242
+        ],
+        [
+          "host_write",
+          3280175875
+        ]
+      ]
+    },
+    {
+      "model": "t17e",
+      "entry": 391700,
+      "fixed_default": true,
+      "baud": 3000000,
+      "old_misc": 0,
+      "old_host": 0,
+      "divisor": 0,
+      "events": [
+        [
+          "asic_write",
+          24,
+          0
+        ],
+        [
+          "source_delay_us",
+          50000,
+          0
+        ],
+        [
+          "host_read",
+          0
+        ],
+        [
+          "host_write",
+          0
+        ]
+      ]
+    },
+    {
+      "model": "t17e",
+      "entry": 391700,
+      "fixed_default": true,
+      "baud": 3000000,
+      "old_misc": 4030742576,
+      "old_host": 3248137242,
+      "divisor": 0,
+      "events": [
+        [
+          "asic_write",
+          24,
+          4030742576
+        ],
+        [
+          "source_delay_us",
+          50000,
+          0
+        ],
+        [
+          "host_read",
+          3248137242
+        ],
+        [
+          "host_write",
+          3229646848
+        ]
+      ]
+    },
+    {
+      "model": "s17e",
+      "entry": 388620,
+      "fixed_default": true,
+      "baud": 6000000,
+      "old_misc": 4026548272,
+      "old_host": 3248137242,
+      "divisor": 7,
+      "events": [
+        [
+          "asic_write",
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          40,
+          100663311
+        ],
+        [
+          "asic_write",
+          24,
+          4026615600
+        ],
+        [
+          "source_delay_us",
+          50000,
+          0
+        ],
+        [
+          "host_read",
+          3248137242
+        ],
+        [
+          "host_write",
+          3280175875
+        ]
+      ]
+    },
+    {
+      "model": "t17e",
+      "entry": 391700,
+      "fixed_default": true,
+      "baud": 3000000,
+      "old_misc": 4026548272,
+      "old_host": 3248137242,
+      "divisor": 0,
+      "events": [
+        [
+          "asic_write",
+          24,
+          4026548272
+        ],
+        [
+          "source_delay_us",
+          50000,
+          0
+        ],
+        [
+          "host_read",
+          3248137242
+        ],
+        [
+          "host_write",
+          3229646848
+        ]
+      ]
+    }
+  ],
+  "thermal_joins": [
+    {
+      "model": "s17e",
+      "thermal_entry": 519796,
+      "baud_entry": 388620,
+      "old_misc": 0,
+      "shared_misc_after_enable": 16432,
+      "old_host": 0,
+      "events": [
+        [
+          "asic_write",
+          0,
+          0,
+          27,
+          24,
+          16432
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          40,
+          100663311
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          24,
+          83760
+        ],
+        [
+          "delay_us",
+          50000
+        ],
+        [
+          "host_read",
+          0
+        ],
+        [
+          "host_write",
+          50529027
+        ]
+      ]
+    },
+    {
+      "model": "s17e",
+      "thermal_entry": 519796,
+      "baud_entry": 388620,
+      "old_misc": 0,
+      "shared_misc_after_enable": 16432,
+      "old_host": 3248137242,
+      "events": [
+        [
+          "asic_write",
+          0,
+          0,
+          27,
+          24,
+          16432
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          40,
+          100663311
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          24,
+          83760
+        ],
+        [
+          "delay_us",
+          50000
+        ],
+        [
+          "host_read",
+          3248137242
+        ],
+        [
+          "host_write",
+          3280175875
+        ]
+      ]
+    },
+    {
+      "model": "s17e",
+      "thermal_entry": 519796,
+      "baud_entry": 388620,
+      "old_misc": 4294967295,
+      "shared_misc_after_enable": 4294967231,
+      "old_host": 0,
+      "events": [
+        [
+          "asic_write",
+          0,
+          0,
+          27,
+          24,
+          4294967231
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          40,
+          100663311
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          24,
+          4043302847
+        ],
+        [
+          "delay_us",
+          50000
+        ],
+        [
+          "host_read",
+          0
+        ],
+        [
+          "host_write",
+          50529027
+        ]
+      ]
+    },
+    {
+      "model": "s17e",
+      "thermal_entry": 519796,
+      "baud_entry": 388620,
+      "old_misc": 4294967295,
+      "shared_misc_after_enable": 4294967231,
+      "old_host": 3248137242,
+      "events": [
+        [
+          "asic_write",
+          0,
+          0,
+          27,
+          24,
+          4294967231
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          40,
+          100663311
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          24,
+          4043302847
+        ],
+        [
+          "delay_us",
+          50000
+        ],
+        [
+          "host_read",
+          3248137242
+        ],
+        [
+          "host_write",
+          3280175875
+        ]
+      ]
+    },
+    {
+      "model": "s17e",
+      "thermal_entry": 519796,
+      "baud_entry": 388620,
+      "old_misc": 4026531856,
+      "shared_misc_after_enable": 4026548272,
+      "old_host": 0,
+      "events": [
+        [
+          "asic_write",
+          0,
+          0,
+          27,
+          24,
+          4026548272
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          40,
+          100663311
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          24,
+          4026615600
+        ],
+        [
+          "delay_us",
+          50000
+        ],
+        [
+          "host_read",
+          0
+        ],
+        [
+          "host_write",
+          50529027
+        ]
+      ]
+    },
+    {
+      "model": "s17e",
+      "thermal_entry": 519796,
+      "baud_entry": 388620,
+      "old_misc": 4026531856,
+      "shared_misc_after_enable": 4026548272,
+      "old_host": 3248137242,
+      "events": [
+        [
+          "asic_write",
+          0,
+          0,
+          27,
+          24,
+          4026548272
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          40,
+          100663311
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          24,
+          4026615600
+        ],
+        [
+          "delay_us",
+          50000
+        ],
+        [
+          "host_read",
+          3248137242
+        ],
+        [
+          "host_write",
+          3280175875
+        ]
+      ]
+    },
+    {
+      "model": "s17e",
+      "thermal_entry": 519796,
+      "baud_entry": 388620,
+      "old_misc": 2779060826,
+      "shared_misc_after_enable": 2779077178,
+      "old_host": 0,
+      "events": [
+        [
+          "asic_write",
+          0,
+          0,
+          27,
+          24,
+          2779077178
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          40,
+          100663311
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          24,
+          2695186234
+        ],
+        [
+          "delay_us",
+          50000
+        ],
+        [
+          "host_read",
+          0
+        ],
+        [
+          "host_write",
+          50529027
+        ]
+      ]
+    },
+    {
+      "model": "s17e",
+      "thermal_entry": 519796,
+      "baud_entry": 388620,
+      "old_misc": 2779060826,
+      "shared_misc_after_enable": 2779077178,
+      "old_host": 3248137242,
+      "events": [
+        [
+          "asic_write",
+          0,
+          0,
+          27,
+          24,
+          2779077178
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          104,
+          1081082129
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          40,
+          100663311
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          24,
+          2695186234
+        ],
+        [
+          "delay_us",
+          50000
+        ],
+        [
+          "host_read",
+          3248137242
+        ],
+        [
+          "host_write",
+          3280175875
+        ]
+      ]
+    },
+    {
+      "model": "t17e",
+      "thermal_entry": 523484,
+      "baud_entry": 391700,
+      "old_misc": 0,
+      "shared_misc_after_enable": 16432,
+      "old_host": 0,
+      "events": [
+        [
+          "asic_write",
+          0,
+          0,
+          51,
+          24,
+          16432
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          24,
+          16432
+        ],
+        [
+          "delay_us",
+          50000
+        ],
+        [
+          "host_read",
+          0
+        ],
+        [
+          "host_write",
+          0
+        ]
+      ]
+    },
+    {
+      "model": "t17e",
+      "thermal_entry": 523484,
+      "baud_entry": 391700,
+      "old_misc": 0,
+      "shared_misc_after_enable": 16432,
+      "old_host": 3248137242,
+      "events": [
+        [
+          "asic_write",
+          0,
+          0,
+          51,
+          24,
+          16432
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          24,
+          16432
+        ],
+        [
+          "delay_us",
+          50000
+        ],
+        [
+          "host_read",
+          3248137242
+        ],
+        [
+          "host_write",
+          3229646848
+        ]
+      ]
+    },
+    {
+      "model": "t17e",
+      "thermal_entry": 523484,
+      "baud_entry": 391700,
+      "old_misc": 4294967295,
+      "shared_misc_after_enable": 4294967231,
+      "old_host": 0,
+      "events": [
+        [
+          "asic_write",
+          0,
+          0,
+          51,
+          24,
+          4294967231
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          24,
+          4043235519
+        ],
+        [
+          "delay_us",
+          50000
+        ],
+        [
+          "host_read",
+          0
+        ],
+        [
+          "host_write",
+          0
+        ]
+      ]
+    },
+    {
+      "model": "t17e",
+      "thermal_entry": 523484,
+      "baud_entry": 391700,
+      "old_misc": 4294967295,
+      "shared_misc_after_enable": 4294967231,
+      "old_host": 3248137242,
+      "events": [
+        [
+          "asic_write",
+          0,
+          0,
+          51,
+          24,
+          4294967231
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          24,
+          4043235519
+        ],
+        [
+          "delay_us",
+          50000
+        ],
+        [
+          "host_read",
+          3248137242
+        ],
+        [
+          "host_write",
+          3229646848
+        ]
+      ]
+    },
+    {
+      "model": "t17e",
+      "thermal_entry": 523484,
+      "baud_entry": 391700,
+      "old_misc": 4026531856,
+      "shared_misc_after_enable": 4026548272,
+      "old_host": 0,
+      "events": [
+        [
+          "asic_write",
+          0,
+          0,
+          51,
+          24,
+          4026548272
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          24,
+          4026548272
+        ],
+        [
+          "delay_us",
+          50000
+        ],
+        [
+          "host_read",
+          0
+        ],
+        [
+          "host_write",
+          0
+        ]
+      ]
+    },
+    {
+      "model": "t17e",
+      "thermal_entry": 523484,
+      "baud_entry": 391700,
+      "old_misc": 4026531856,
+      "shared_misc_after_enable": 4026548272,
+      "old_host": 3248137242,
+      "events": [
+        [
+          "asic_write",
+          0,
+          0,
+          51,
+          24,
+          4026548272
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          24,
+          4026548272
+        ],
+        [
+          "delay_us",
+          50000
+        ],
+        [
+          "host_read",
+          3248137242
+        ],
+        [
+          "host_write",
+          3229646848
+        ]
+      ]
+    },
+    {
+      "model": "t17e",
+      "thermal_entry": 523484,
+      "baud_entry": 391700,
+      "old_misc": 2779060826,
+      "shared_misc_after_enable": 2779077178,
+      "old_host": 0,
+      "events": [
+        [
+          "asic_write",
+          0,
+          0,
+          51,
+          24,
+          2779077178
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          24,
+          2695118906
+        ],
+        [
+          "delay_us",
+          50000
+        ],
+        [
+          "host_read",
+          0
+        ],
+        [
+          "host_write",
+          0
+        ]
+      ]
+    },
+    {
+      "model": "t17e",
+      "thermal_entry": 523484,
+      "baud_entry": 391700,
+      "old_misc": 2779060826,
+      "shared_misc_after_enable": 2779077178,
+      "old_host": 3248137242,
+      "events": [
+        [
+          "asic_write",
+          0,
+          0,
+          51,
+          24,
+          2779077178
+        ],
+        [
+          "asic_write",
+          255,
+          1,
+          0,
+          24,
+          2695118906
+        ],
+        [
+          "delay_us",
+          50000
+        ],
+        [
+          "host_read",
+          3248137242
+        ],
+        [
+          "host_write",
+          3229646848
+        ]
+      ]
+    }
+  ]
+}

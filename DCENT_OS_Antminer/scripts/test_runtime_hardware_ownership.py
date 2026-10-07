@@ -37,8 +37,6 @@ S99_VERIFY_COPIES = (
     ROOT / "br2_external_dcentos/board/amlogic/rootfs-overlay/etc/init.d/S99verify",
     ROOT
     / "br2_external_dcentos/board/beaglebone/am3-bb-s19jpro/rootfs-overlay/etc/init.d/S99verify",
-    ROOT
-    / "br2_external_dcentos/board/cvitek/cv1835-s19jpro/rootfs-overlay/etc/init.d/S99verify",
 )
 
 PRUNE = (
@@ -131,29 +129,60 @@ class RuntimeHardwareOwnershipTests(unittest.TestCase):
         self.assertIsNone(re.search(r"(?m)^pub fn open_fan_controller\(\)", hal))
         self.assertIsNone(re.search(r"(?m)^pub fn spawn\(\) -> Result<Self>", hal))
 
-        admission = serial.index("AmlogicNoPicAdmission::detect(")
-        bm1398_refusal = serial.index("if is_bm1398 && !passthrough")
-        bm1366_refusal = serial.index("if is_bm1366 && !passthrough")
-        optional_hardware_observation = serial.index("let nopic = is_nopic(&self.config)")
-        service = serial.index(".spawn_power_thermal_service()", admission)
-        fan = serial.index(".open_fan_controller()", service)
-        lifecycle_owner = serial.index(".take_lifecycle_owner()", service)
-        enable_operation = serial.index(".take_psu_enable_operation()", lifecycle_owner)
-        watchdog = serial.index("SafetyWatchdogOwner::start_before_energizing", enable_operation)
-        enable = serial.index(
-            "tokio::task::spawn_blocking(move || psu_enable_operation.enable_psu())",
-            watchdog,
+        # The former NoPic detect() call was split into the original mapped
+        # S19k owner and exact modern S21 population admission. Check each
+        # retained service/fan/power branch in the actual run function.
+        run, _, _ = rust_function(serial, "run")
+        bm1398_refusal = run.index("if is_bm1398 && !passthrough")
+        bm1366_refusal = run.index("if is_bm1366 && !passthrough")
+        observation = run.index(
+            "let nopic = if s19k_install_custody_safeoff || is_bm1362_aml || is_bm1366_xp {"
         )
-        self.assertLess(bm1398_refusal, optional_hardware_observation)
-        self.assertLess(bm1366_refusal, optional_hardware_observation)
-        self.assertLess(optional_hardware_observation, admission)
-        self.assertLess(admission, service)
-        self.assertLess(service, lifecycle_owner)
-        self.assertLess(lifecycle_owner, enable_operation)
-        self.assertLess(service, fan)
-        self.assertLess(fan, watchdog)
-        self.assertLess(enable_operation, watchdog)
-        self.assertLess(watchdog, enable)
+        s19k_admission = run.index("S19kNativeAggregateAdmission::detect()")
+        mapped = run.index(".into_population()", s19k_admission)
+        s19k_service = run.index("mapped.spawn_power_thermal_service()", mapped)
+        modern_admission = run.index("AmlogicNoPicAdmission::detect_modern_s21_population(profile)")
+        modern_service = run.index(".spawn_power_thermal_service()", modern_admission)
+        s19k_fan = run.index(".open_fan_controller()", modern_service)
+        modern_fan = run.index(".open_fan_controller()", s19k_fan + 1)
+        self.assertLess(bm1398_refusal, observation)
+        self.assertLess(bm1366_refusal, observation)
+        self.assertLess(observation, s19k_admission)
+        self.assertLess(observation, modern_admission)
+        self.assertLess(s19k_admission, mapped)
+        self.assertLess(mapped, s19k_service)
+        self.assertLess(s19k_service, s19k_fan)
+        self.assertLess(modern_admission, modern_service)
+        self.assertLess(modern_service, modern_fan)
+
+        s19k = run[run.index('"native S19k cold-start lacks exact NoPic power ownership"'):]
+        s19k = s19k[:s19k.index("let powered_thermal_port =")]
+        arm = s19k.index("SafetyWatchdogOwner::start_before_energizing")
+        lifecycle = s19k.index(".take_lifecycle_owner()")
+        terminal = s19k.index(".admit_s19k_native_terminal_custody()")
+        reset = s19k.index("mapped_for_reset.assert_all_resets_checked()")
+        operation = s19k.index(".take_psu_enable_operation()")
+        enable = s19k.index("psu_enable_operation.enable_psu_at_voltage(voltage)")
+        self.assertLess(s19k_fan, run.index('"native S19k cold-start lacks exact NoPic power ownership"'))
+        self.assertLess(arm, lifecycle)
+        self.assertLess(lifecycle, terminal)
+        self.assertLess(terminal, reset)
+        self.assertLess(reset, operation)
+        self.assertLess(operation, enable)
+
+        modern_start = run.index("if !native_nopic_power_owner")
+        modern = run[modern_start:]
+        modern = modern[:modern.index("let startup_thermal_owner =")]
+        lifecycle = modern.index(".take_lifecycle_owner()")
+        operation = modern.index(".take_psu_enable_operation()")
+        arm = modern.index("SafetyWatchdogOwner::start_before_energizing")
+        enable = modern.index("psu_enable_operation.enable_psu_at_voltage(selected_rail_v)")
+        compatibility_enable = modern.index("psu_enable_operation.enable_psu()")
+        self.assertLess(modern_fan, modern_start)
+        self.assertLess(lifecycle, operation)
+        self.assertLess(operation, arm)
+        self.assertLess(arm, enable)
+        self.assertLess(arm, compatibility_enable)
         self.assertIn("power_thermal.thermal_port()", serial)
         self.assertNotIn("power_thermal.terminal_fence()", serial)
         self.assertIn(
@@ -404,7 +433,15 @@ class RuntimeHardwareOwnershipTests(unittest.TestCase):
         self.assertNotIn("std::fs", service_reader)
         self.assertNotIn("/sys/bus/i2c", service_reader)
         self.assertIn("if !self.is_write_denied(addr)", hal_reader)
-        self.assertIn("fs::File::open(&path)", hal_reader)
+        self.assertIn("open_at24_identity_file(std::path::Path::new(&device))", hal_reader)
+        at24_selector, _, _ = rust_function(hal, "open_at24_identity_file")
+        self.assertIn('fs::File::open(device.join("eeprom"))', at24_selector)
+        self.assertIn('fs::symlink_metadata(device.join("driver"))', at24_selector)
+        self.assertIn("std::io::ErrorKind::PermissionDenied", at24_selector)
+        self.assertIn("let mut offset = [0u8];", hal_reader)
+        self.assertIn("I2C_RDWR", hal_reader)
+        self.assertIn("nmsgs: 2", hal_reader)
+        self.assertIn("if completed != 2", hal_reader)
         self.assertNotIn("set_slave", hal_reader)
         self.assertNotIn("I2C_SLAVE", hal_reader)
 
@@ -543,7 +580,7 @@ class RuntimeHardwareOwnershipTests(unittest.TestCase):
         source = read(REST_LATE)
         routes = read(REST_ROUTES)
         cargo = read(ROOT / "dcentrald/dcentrald-api/Cargo.toml")
-        self.assertIn("recovery-tool = []", cargo)
+        self.assertIn('recovery-tool = ["dcentrald-common/lab"]', cargo)
         self.assertNotIn('Command::new("i2ctransfer")', source)
         self.assertNotIn("PsuController::open_kernel_only", source)
 
@@ -667,8 +704,15 @@ class RuntimeHardwareOwnershipTests(unittest.TestCase):
             (target / "usr/sbin/i2cget").write_text("i2cget\n")
             (target / "etc/preserved").write_text("safe\n")
 
+            # WS-A4 re-anchor (2026-09-01): this case asserted the DEV default
+            # (posture env unset => strace/i2cget survive). RELEASE is now the
+            # DEFAULT posture, so the DEV preservation case must use the
+            # explicit opt-out. The assertions are unchanged — nothing was
+            # weakened; a new default-RELEASE case is added below.
             env = os.environ.copy()
             env.pop("DCENT_RELEASE_IMAGE", None)
+            env.pop("DCENT_DEV_IMAGE", None)
+            env["DCENT_DEV_IMAGE"] = "1"
             subprocess.run(["sh", str(PRUNE), str(target)], check=True, env=env)
             self.assertFalse((target / "root/tools").exists())
             self.assertFalse((target / "usr/bin/dcent-shell").exists())
@@ -676,6 +720,19 @@ class RuntimeHardwareOwnershipTests(unittest.TestCase):
             self.assertFalse((target / "usr/sbin/switch_firmware.sh").exists())
             self.assertEqual((target / "usr/bin/strace").read_text(), "strace\n")
             self.assertEqual((target / "usr/sbin/i2cget").read_text(), "i2cget\n")
+            self.assertEqual((target / "etc/preserved").read_text(), "safe\n")
+
+            # WS-A4: DEFAULT posture (env fully unset) => RELEASE: the debug
+            # executors are pruned with no explicit request. Recreate them
+            # first so this case is independent of the DEV case above.
+            (target / "usr/bin/strace").write_text("strace\n")
+            (target / "usr/sbin/i2cget").write_text("i2cget\n")
+            env = os.environ.copy()
+            env.pop("DCENT_RELEASE_IMAGE", None)
+            env.pop("DCENT_DEV_IMAGE", None)
+            subprocess.run(["sh", str(PRUNE), str(target)], check=True, env=env)
+            self.assertFalse((target / "usr/bin/strace").exists())
+            self.assertFalse((target / "usr/sbin/i2cget").exists())
             self.assertEqual((target / "etc/preserved").read_text(), "safe\n")
 
             env["DCENT_RELEASE_IMAGE"] = "1"

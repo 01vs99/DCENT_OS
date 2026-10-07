@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import sys
 from typing import Any, Dict, Iterable, NoReturn, Tuple
@@ -464,9 +465,56 @@ def parser() -> argparse.ArgumentParser:
     return top
 
 
+def host_path_text(value: str) -> str:
+    """Rewrite Git-Bash (MSYS) drive paths (/d/dir) and long-path prefixes.
+
+    MSYS automatic argument conversion is per-argument and inconsistent on
+    long release command lines (producer runs drop1-20260916-cyg3sjwi and
+    drop1-20260917-gnscaudk; the same fix landed in rust_dependency_inventory
+    commit b1ae659fa and source_closure commit 4fd3d8b0e). The stage feeds
+    release_invocation.verify_invocation's strict lexical-absolute
+    admission and the capability file is read from disk, so the raw strings
+    are normalized here at the parse layer before any pathlib conversion.
+    POSIX and native inputs are returned unchanged; on non-Windows hosts
+    this is the identity.
+    """
+    if os.name != "nt" or not isinstance(value, str):
+        return value
+    text = value
+    if text.startswith("\\\\?\\UNC\\"):
+        text = "\\\\" + text[8:]
+    elif text.startswith("//?/UNC/"):
+        text = "//" + text[8:]
+    else:
+        for prefix in ("\\\\?\\", "//?/"):
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+                break
+    if (
+        len(text) >= 2
+        and text[0] == "/"
+        and text[1].isascii()
+        and text[1].isalpha()
+        and (len(text) == 2 or text[2] == "/")
+    ):
+        return text[1].upper() + ":/" + text[3:]
+    return text
+
+
+def normalize_host_path_args(args: argparse.Namespace) -> argparse.Namespace:
+    for field in (
+        "stage",
+        "capability",
+    ):
+        value = getattr(args, field, None)
+        if isinstance(value, str):
+            setattr(args, field, host_path_text(value))
+    return args
+
+
 def main() -> int:
     try:
-        args = parser().parse_args()
+        args = normalize_host_path_args(parser().parse_args())
         stage = pathlib.Path(args.stage)
         if args.command == "create-spec":
             result = create_volume_spec(stage, args.role)

@@ -1,27 +1,17 @@
-# DCENTos Buildroot defconfig — Antminer S19j Pro Amlogic (am3-aml PIC1704).
-# D-Central Technologies, Phase 4B (2026-05-15).
-#
-# Target: Amlogic A113D (ARM Cortex-A53 quad, aarch64).
-# Chip:   BM1362 (3x126 chips per `levels.json`, BHB42801 hashboard 0x04 0x11).
-# PSU:    APW12 / APW12+ class (PMBus enable + GPIO 437 rail gate).
-# PIC:    PIC1704 short-form I²C voltage controller at 0x20 (CV/BB/AML
-#         S19j Pro whitelist).
-# Boot:   BL2 -> FIP -> U-Boot 2015.01 -> kernel 4.9.113 (no FPGA bitstream).
-#
-# Per-product OVERRIDE layer. Shared content lives in:
-#   dcentos-common.fragment           (workspace-wide package set + identity)
-#   dcentos_am3_aml_common.fragment   (aarch64 + Linaro toolchain + cpio.gz)
-#
-# Sibling of dcentos_am3_s21_defconfig and dcentos_am3_s19kpro_defconfig —
-# same Amlogic SoC, same boot chain, only product identity + voltage
-# controller path differ. PIC1704 routing is selected at runtime via
-# /etc/subtype + i2cdetect 0x20 ACK.
+# DCENT_OS classic S19j Pro Amlogic image (am3-s19jpro-aml).
+# Target A113D, aarch64; BHB42601/21/41, BM1362, 126 ASICs per selected board.
+# Retained current-boot factory identity + classic application firmware0x89,
+# APW12 versions75..77, PIC LM75 supervision, GPIO437 raw0ON/raw1OFF.
+# BL2 -> FIP -> U-Boot2015.01 -> kernel4.9.113; no FPGA bitstream.
+# Shared package/architecture content is provided by the existing common and
+# Amlogic fragments. Physical BETA qualification remains a separate receipt.
 
 # =============================================================================
 # Per-product identity.
 # =============================================================================
 BR2_TARGET_GENERIC_HOSTNAME="dcentos-s19jpro-aml"
-BR2_TARGET_GENERIC_ISSUE="DCENTos for S19j Pro (am3-aml PIC1704) - D-Central Technologies"
+BR2_PACKAGE_MTD_UBIATTACH=y
+BR2_TARGET_GENERIC_ISSUE="DCENTos for S19j Pro (classic AML fw89) - D-Central Technologies"
 
 # =============================================================================
 # Overlay-on-overlay — shared amlogic overlay first, am3-s19jpro-aml identity

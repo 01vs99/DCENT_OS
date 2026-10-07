@@ -200,6 +200,21 @@ pub struct ValidatedSerialChipAddressWindow {
 }
 
 impl ValidatedSerialChipAddressWindow {
+    /// Normalize a parser-issued short BM1362 reset reply window for exact
+    /// route binding. Repeated zero replies remain frame-count evidence;
+    /// only the subsequent assigned-address census can prove chip coverage.
+    pub fn from_bm1362_reset_baseline(
+        window: crate::bm1362::unassigned_address::ValidatedBm1362UnassignedAddressWindow,
+    ) -> Self {
+        Self {
+            identity: AsicProtocolIdentity::Bm1362,
+            observed_frames: window.observed_frames(),
+            responder_addresses: vec![0],
+            duplicate_addresses: Vec::new(),
+            shape: SerialAddressWindowShape::RepeatedUnassignedZero,
+        }
+    }
+
     pub const fn identity(&self) -> AsicProtocolIdentity {
         self.identity
     }

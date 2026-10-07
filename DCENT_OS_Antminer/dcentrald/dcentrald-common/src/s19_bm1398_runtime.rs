@@ -1,10 +1,14 @@
-//! Offline contract for a future, distinct S19 Pro BM1398 hybrid runtime.
+//! Distinct S19 Pro BM1398 hybrid runtime contracts and staged executor.
 //!
 //! This must never be routed through the BM1362-only S19j lifecycle. The held
-//! S19 Pro driver and `a lab unit`  work establish geometry and FPGA work-id
-//! semantics, but the `a lab unit` record explicitly says live accepted-share proof
-//! remained open. Electrical energization therefore remains unconditionally
-//! refused until a later exact-carrier receipt closes it.
+//! S19 Pro driver establishes geometry; the held modern sender establishes
+//! full FPGA work-id semantics. [`executor`] composes stock controller and PSU
+//! dialects with caller-owned cooling/reset/ASIC/work transports. The legacy
+//! target-string-only admission remains insufficient: real execution requires
+//! identity, queried dialects, fresh cooling and complete chain coverage.
+
+#[path = "s19_bm1398_executor.rs"]
+pub mod executor;
 
 use crate::serial_chain_proof::{
     ChainCoverageCertificate, ChainCoverageError, PacedEnumerationPolicy,
@@ -12,7 +16,9 @@ use crate::serial_chain_proof::{
 
 pub const S19_PRO_CHIPS_PER_CHAIN: u16 = 114;
 pub const S19_PRO_ADDRESS_INTERVAL: u8 = 2;
-pub const BM1398_FPGA_WORK_ID_SLOTS: u16 = 256;
+/// Four midstates reserve two of the sixteen returned identifier bits.
+/// Held modern sender0x3230c8; this supersedes the historical256-slot ledger.
+pub const BM1398_FPGA_WORK_ID_SLOTS: u16 = 16_384;
 pub const S19_PRO_TEMPERATURE_CHANNELS: u8 = 4;
 pub const S19_PRO_TEMPERATURE_ADDRESSES: [u8; 4] = [0x48, 0x49, 0x4a, 0x4b];
 
@@ -118,13 +124,31 @@ pub const NBP1901_CONTROLLER_CANDIDATES: &[Bm1398ControllerCandidate] =
 /// Hashboard identity EEPROM candidate (AT24C02D at the standard 0x50).
 pub const NBP1901_EEPROM_I2C_ADDR: u8 = 0x50;
 
-/// MODEL-EXACT energize polarity from the factory jig (Wave record:
-/// `APW_power_on` energizes by writing "0"; the write-"1" path has 14 call
-/// sites against 2; zero `active_low` in the binary). The shipped board
-/// targets still declare ACTIVE_HIGH — the flip is OPERATOR-GATED and Wave
-/// 7 shipped only the behaviour-neutral fail-closed fallback, so this
-/// constant documents the desk-closed fact without applying it.
+/// Historical factory-jig software observation: APW_power_on writes "0".
+/// Runtime polarity comes from the exact composition in
+/// runtime_hardware_recipe and the owner's observed GPIO-controller join.
+/// This constant is not a measurement or an independent permission token.
 pub const NBP1901_GPIO907_JIG_ENERGIZE_WRITE: &str = "0";
+
+/// Exact stock low-clock path: 25 MHz / (8 * 2). This avoids the separate
+/// >3 MHz PLL3/relay transaction and raises the available nonce bandwidth.
+/// Bitmain stock reference `FUN_0004ffe8`; equivalent low-clock branch in
+/// NBS1902, NBT1903 and BHB28611 production binaries.
+pub const BM1398_RUNTIME_WORK_BAUD: u32 = 1_562_500;
+
+pub fn bm1398_oscillator_baud_register(previous: u32, baud: u32) -> Result<u32, &'static str> {
+    if baud == 0 || baud > 3_000_000 {
+        return Err("BM1398 oscillator baud must stay below the PLL3 transition");
+    }
+    let divisor = 25_000_000 / (baud * 8);
+    if !(1..=256).contains(&divisor) {
+        return Err("BM1398 oscillator baud divider is not representable");
+    }
+    let field = divisor - 1;
+    // Stock preserves unrelated bits, splits divider across byte1[4:0] and
+    // byte3[3:0], and clears the PLL3 clock select at bit16.
+    Ok((previous & !0x0f01_1f00) | ((field & 31) << 8) | ((field >> 5) << 24))
+}
 
 /// Catalog fan topology: four axial fans — two intake right, two exhaust
 /// left (cooling-custody geometry for the future bench receipt).
@@ -142,7 +166,194 @@ pub const fn voltage_domain_relay_capable(voltage_domains: u32) -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bm1398HybridModel {
+    /// S19 Pro hashboard bin NBP1901 (114 chips/chain, address interval 2).
     S19Pro,
+    /// S19 classic hashboard bin NBS1902 (76 chips/chain, address interval 3).
+    S19Classic,
+    /// T19 hashboard bin NBT1903 (76 chips/chain, address interval 3).
+    T19,
+    /// S19a BHB28611: 72 BM1398S chips, nine domains of eight chips.
+    S19a,
+    /// S19+ BHB28701: 80 chips, ten domains of eight; exact VNish rc5 profile.
+    S19Plus,
+}
+
+/// Exact stock levels.json ladders as (frequency MHz, rail centivolts) pairs.
+/// Each bin's ladder comes from that bin's own held first-party stock image:
+///
+/// - NBP1901:
+///   s19-pro-20211116/components/minerfs.image.gz.tree/etc/levels.json`
+///   (sha256 `64aae4c71e9018087210d5923654c3684b24aa033c85f90e45c307f2f7b9ab3a`;
+///   the same six pairs are pinned by the held analysis root
+///   `HashSource/bmminer_NBP1901_analysis/levels.json`, sha256
+///   `8145e0b26fc11bdf0727531bcc346f6fb7ca572e20d9cdc1ad297d18df838aa8`).
+/// - NBS1902: `.../s19-20211116/.../etc/levels.json` (sha256
+///   `3c4fe0f3559fcab77fa035b1f7f625067383618ce7e2d83dd3bd646985c929db`).
+/// - NBT1903: `.../t19-20230320/.../etc/levels.json` (sha256
+///   `1bb4a6e535edf7e5f48afeab40b1bd4169963eb2cb114364de9289bf0f17e1bd`).
+pub const NBP1901_STOCK_LEVELS: [(u16, u16); 6] = [
+    (525, 1260),
+    (525, 1280),
+    (525, 1300),
+    (500, 1260),
+    (500, 1280),
+    (500, 1300),
+];
+
+pub const NBS1902_STOCK_LEVELS: [(u16, u16); 6] = [
+    (675, 1380),
+    (675, 1400),
+    (675, 1420),
+    (650, 1380),
+    (650, 1400),
+    (650, 1420),
+];
+
+pub const NBT1903_STOCK_LEVELS: [(u16, u16); 10] = [
+    (625, 1400),
+    (625, 1420),
+    (600, 1400),
+    (600, 1420),
+    (575, 1400),
+    (575, 1420),
+    (550, 1420),
+    (625, 1440),
+    (600, 1440),
+    (575, 1440),
+];
+
+/// Exact Bitmain `s19a-20221206/.../etc/levels.json` rows. This is a
+/// factory software table, not measured DCENT performance. The BHB28611
+/// topology in the same rootfs is 72 BM1398S chips, not the 76-chip NBS bin.
+pub const BHB28611_STOCK_LEVELS: [(u16, u16); 40] = [
+    (750, 1260),
+    (750, 1280),
+    (750, 1300),
+    (750, 1310),
+    (750, 1320),
+    (750, 1330),
+    (750, 1340),
+    (720, 1240),
+    (720, 1250),
+    (720, 1260),
+    (720, 1270),
+    (720, 1280),
+    (720, 1290),
+    (720, 1300),
+    (720, 1310),
+    (720, 1320),
+    (720, 1330),
+    (720, 1340),
+    (720, 1350),
+    (720, 1360),
+    (690, 1240),
+    (690, 1250),
+    (690, 1260),
+    (690, 1270),
+    (690, 1280),
+    (690, 1290),
+    (690, 1300),
+    (690, 1310),
+    (690, 1320),
+    (690, 1330),
+    (690, 1340),
+    (690, 1350),
+    (690, 1360),
+    (660, 1280),
+    (660, 1300),
+    (660, 1320),
+    (660, 1340),
+    (725, 1300),
+    (695, 1300),
+    (665, 1300),
+];
+
+/// Exact default from the held VNish S19+ Xilinx NAND 1.2.6-rc5 image.
+/// hwscan SHA256 95ee1211e9e3dd9c992ab7a44b9f576237684f56504de110e966d72aa8394393:
+/// model constructor 0x7ed14 identifies s19plus/BHB28701; the paired defaults
+/// constructor 0x7ebd8 returns 645 MHz / 1400 centivolts. Lookup 0x99730 joins
+/// them; generators 0x22310 and 0x2349c serialize the exact model and defaults.
+/// The older C table's zero frequency fields are not operational defaults.
+/// Only this exact pair is implemented, not its autotuning preset envelopes.
+/// This is vendor software evidence, not measured DCENT performance.
+pub const BHB28701_VENDOR_LEVELS: [(u16, u16); 1] = [(645, 1400)];
+
+impl Bm1398HybridModel {
+    /// The `/etc/dcentos/board_target` image marker this bin's runtime runs as.
+    pub const fn board_target(self) -> &'static str {
+        match self {
+            Self::S19Pro => "am2-s19pro",
+            Self::S19Classic => "am2-s19",
+            Self::T19 => "am2-t19",
+            Self::S19a => "am2-s19a",
+            Self::S19Plus => "am2-s19plus",
+        }
+    }
+
+    /// Stock topol.conf `machine` names accepted as this bin's factory
+    /// identity. First-party sources: each bin's held
+    /// `minerfs.image.gz.tree/etc/topol.conf` (NBS1902 sha256
+    /// `59d911b44a5b68177b5f86f46cb187f3fd84a42432cdee43f242f62088a5ad11`,
+    /// NBT1903 sha256
+    /// `360af8228ebeb5aadc2f623227aa476ad3d3067d7caa9cfc70eb688c78b10c98`).
+    /// `NBP1901-38` is the pre-existing 38-domain alias accepted by the
+    /// September 2 NBP1901 runtime.
+    pub const fn stock_board_names(self) -> &'static [&'static str] {
+        match self {
+            Self::S19Pro => &["NBP1901", "NBP1901-38"],
+            Self::S19Classic => &["NBS1902"],
+            Self::T19 => &["NBT1903"],
+            Self::S19a => &["BHB28611"],
+            Self::S19Plus => &["BHB28701"],
+        }
+    }
+
+    /// Per-bin stock geometry pins. The counts are the stock topol.conf
+    /// `chain.chain_asic_num` rows (NBS1902/NBT1903: 76 at interval 3;
+    /// NBP1901: 114 at interval 2), restated as literals because
+    /// dcentrald-common does not depend on dcentrald-api-types, where the
+    /// same rows are typed as `bm1398_protocol::BM1398_AIR_BOARD_GEOMETRIES`.
+    pub const fn chips_per_chain(self) -> u16 {
+        match self {
+            Self::S19Pro => 114,
+            Self::S19Classic | Self::T19 => 76,
+            Self::S19a => 72,
+            Self::S19Plus => 80,
+        }
+    }
+
+    pub const fn address_interval(self) -> u8 {
+        match self {
+            Self::S19Pro => 2,
+            Self::S19Classic | Self::T19 | Self::S19a | Self::S19Plus => 3,
+        }
+    }
+
+    /// Exact vendor operating ladder (BHB28701 implements its default only). The requested (frequency, rail) pair
+    /// must be a member; this table is the single source for every caller.
+    pub const fn stock_levels(self) -> &'static [(u16, u16)] {
+        match self {
+            Self::S19Pro => &NBP1901_STOCK_LEVELS,
+            Self::S19Classic => &NBS1902_STOCK_LEVELS,
+            Self::T19 => &NBT1903_STOCK_LEVELS,
+            Self::S19a => &BHB28611_STOCK_LEVELS,
+            Self::S19Plus => &BHB28701_VENDOR_LEVELS,
+        }
+    }
+
+    /// Zero-config default operating point. NBP1901 keeps the historical
+    /// 500 MHz / 12.80 V selection. The two 76-chip bins default to their
+    /// lowest held stock pair (quiet-home posture); both defaults are real
+    /// levels.json rows of their own ladder.
+    pub const fn default_operating_point(self) -> (u16, u16) {
+        match self {
+            Self::S19Pro => (500, 1280),
+            Self::S19Classic => (650, 1380),
+            Self::T19 => (550, 1420),
+            Self::S19a => (660, 1280),
+            Self::S19Plus => (645, 1400),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,12 +378,36 @@ impl Bm1398HybridDeskPlan {
         enumeration: PacedEnumerationPolicy,
         midstate_mode: Bm1398FpgaMidstateMode,
     ) -> Self {
+        Self::for_model(Bm1398HybridModel::S19Pro, enumeration, midstate_mode)
+    }
+
+    /// S19 classic (NBS1902) desk plan: 3 x 76 at address interval 3.
+    pub fn s19_classic(
+        enumeration: PacedEnumerationPolicy,
+        midstate_mode: Bm1398FpgaMidstateMode,
+    ) -> Self {
+        Self::for_model(Bm1398HybridModel::S19Classic, enumeration, midstate_mode)
+    }
+
+    /// T19 (NBT1903) desk plan: 3 x 76 at address interval 3.
+    pub fn t19(enumeration: PacedEnumerationPolicy, midstate_mode: Bm1398FpgaMidstateMode) -> Self {
+        Self::for_model(Bm1398HybridModel::T19, enumeration, midstate_mode)
+    }
+
+    pub fn for_model(
+        model: Bm1398HybridModel,
+        enumeration: PacedEnumerationPolicy,
+        midstate_mode: Bm1398FpgaMidstateMode,
+    ) -> Self {
         Self {
-            model: Bm1398HybridModel::S19Pro,
+            model,
             chains: 3,
-            chips_per_chain: S19_PRO_CHIPS_PER_CHAIN,
-            address_interval: S19_PRO_ADDRESS_INTERVAL,
-            work_id_slots: BM1398_FPGA_WORK_ID_SLOTS,
+            chips_per_chain: model.chips_per_chain(),
+            address_interval: model.address_interval(),
+            work_id_slots: match midstate_mode {
+                Bm1398FpgaMidstateMode::Four => BM1398_FPGA_WORK_ID_SLOTS,
+                Bm1398FpgaMidstateMode::Eight => BM1398_FPGA_WORK_ID_SLOTS / 2,
+            },
             midstate_mode,
             enumeration,
         }
@@ -191,17 +426,24 @@ impl Bm1398HybridDeskPlan {
         ChainCoverageCertificate::certify(&self.expected_addresses(), observed_addresses)
     }
 
-    /// BM1398 on the AM2 FPGA uses an eight-bit echoed work-id ring. The
-    /// midstate index is encoded by the existing typed BM1398 dispatcher and
-    /// must not widen this carrier id.
-    pub const fn decode_carrier_work_id(&self, echoed: u32) -> u8 {
-        echoed as u8
+    /// Decode the extracted sixteen-bit extended ID (WORK_RX metadata>>8).
+    /// Low bits select the midstate; the remaining bits identify host work.
+    pub const fn decode_carrier_work_id(&self, echoed: u32) -> u16 {
+        let log2 = match self.midstate_mode {
+            Bm1398FpgaMidstateMode::Four => 2,
+            Bm1398FpgaMidstateMode::Eight => 3,
+        };
+        (echoed as u16) >> log2
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bm1398HybridAdmissionError {
     WrongBoardTarget,
+    /// Historic label. NBT1903 geometry itself is now first-party settled
+    /// (76/chain at interval 3, stock t19-20230320 topol.conf); this
+    /// refusal now means no per-bin energize contract is joined for
+    /// am2-t19. The variant name stays for API stability.
     T19ExactGeometryUnresolved,
     ElectricalEnergizeContractUnresolved,
 }
@@ -211,13 +453,17 @@ pub enum Bm1398ControllerDialect {
     /// The exact production controller is not joined. Do not substitute the
     /// S19j Pro dsPIC or S17 PIC16 executor based on connector similarity.
     Unresolved,
+    /// NBP1901 stock framed PIC1704, application revision observed as 0x89.
+    /// This is not the CV/BB/AML short-form register service.
+    StockPic1704Framed89,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bm1398PsuDialect {
-    /// Held catalogs enumerate APW9/APW12 families, but no same-unit receipt
-    /// binds one dialect and its command effects to NBP1901.
+    /// No exact stock version and command dialect has been observed.
     Unresolved,
+    /// NBP1901 framed APW121215a, queried version 0x71 (Sep 2 capture).
+    Apw12StockFramed71,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,10 +543,9 @@ pub fn bm1398_electrical_gaps(evidence: Bm1398ElectricalEvidence) -> Vec<Bm1398E
     gaps
 }
 
-/// Fail-closed pre-energize admission for the future distinct runtime.
-///
-/// Returning an error even for S19 Pro is intentional: the desk plan is
-/// executable only after a later carrier-specific electrical receipt exists.
+/// Legacy target-name-only admission. A name cannot establish controller or
+/// board identity; native callers use [`executor::Bm1398Runtime`], which
+/// executes and checks the actual factory/controller/ASIC transactions.
 pub fn admit_bm1398_hybrid_energize(board_target: &str) -> Result<(), Bm1398HybridAdmissionError> {
     match board_target {
         "am2-s19pro" => Err(Bm1398HybridAdmissionError::ElectricalEnergizeContractUnresolved),
@@ -371,9 +616,11 @@ pub struct Bm1398NoWorkReceipt {
 impl Bm1398NoWorkReceipt {
     fn admissible(&self) -> bool {
         let phase_ok = matches!(self.phase, "R1" | "R2" | "R3" | "R4");
-        let provenance_ok =
-            !self.operator.is_empty() && !self.timestamp_utc.is_empty() && !self.instrument.is_empty();
-        let artifacts_ok = !self.artifacts.is_empty() && self.artifacts.iter().all(|a| a.is_pinned());
+        let provenance_ok = !self.operator.is_empty()
+            && !self.timestamp_utc.is_empty()
+            && !self.instrument.is_empty();
+        let artifacts_ok =
+            !self.artifacts.is_empty() && self.artifacts.iter().all(|a| a.is_pinned());
         phase_ok && provenance_ok && artifacts_ok
     }
 }
@@ -402,7 +649,9 @@ pub fn apply_bm1398_no_work_receipts(
                 }
                 Some(Bm1398DialectSelection::ConfirmedController(kind)) => {
                     if !NBP1901_CONTROLLER_CANDIDATES.iter().any(|c| c.kind == kind) {
-                        return Err("controller selection names a candidate outside the typed table");
+                        return Err(
+                            "controller selection names a candidate outside the typed table",
+                        );
                     }
                 }
                 Some(Bm1398DialectSelection::RetiredAll) => {
@@ -432,6 +681,23 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    #[test]
+    fn oscillator_baud_transition_preserves_unrelated_bits_and_refuses_pll3_path() {
+        assert_eq!(
+            bm1398_oscillator_baud_register(0x0000_7a31, BM1398_RUNTIME_WORK_BAUD),
+            Ok(0x0000_6131)
+        );
+        for old in [0, 0xffff_ffff, 0x1234_5678, 0x0000_7a31] {
+            let new = bm1398_oscillator_baud_register(old, BM1398_RUNTIME_WORK_BAUD).unwrap();
+            assert_eq!(new & !0x0f01_1f00, old & !0x0f01_1f00);
+            assert_eq!((new >> 8) & 31, 1);
+            assert_eq!(new & 0x0f01_0000, 0);
+        }
+        for baud in [0, 1, 3_000_001, 3_125_000, 12_000_000, u32::MAX] {
+            assert!(bm1398_oscillator_baud_register(0, baud).is_err());
+        }
+    }
+
     fn policy() -> PacedEnumerationPolicy {
         PacedEnumerationPolicy::new(
             Duration::from_millis(1),
@@ -454,10 +720,62 @@ mod tests {
     }
 
     #[test]
-    fn work_id_is_the_exact_eight_bit_fpga_ring() {
+    fn work_id_preserves_the_full_extended_fifo_identifier() {
         let plan = Bm1398HybridDeskPlan::s19_pro(policy(), Bm1398FpgaMidstateMode::Four);
-        assert_eq!(plan.work_id_slots, 256);
-        assert_eq!(plan.decode_carrier_work_id(0x12ab), 0xab);
+        assert_eq!(plan.work_id_slots, 16_384);
+        assert_eq!(plan.decode_carrier_work_id(0x12ab), 0x4aa);
+        assert_eq!(plan.decode_carrier_work_id(0xffff), 0x3fff);
+        let eight = Bm1398HybridDeskPlan::s19_pro(policy(), Bm1398FpgaMidstateMode::Eight);
+        assert_eq!(eight.work_id_slots, 8192);
+        assert_eq!(eight.decode_carrier_work_id(0xffff), 0x1fff);
+    }
+
+    /// R07 family pins: the two 76-chip bins carry the exact stock
+    /// NBS1902/NBT1903 geometry (76/chain, interval 3, shared plan), their
+    /// own levels.json ladders, and per-bin defaults. Neither 76-chip bin
+    /// accepts the Pro ladder and vice versa.
+    #[test]
+    fn nbs1902_and_nbt1903_plans_pin_stock_geometry_levels_and_targets() {
+        let s19 = Bm1398HybridDeskPlan::s19_classic(policy(), Bm1398FpgaMidstateMode::Four);
+        assert_eq!(s19.model, Bm1398HybridModel::S19Classic);
+        assert_eq!(s19.chips_per_chain, 76);
+        assert_eq!(s19.address_interval, 3);
+        let expected = s19.expected_addresses();
+        assert_eq!(expected.len(), 76);
+        assert_eq!(expected.first(), Some(&0x00));
+        assert_eq!(expected.last(), Some(&(75 * 3)));
+        assert!(s19.certify_chain(&expected).is_ok());
+        assert!(s19.certify_chain(&expected[..75]).is_err());
+        let t19 = Bm1398HybridDeskPlan::t19(policy(), Bm1398FpgaMidstateMode::Four);
+        assert_eq!(t19.expected_addresses(), expected, "same 76/3 plan");
+
+        assert!(Bm1398HybridModel::S19Classic
+            .stock_levels()
+            .contains(&(675, 1380)));
+        assert!(Bm1398HybridModel::T19.stock_levels().contains(&(550, 1420)));
+        assert!(!Bm1398HybridModel::S19Pro
+            .stock_levels()
+            .contains(&(675, 1380)));
+        // The T19 ladder is not a cross product: (550, 1400) is not a row.
+        assert!(!Bm1398HybridModel::T19.stock_levels().contains(&(550, 1400)));
+        assert!(!Bm1398HybridModel::S19Classic
+            .stock_levels()
+            .contains(&(500, 1280)));
+        assert_eq!(
+            Bm1398HybridModel::S19Classic.default_operating_point(),
+            (650, 1380)
+        );
+        assert_eq!(
+            Bm1398HybridModel::T19.default_operating_point(),
+            (550, 1420)
+        );
+        assert_eq!(Bm1398HybridModel::S19Classic.board_target(), "am2-s19");
+        assert_eq!(Bm1398HybridModel::T19.board_target(), "am2-t19");
+        assert_eq!(
+            Bm1398HybridModel::S19Classic.stock_board_names(),
+            &["NBS1902"]
+        );
+        assert_eq!(Bm1398HybridModel::T19.stock_board_names(), &["NBT1903"]);
     }
 
     #[test]
@@ -631,9 +949,8 @@ mod tests {
         ];
         // Duplicate phases are not double-counted but also not refused.
         receipts.push(receipt("R1"));
-        let applied =
-            apply_bm1398_no_work_receipts(Bm1398ElectricalEvidence::default(), &receipts)
-                .expect("complete receipt set applies");
+        let applied = apply_bm1398_no_work_receipts(Bm1398ElectricalEvidence::default(), &receipts)
+            .expect("complete receipt set applies");
         assert!(applied.passive_board_identity);
         assert!(applied.independent_chip_id_match);
         assert!(applied.power_control_polarity_measured);
@@ -672,7 +989,10 @@ mod tests {
 
         let mut r = receipt("R1");
         r.artifacts[0].sha256_hex.truncate(10);
-        assert!(apply_bm1398_no_work_receipts(Bm1398ElectricalEvidence::default(), &[r.clone()]).is_err());
+        assert!(
+            apply_bm1398_no_work_receipts(Bm1398ElectricalEvidence::default(), &[r.clone()])
+                .is_err()
+        );
 
         let mut r = receipt("R1");
         r.artifacts[0].bytes = 0;

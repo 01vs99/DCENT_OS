@@ -1,13 +1,9 @@
-# DCENT_OS dcentrald config for Antminer S21 Pro (Amlogic A113D)
-# BUILD-CLEAN SCAFFOLD (Wave I Lane B, 2026-05-19) — NO live BM1370 unit on the
-# bench. This variant exists so a future S21 Pro lands on the BM1370 silicon
-# profile (bm1370.rs: 3 nm, 195 chips) instead of falling through to the base
-# S21 route, which bakes the BM1368 5 nm table. The chip identity below is the
-# load-bearing fix; the cold-boot freq/voltage are the BM1370 sweet-spot
-# (Step -2: 480 MHz / 13.4 V ≈ 14 J/TH) per dcentrald-silicon-profiles::bm1370.
-# Platform: Amlogic A113D (aarch64), NoPic (TAS5782M DAC, kernel-managed).
-#
-# Fresh images stay dashboard-ready and idle until mining is explicitly enabled.
+# DCENT_OS exact S21 Pro Amlogic BM1370 hardware beta.
+# Held production model -> ASIC profile -> PsuAsVoltageController selects
+# the retained AML GPIO APW17/c1 owner; factory PIC presence does not imply
+# a PIC-managed AML software route. Exact board names A3HB70601/70602, 65 chips/chain.
+# Physical slots 1/2/3 bind ttyS3/ttyS2/ttyS1 after fresh board/population checks.
+# Configure a pool and select Start Mining; the image boots idle.
 
 [general]
 hostname = "dcent-s21pro"
@@ -43,11 +39,6 @@ serial_chip_type = "BM1370"
 mode = "bypass"
 target_watts = 3000
 
-[power.psu_override]
-enabled = true
-model = "APW12"
-voltage_v = 14.0
-
 [thermal]
 target_temp_c = 60
 hot_temp_c = 70
@@ -56,6 +47,9 @@ fan_min_pwm = 10
 fan_max_pwm = 30
 
 [api]
+# Read-only LAN monitoring; remote control requires a separate explicit opt-in.
+cgminer_bind_lan = true
+cgminer_lan_writes = false
 cgminer_port = 4028
 http_port = 8080
 websocket = true
@@ -63,8 +57,11 @@ auth_enabled = false
 auth_password = ""
 
 [donation]
+# DCENT_OS ships with ZERO mandatory fee. Optional transparent donation:
+# set enabled = true and percent 1-5 (time-sliced, always visible, one tap
+# off). Fund development: https://d-central.tech/fund/
 enabled = false
-percent = 2.0
+percent = 0.0
 pool_url = ""
 worker = ""
 password = "x"
@@ -90,7 +87,15 @@ enabled = true
 active = "standard"
 
 [autotuner]
-enabled = false
+# Autotune is ON by default (operator decision 2026-09-01). Safety contract:
+# the tuner REFUSES to tune blind - every frequency/voltage step validates
+# against the variant BoardDesc cut-ladder + published envelope BEFORE
+# execution; variants with unknown/missing envelope datums surface
+# NOT TUNABLE instead of tuning. First boot parks at the safe-stock
+# profile until health + fans + temp-in-envelope (+ ExperimentalOptIn
+# operator ack) pass. Voltage autotune on am2 stays behind the
+# DCENT_AM2_VOLTAGE_AUTOTUNE live-safety fence.
+enabled = true
 min_freq_mhz = 400
 max_freq_mhz = 585
 

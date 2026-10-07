@@ -110,7 +110,6 @@ assert_builtin_refusal() {
 
 assert_builtin_refusal 'CV updater' "$UPDATER" 3
 assert_builtin_refusal 'CV stock revert' "$REVERT" 3
-assert_builtin_refusal 'target uninstall alias' "$OVERLAY/uninstall.sh" 2
 assert_builtin_refusal 'standalone CV build entry point' "$STANDALONE_BUILD" 3
 assert_file 'CV overlay planner exists' "$OVERLAY_PLANNER"
 assert_matches 'CV overlay planner is not_implemented' \
@@ -119,11 +118,6 @@ assert_matches 'CV overlay planner exits EX_UNAVAILABLE' \
     'EX_UNAVAILABLE = 78' "$OVERLAY_PLANNER"
 assert_not_matches 'CV overlay planner has no storage-mutation API' \
     'nandwrite|flash_erase|nanddump|/dev/mtd|/dev/mmc' "$OVERLAY_PLANNER"
-assert_builtin_refusal 'CV Buildroot post-build hook' "$POST_BUILD" 2
-assert_builtin_refusal 'CV Buildroot post-image hook' "$POST_IMAGE" 2
-assert_matches 'CV post-build declares typed non-activating build policy' \
-    '^# DCENT_BUILD_POLICY=not-implemented-refusal$' "$POST_BUILD"
-
 assert_matches 'updater pins the held FIP digest' \
     '874efb83b18a5cfbf76f1a9b514438813ced1aa279a115678c3cd9c50a66fd2e' "$UPDATER"
 assert_matches 'updater records BuiltInVolatile mutation denial' \
@@ -133,46 +127,10 @@ assert_matches 'updater records p2 selector geometry without implementing it' \
 
 assert_absent 'guessed fw_env.config is absent' "$OVERLAY/etc/fw_env.config"
 assert_absent 'unadmitted CV1835 Buildroot defconfig is absent' "$DEFCONFIG"
-assert_eq 'board maturity is evidence only' \
-    'evidence-only-no-build-or-runtime-ownership' \
-    "$(cat "$OVERLAY/etc/dcentos/board_status")"
-assert_eq 'storage maturity is explicitly not implemented' \
-    'emmc-update-not-implemented-builtin-volatile-p2-selector' \
-    "$(cat "$OVERLAY/etc/dcentos/storage_status")"
-
-for init_name in S37board_setup S46post-install S50dropbear S82dcentrald S99upgrade
-do
-    init_script="$OVERLAY/etc/init.d/$init_name"
-    assert_file "$init_name containment shadow exists" "$init_script"
-    if sh -n "$init_script"; then ok "$init_name parses"; else not_ok "$init_name parses"; fi
-    set +e
-    PATH="$WORK/empty-path" /bin/sh "$init_script" start >"$WORK/$init_name.out" 2>&1
-    rc=$?
-    set -e
-    assert_eq "$init_name start is an external-command-free refusal/no-op" 0 "$rc"
-done
-assert_matches 'SSH start is refused' 'SSH start refused' "$WORK/S50dropbear.out"
-assert_matches 'daemon hardware ownership is refused' \
-    'runtime hardware ownership NOT IMPLEMENTED' "$WORK/S82dcentrald.out"
-assert_matches 'boot-time persistent update is refused' \
-    'persistent update NOT IMPLEMENTED' "$WORK/S99upgrade.out"
-
-assert_matches 'historical boot recipe is visibly rejected' \
-    '^# REJECTED HISTORICAL PROPOSAL - DO NOT APPLY$' "$BOOTCMD"
-assert_not_matches 'boot record contains no active mutation or boot command' \
-    '^[[:space:]]*(setenv|saveenv|mmc|ext4load|fatload|booti|bootm|reset)([[:space:]]|$)' "$BOOTCMD"
-assert_not_matches 'recovery page exposes no mutation or reboot recipe' \
-    'fw_printenv|fw_setenv|flash_erase|nandwrite|nanddump|reboot|sysupgrade|/dev/mmc' \
-    "$OVERLAY/root/web/static/recovery.html"
-assert_matches 'recovery page denies an on-target recovery service' \
-    'No DCENT_OS on-target recovery or diagnostic service is implemented' \
-    "$OVERLAY/root/web/static/recovery.html"
-
-assert_matches 'CV V14 remains a red NOT_IMPLEMENTED result' \
-    'emit_check V14 false "CV1835 persistent update NOT IMPLEMENTED: BuiltInVolatile environment is mutation-denied and no p2 marker-write transaction exists"' \
-    "$S99VERIFY"
-assert_not_matches 'CV verifier no longer claims bootcount/factory recovery authority' \
-    'U-Boot bootcount|bootcount per|factory_kernel' "$S99VERIFY"
+assert_absent 'retired CV board directory is absent' "$BOARD_DIR"
+assert_absent 'retired CV runtime is absent' "$HAL_CVITEK"
+assert_file 'held stock ABI remains available' "$PROJECT_DIR/br2_external_dcentos/board/cvitek/r16-stock-evidence/ABI_INVENTORY.md"
+assert_file 'CV retirement decision is documented' "$PROJECT_DIR/docs/CV1835_STATUS.md"
 
 set +e
 bash "$BUILD_DRIVER" --target cv1835-s19jpro >"$WORK/build-driver.out" 2>&1
@@ -190,18 +148,6 @@ assert_not_matches 'source-closure target set grants no CV build membership' \
 assert_not_matches 'standalone Cargo builder advertises no CV target' \
     '^[[:space:]]*cvitek\)|Valid targets:.*cvitek|^[#[:space:]]*cvitek[[:space:]]+-' \
     "$CARGO_BUILDER"
-assert_matches 'board documentation denies build publication' \
-    'Build publication, runtime hardware' "$BOARD_README"
-assert_matches 'board documentation records the defconfig admission boundary' \
-    'No `dcentos_cv1835_s19jpro_defconfig` is committed' "$BOARD_README"
-assert_not_matches 'board documentation advertises no CV artifact output' \
-    'emits dcentos-offline-analysis|builds the explicitly non-installable|materializes exact committed' \
-    "$BOARD_README"
-assert_matches 'kernel fragment is explicitly evidence-only' \
-    'Evidence ledger only\. DCENT_OS has no admitted CV1835 Buildroot' "$LINUX_FRAGMENT"
-assert_not_matches 'kernel fragment names no deleted defconfig or admitted userspace' \
-    'the defconfig|see defconfig|our ARM32|our Linaro|userspace to run' "$LINUX_FRAGMENT"
-
 assert_matches 'shared matrix encodes no CV artifact' \
     '"board_target":"cv1835-s19jpro".*"artifact_kind":"none".*"artifact_maturity":"not_implemented"' \
     "$MATRIX_JSON"
@@ -214,23 +160,15 @@ assert_matches 'shared schema has typed not-implemented artifact maturity' \
 assert_not_matches 'capability schema contains no CV deployment unlock' \
     'cv1835-emmc-proven|Cv1835EmmcProven' "$SCHEMA_CAPABILITY"
 
-assert_matches 'automatic CV detection routes through the default-off constructor gate' \
-    'Box::new\(cvitek::CViTekPlatform::new\(\)\?\)' "$HAL_FACTORY"
-assert_matches 'automatic CV detection documents the exact default-off operator gate' \
-    'operator-authorized opt-in \(`DCENT_CV1835_EXPERIMENTAL_RUNTIME=1`' "$HAL_FACTORY"
-assert_matches 'CV HAL modules are crate-private evidence, not public runtime API' \
-    '^pub\(crate\) mod cvitek;' "$HAL_FACTORY"
-assert_matches 'direct CV constructor retains a typed default refusal' \
-    'CV1835 runtime NOT IMPLEMENTED by default: reverse-engineered bring-up is retained' \
-    "$HAL_CVITEK"
-assert_matches 'CV experimental runtime gate admits only the exact value one' \
-    'raw == Some\("1"\)' "$HAL_CVITEK"
-assert_matches 'CV experimental runtime gate has one named operator control' \
-    'pub const CV1835_EXPERIMENTAL_RUNTIME_ENV: &str = "DCENT_CV1835_EXPERIMENTAL_RUNTIME";' \
-    "$HAL_CVITEK"
-assert_not_matches 'direct CV constructor has no pinmux, UART-table, or legacy unverified override' \
-    'replay_pinmux\(\)\?|select_uart_table_cv1835\(\)\?|CV1835_ACCEPT_UNVERIFIED_ENV' \
-    "$HAL_CVITEK"
+assert_matches 'automatic detection checks controller identity before construction' \
+    'cv1835_retirement::require_supported_controller' "$HAL_FACTORY"
+assert_not_matches 'factory contains no retired runtime module or constructor' \
+    'mod cvitek;|mod cvitek_cold_boot;|mod cvitek_pinmux;|CViTekPlatform::new' "$HAL_FACTORY"
+assert_matches 'retained stock evidence remains test-only' \
+    '^mod cvitek_stock_evidence;' "$HAL_FACTORY"
+assert_not_matches 'retirement guard has no environment override' \
+    'std::env::(var|var_os|vars|vars_os)|lab_env|ACCEPT_INFERRED|EXPERIMENTAL_RUNTIME' \
+    "$PROJECT_DIR/dcentrald/dcentrald-hal/src/platform/cv1835_retirement.rs"
 assert_not_matches 'daemon safe-off exposes no CV power mutation' \
     'CvitekDisablePsu|platform::cvitek::disable_psu' "$DAEMON_MAIN"
 assert_matches 'safe-off leaves fans unchanged when power cut is unproven' \
@@ -238,7 +176,7 @@ assert_matches 'safe-off leaves fans unchanged when power cut is unproven' \
 assert_matches 'safe-off failure returns before fan mutation' \
     'power cut was not proven; fans are left unchanged' "$DAEMON_MAIN"
 awk '
-    /^fn run_safe_off_oneshot\(\)/ { in_safe_off = 1 }
+    /^(async )?fn run_safe_off_oneshot\(\)/ { in_safe_off = 1 }
     in_safe_off { print }
     in_safe_off && /^fn run_verify_bundle_oneshot\(/ { exit }
 ' "$DAEMON_MAIN" > "$WORK/safe-off-function.rs"

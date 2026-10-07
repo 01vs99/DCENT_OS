@@ -12,7 +12,7 @@
 ::sysinit:/etc/init.d/rcS
 
 # Serial console — auto-login as root (no password required).
-# Matches BraiinsOS/Bitmain stock behavior. Essential for Claude Code
+# Matches BraiinsOS/Bitmain stock behavior. Essential for remote
 # debug workflow via COM port. SSH still requires password for security.
 # NOTE: login -f root directly, not via getty script — getty -n -l broke silently.
 #

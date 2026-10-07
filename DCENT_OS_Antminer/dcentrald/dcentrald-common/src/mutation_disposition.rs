@@ -76,6 +76,7 @@ pub enum MutationQuarantineReason {
     PreparationAborted,
     WorkerPanicked,
     UnresolvedPic16State,
+    UnresolvedClassicAmlPicState,
     UnexpectedLeaseDrop,
     RegistryInvariantLost,
 }
@@ -86,6 +87,7 @@ impl MutationQuarantineReason {
             Self::PreparationAborted => "preparation-aborted",
             Self::WorkerPanicked => "worker-panicked",
             Self::UnresolvedPic16State => "unresolved-pic16-state",
+            Self::UnresolvedClassicAmlPicState => "unresolved-classic-aml-pic-state",
             Self::UnexpectedLeaseDrop => "unexpected-lease-drop",
             Self::RegistryInvariantLost => "registry-invariant-lost",
         }
@@ -96,6 +98,7 @@ impl MutationQuarantineReason {
             "preparation-aborted" => Ok(Self::PreparationAborted),
             "worker-panicked" => Ok(Self::WorkerPanicked),
             "unresolved-pic16-state" => Ok(Self::UnresolvedPic16State),
+            "unresolved-classic-aml-pic-state" => Ok(Self::UnresolvedClassicAmlPicState),
             "unexpected-lease-drop" => Ok(Self::UnexpectedLeaseDrop),
             "registry-invariant-lost" => Ok(Self::RegistryInvariantLost),
             _ => Err(MutationDispositionParseError::InvalidQuarantineReason),
@@ -953,6 +956,581 @@ pub fn clear_mutation_disposition(
     remove_file(clearance.path)
 }
 
+/// A software terminal closeout is deliberately separate from a rail-cut
+/// receipt. It never resolves or removes a mutation journal.
+pub const SOFTWARE_CLOSEOUT_PATH: &str = "/data/dcent/dcentrald-software-closeout-v1";
+const SOFTWARE_CLOSEOUT_JOURNAL: &str = "/data/dcent/dcentrald-mutation-disposition-v1";
+const SOFTWARE_CLOSEOUT_SESSION: &str = "/data/dcent/dcentrald-hardware-session.unresolved";
+const SOFTWARE_CLOSEOUT_PREFIX: &str = "DCENT_SOFTWARE_CLOSEOUT_V1";
+const SOFTWARE_CLOSEOUT_MAX: usize = 2048;
+
+/// Captured at the beginning of the checked shutdown. Private fields prevent
+/// a caller from changing the process, image or supervisor session afterwards.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SoftwareCloseoutRun {
+    boot: String,
+    pid: u32,
+    start_ticks: u64,
+    board: String,
+    image: String,
+    executable_hash: String,
+    slot: String,
+    session: String,
+}
+
+fn closeout_field(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && byte != b'|')
+}
+
+fn process_start_ticks(stat: &str) -> Result<u64, String> {
+    // comm can contain spaces and ')'; field 22 follows the final ')'.
+    stat.rsplit_once(')')
+        .and_then(|(_, tail)| tail.split_whitespace().nth(19))
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "invalid process start-time identity".into())
+}
+
+fn checked_closeout_read(path: &Path, private: bool, owner_uid: u32) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let before = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if !before.is_file() || before.len() == 0 || before.len() > SOFTWARE_CLOSEOUT_MAX as u64 {
+        return Err("closeout input is not a bounded regular file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let forbidden = if private { 0o077 } else { 0o022 };
+        if before.uid() != owner_uid || before.mode() & forbidden != 0 || before.nlink() != 1 {
+            return Err("closeout input lacks protected root ownership/mode".into());
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x20000 | 0x800); // O_NOFOLLOW | O_NONBLOCK
+    }
+    let file = options.open(path).map_err(|error| error.to_string())?;
+    let opened = file.metadata().map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != opened.dev() || before.ino() != opened.ino() {
+            return Err("closeout input changed while opening".into());
+        }
+    }
+    let mut bytes = Vec::new();
+    file.take(SOFTWARE_CLOSEOUT_MAX as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 != opened.len() || bytes.len() > SOFTWARE_CLOSEOUT_MAX {
+        return Err("closeout input changed size while reading".into());
+    }
+    Ok(bytes)
+}
+
+fn protected_closeout_directory(path: &Path, owner_uid: u32) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_dir() {
+        return Err("closeout directory is not a real directory".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != owner_uid || metadata.mode() & 0o077 != 0 {
+            return Err("closeout directory lacks private root ownership/mode".into());
+        }
+    }
+    Ok(())
+}
+
+fn absent_closeout_journal(path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        _ => Err(
+            "an existing or unreadable mutation journal forbids software restart clearance".into(),
+        ),
+    }
+}
+
+fn closeout_marker_identity(bytes: &[u8]) -> Result<(&str, &str, &str), String> {
+    let source = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
+    if !source.ends_with('\n') || source.contains('\r') {
+        return Err("invalid session marker".into());
+    }
+    let field = |name: &str| -> Result<&str, String> {
+        let prefix = format!("{name}=");
+        let mut matches = source.lines().filter_map(|line| line.strip_prefix(&prefix));
+        let value = matches.next().ok_or("missing session marker identity")?;
+        if matches.next().is_some() || !closeout_field(value) {
+            return Err("ambiguous session marker identity".into());
+        }
+        Ok(value)
+    };
+    if field("schema")? != "1" || field("state")? != "unresolved" {
+        return Err("session marker is not the active unresolved session".into());
+    }
+    Ok((
+        field("boot_id")?,
+        field("image_version")?,
+        field("session_token")?,
+    ))
+}
+
+fn software_closeout_slot() -> Result<String, String> {
+    let mounts =
+        std::fs::read_to_string("/proc/self/mountinfo").map_err(|error| error.to_string())?;
+    let roots: Vec<_> = mounts
+        .lines()
+        .filter_map(|line| {
+            let (left, right) = line.split_once(" - ")?;
+            let fields: Vec<_> = left.split_whitespace().collect();
+            let fs: Vec<_> = right.split_whitespace().collect();
+            (fields.len() >= 5 && fields[4] == "/" && fs.len() >= 2)
+                .then(|| format!("{}:{}:{}:{}", fields[2], fields[3], fs[0], fs[1]))
+        })
+        .collect();
+    match roots.as_slice() {
+        [root] if closeout_field(root) => Ok(root.clone()),
+        _ => Err("root filesystem slot identity is absent or ambiguous".into()),
+    }
+}
+
+fn running_executable_hash() -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    const MAX_DAEMON: u64 = 256 * 1024 * 1024;
+    let file = std::fs::File::open("/proc/self/exe").map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_DAEMON {
+        return Err("running executable is outside its regular-file size bound".into());
+    }
+    let mut reader = file.take(metadata.len() + 1);
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    let mut size = 0u64;
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        if count == 0 {
+            break;
+        }
+        size += count as u64;
+        hash.update(&buffer[..count]);
+    }
+    if size != metadata.len() {
+        return Err("running executable changed size while hashing".into());
+    }
+    Ok(hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+impl SoftwareCloseoutRun {
+    fn encode(&self) -> Result<String, String> {
+        if self.pid == 0
+            || self.start_ticks == 0
+            || [
+                &self.boot,
+                &self.board,
+                &self.image,
+                &self.slot,
+                &self.session,
+            ]
+            .into_iter()
+            .any(|field| !closeout_field(field))
+        {
+            return Err("invalid software closeout identity".into());
+        }
+        if self.executable_hash.len() != 64
+            || !self
+                .executable_hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("invalid executable SHA256 in software closeout".into());
+        }
+        Ok(format!(
+            "{SOFTWARE_CLOSEOUT_PREFIX}|{}|{}|{}|{}|{}|{}|{}|{}\n",
+            self.boot,
+            self.pid,
+            self.start_ticks,
+            self.board,
+            self.image,
+            self.slot,
+            self.session,
+            self.executable_hash
+        ))
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let source = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
+        let fields: Vec<_> = source
+            .strip_suffix('\n')
+            .ok_or("missing closeout terminator")?
+            .split('|')
+            .collect();
+        if fields.len() != 9 || fields[0] != SOFTWARE_CLOSEOUT_PREFIX {
+            return Err("invalid software closeout schema".into());
+        }
+        let run = Self {
+            boot: fields[1].into(),
+            pid: fields[2].parse().map_err(|_| "invalid closeout PID")?,
+            start_ticks: fields[3]
+                .parse()
+                .map_err(|_| "invalid closeout start time")?,
+            board: fields[4].into(),
+            image: fields[5].into(),
+            slot: fields[6].into(),
+            session: fields[7].into(),
+            executable_hash: fields[8].into(),
+        };
+        if run.encode()?.as_bytes() != bytes {
+            return Err("noncanonical software closeout".into());
+        }
+        Ok(run)
+    }
+
+    fn current() -> Result<Self, String> {
+        protected_closeout_directory(Path::new("/data/dcent"), 0)?;
+        let read_identity = |path: &str| -> Result<String, String> {
+            String::from_utf8(checked_closeout_read(Path::new(path), false, 0)?)
+                .map(|value| value.trim().to_string())
+                .map_err(|error| error.to_string())
+        };
+        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .map_err(|error| error.to_string())?
+            .trim()
+            .to_string();
+        let board = read_identity("/etc/dcentos/board_target")?;
+        if crate::BoardDesc::lookup(&board).is_none() {
+            return Err("unregistered closeout board".into());
+        }
+        let image = read_identity("/etc/dcentos-version")?;
+        let marker = checked_closeout_read(Path::new(SOFTWARE_CLOSEOUT_SESSION), true, 0)?;
+        let (marker_boot, marker_image, session) = closeout_marker_identity(&marker)?;
+        if marker_boot != boot || marker_image != image {
+            return Err("foreign session boot/image".into());
+        }
+        let run = Self {
+            boot,
+            pid: std::process::id(),
+            start_ticks: process_start_ticks(
+                &std::fs::read_to_string("/proc/self/stat").map_err(|error| error.to_string())?,
+            )?,
+            board,
+            image,
+            slot: software_closeout_slot()?,
+            session: session.into(),
+            executable_hash: running_executable_hash()?,
+        };
+        run.encode()?;
+        Ok(run)
+    }
+}
+
+/// Capture current protected supervisor/process/image identity before shutdown.
+pub fn capture_software_closeout_run(board_target: &str) -> Result<SoftwareCloseoutRun, String> {
+    absent_closeout_journal(Path::new(SOFTWARE_CLOSEOUT_JOURNAL))?;
+    let run = SoftwareCloseoutRun::current()?;
+    if run.board != board_target {
+        return Err("shutdown board differs from installed image".into());
+    }
+    Ok(run)
+}
+
+/// Called only after the owner's typed terminal closeout and watchdog join.
+/// An empty unresolved roster is required; no Mutated/Quarantined fabric is
+/// resolved by this unit-wide software evidence. The journal is never written.
+pub fn persist_orderly_software_closeout(
+    run: SoftwareCloseoutRun,
+    unresolved: &[MutationDispositionEntry],
+) -> Result<(), String> {
+    if !unresolved.is_empty() {
+        return Err("unresolved fabrics forbid software closeout".into());
+    }
+    if run != SoftwareCloseoutRun::current()? {
+        return Err("software closeout run/context changed".into());
+    }
+    absent_closeout_journal(Path::new(SOFTWARE_CLOSEOUT_JOURNAL))?;
+    atomic_write(
+        SOFTWARE_CLOSEOUT_PATH,
+        run.encode()?,
+        AtomicWriteOptions::state_file(SOFTWARE_CLOSEOUT_MAX),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn validate_software_closeout_at(
+    receipt_path: &Path,
+    journal_path: &Path,
+    expected: &SoftwareCloseoutRun,
+    process_stat: Result<String, io::Error>,
+    owner_uid: u32,
+) -> Result<(), String> {
+    protected_closeout_directory(
+        receipt_path.parent().ok_or("missing receipt directory")?,
+        owner_uid,
+    )?;
+    absent_closeout_journal(journal_path)?;
+    let actual =
+        SoftwareCloseoutRun::decode(&checked_closeout_read(receipt_path, true, owner_uid)?)?;
+    if actual != *expected {
+        return Err("foreign or stale software closeout receipt".into());
+    }
+    match process_stat {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Ok(stat) if process_start_ticks(&stat)? != expected.start_ticks => {} // PID reused; old run is dead.
+        Ok(_) => return Err("software closeout process is still alive".into()),
+        Err(error) => {
+            return Err(format!(
+                "cannot establish software closeout owner death: {error}"
+            ))
+        }
+    }
+    Ok(())
+}
+
+/// Pure no-hardware CLI consumer. All paths and installed board/image/slot
+/// identity are fixed internally; argv cannot nominate another receipt/journal.
+/// The caller must hold the supervisor session lock and have observed an
+/// expected zero exit plus successful emergency safety action. Consume once.
+pub fn consume_orderly_software_closeout(
+    pid: u32,
+    start_ticks: u64,
+    boot: &str,
+    session: &str,
+) -> Result<(), String> {
+    let mut expected = SoftwareCloseoutRun::current()?;
+    if expected.boot != boot || expected.session != session {
+        return Err("foreign supervisor closeout request".into());
+    }
+    expected.pid = pid;
+    expected.start_ticks = start_ticks;
+    validate_software_closeout_at(
+        Path::new(SOFTWARE_CLOSEOUT_PATH),
+        Path::new(SOFTWARE_CLOSEOUT_JOURNAL),
+        &expected,
+        std::fs::read_to_string(format!("/proc/{pid}/stat")),
+        0,
+    )?;
+    remove_file(SOFTWARE_CLOSEOUT_PATH).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod software_closeout_tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    fn run() -> SoftwareCloseoutRun {
+        SoftwareCloseoutRun {
+            boot: "boot-a".into(),
+            pid: 123,
+            start_ticks: 456,
+            board: "am1-s9".into(),
+            image: "1.2.3".into(),
+            slot: "0:20:/:ubifs:ubi0:rootfs".into(),
+            session: "boot-a.789".into(),
+            executable_hash: "ab".repeat(32),
+        }
+    }
+    struct Fixture {
+        dir: PathBuf,
+        receipt: PathBuf,
+        journal: PathBuf,
+        uid: u32,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "software-closeout-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let uid = std::fs::metadata(&dir).unwrap().uid();
+            let fixture = Self {
+                receipt: dir.join("receipt"),
+                journal: dir.join("journal"),
+                dir,
+                uid,
+            };
+            fixture.write(run().encode().unwrap().as_bytes());
+            fixture
+        }
+        fn write(&self, bytes: &[u8]) {
+            std::fs::write(&self.receipt, bytes).unwrap();
+            std::fs::set_permissions(&self.receipt, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        fn validate(
+            &self,
+            expected: &SoftwareCloseoutRun,
+            process: Result<String, io::Error>,
+        ) -> Result<(), String> {
+            validate_software_closeout_at(&self.receipt, &self.journal, expected, process, self.uid)
+        }
+        fn dead(&self, expected: &SoftwareCloseoutRun) -> Result<(), String> {
+            self.validate(expected, Err(io::Error::from(io::ErrorKind::NotFound)))
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+    fn proc_stat(ticks: u64) -> String {
+        format!(
+            "123 (a comm with ) spaces) S {} {ticks}",
+            vec!["1"; 18].join(" ")
+        )
+    }
+
+    #[test]
+    fn exact_dead_run_allows_software_restart_without_removing_any_journal() {
+        let fixture = Fixture::new();
+        fixture.dead(&run()).unwrap();
+        assert!(fixture.receipt.is_file());
+        assert!(!fixture.journal.exists());
+        assert!(!run().encode().unwrap().contains("verified-rail-cut"));
+    }
+    #[test]
+    fn every_foreign_run_board_image_slot_and_session_is_refused() {
+        let fixture = Fixture::new();
+        for field in 0..8 {
+            let mut other = run();
+            match field {
+                0 => other.boot = "other-boot".into(),
+                1 => other.pid += 1,
+                2 => other.start_ticks += 1,
+                3 => other.board = "am3-s19k".into(),
+                4 => other.image = "1.2.4".into(),
+                5 => other.slot = "other-slot".into(),
+                6 => other.session = "other-session".into(),
+                _ => other.executable_hash = "cd".repeat(32),
+            }
+            assert!(fixture.dead(&other).is_err(), "foreign field {field}");
+        }
+    }
+    #[test]
+    fn live_owner_and_uncertain_death_refuse_but_pid_reuse_is_distinguished() {
+        let fixture = Fixture::new();
+        assert_eq!(process_start_ticks(&proc_stat(456)).unwrap(), 456);
+        assert!(fixture.validate(&run(), Ok(proc_stat(456))).is_err());
+        assert!(fixture.validate(&run(), Ok("malformed".into())).is_err());
+        assert!(fixture
+            .validate(
+                &run(),
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            )
+            .is_err());
+        fixture.validate(&run(), Ok(proc_stat(999))).unwrap();
+    }
+    #[test]
+    fn any_existing_mutation_journal_stays_untouched_and_blocks_restart() {
+        let fixture = Fixture::new();
+        for bytes in [
+            b"unclean".as_slice(),
+            b"DCENT_MUTATION_DISPOSITION_V2\n",
+            b"",
+        ] {
+            std::fs::write(&fixture.journal, bytes).unwrap();
+            assert!(fixture.dead(&run()).is_err());
+            assert_eq!(std::fs::read(&fixture.journal).unwrap(), bytes);
+        }
+        std::fs::remove_file(&fixture.journal).unwrap();
+        std::os::unix::fs::symlink(fixture.dir.join("missing"), &fixture.journal).unwrap();
+        assert!(fixture.dead(&run()).is_err());
+    }
+    #[test]
+    fn malformed_forged_and_oversized_receipt_bytes_are_refused() {
+        let fixture = Fixture::new();
+        let good = run().encode().unwrap();
+        for bytes in [
+            String::new(),
+            good.trim_end().into(),
+            good.replace("V1", "V2"),
+            good.replace("|123|", "|0123|"),
+            good.replace("|123|", "|0|"),
+            good.replace("\n", "|extra\n"),
+            good.replace("\n", "\r\n"),
+            "x".repeat(2049),
+        ] {
+            fixture.write(bytes.as_bytes());
+            assert!(fixture.dead(&run()).is_err(), "accepted {bytes:?}");
+        }
+    }
+    #[test]
+    fn symlink_hardlink_public_mode_and_foreign_owner_are_refused() {
+        let fixture = Fixture::new();
+        std::fs::set_permissions(&fixture.receipt, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(fixture.dead(&run()).is_err());
+        fixture.write(run().encode().unwrap().as_bytes());
+        assert!(validate_software_closeout_at(
+            &fixture.receipt,
+            &fixture.journal,
+            &run(),
+            Err(io::Error::from(io::ErrorKind::NotFound)),
+            fixture.uid + 1
+        )
+        .is_err());
+        std::fs::hard_link(&fixture.receipt, fixture.dir.join("link")).unwrap();
+        assert!(fixture.dead(&run()).is_err());
+        std::fs::remove_file(fixture.dir.join("link")).unwrap();
+        std::fs::rename(&fixture.receipt, fixture.dir.join("actual")).unwrap();
+        std::os::unix::fs::symlink(fixture.dir.join("actual"), &fixture.receipt).unwrap();
+        assert!(fixture.dead(&run()).is_err());
+    }
+    #[test]
+    fn missing_or_duplicate_supervisor_binding_is_not_completion_authority() {
+        let good = "schema=1\nstate=unresolved\nboot_id=boot-a\nimage_version=1.2.3\nsession_token=boot-a.789\n";
+        assert_eq!(
+            closeout_marker_identity(good.as_bytes()).unwrap(),
+            ("boot-a", "1.2.3", "boot-a.789")
+        );
+        for bad in [
+            good.replace("session_token=boot-a.789\n", ""),
+            format!("{good}session_token=other\n"),
+            good.replace("unresolved", "clean"),
+            good.replace('\n', "\r\n"),
+        ] {
+            assert!(closeout_marker_identity(bad.as_bytes()).is_err());
+        }
+    }
+    #[test]
+    fn mutated_and_quarantined_rosters_never_mint_software_closeout() {
+        for disposition in [
+            MutationEntryDisposition::Mutated,
+            MutationEntryDisposition::Quarantined(MutationQuarantineReason::WorkerPanicked),
+        ] {
+            let entry = MutationDispositionEntry {
+                fabric_key: "adapter-1".into(),
+                allocation_id: 1,
+                endpoint_class: MutationEndpointClass::RuntimeService,
+                disposition,
+                safe_off_receipt: None,
+            };
+            assert!(persist_orderly_software_closeout(run(), &[entry])
+                .unwrap_err()
+                .contains("unresolved fabrics"));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1063,6 +1641,7 @@ mod tests {
             MutationQuarantineReason::PreparationAborted,
             MutationQuarantineReason::WorkerPanicked,
             MutationQuarantineReason::UnresolvedPic16State,
+            MutationQuarantineReason::UnresolvedClassicAmlPicState,
             MutationQuarantineReason::UnexpectedLeaseDrop,
             MutationQuarantineReason::RegistryInvariantLost,
         ] {

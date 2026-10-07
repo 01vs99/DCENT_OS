@@ -12,14 +12,14 @@ fails=0
 
 bad() { printf 'FAIL: %s\n' "$*" >&2; fails=$((fails + 1)); }
 
-expected='S19jProBB|am3-bb-s19jpro|armv7|BM1362|0x1362|378|am335x|external-media|EXPERIMENTAL|BP-AM3-BB-GPIO59-WATCHDOG|3x126 BM1362; historical .79 runtime shares, current retained-GPIO59/watchdog bench pending; NAND blocked'
-count=$(awk -v row="$expected" '/^[[:space:]]*#/ || /^[[:space:]]*$/ { next } $0 == row { n++ } END { print n+0 }' "$conf")
+expected='S19jProBB|am3-bb-s19jpro|armv7|BM1362|0x1362|378|am335x|external-media|EXPERIMENTAL|BP-AM3-BB-PSU65-WATCHDOG|3x126 BM1362; historical .79 runtime shares, current runtime-bound-PSU65/watchdog bench pending; NAND blocked'
+count=$(awk -v row="$expected" '{ sub(/\r$/, "") } /^[[:space:]]*#/ || /^[[:space:]]*$/ { next } $0 == row { n++ } END { print n+0 }' "$conf")
 [ "$count" -eq 1 ] || bad "exact non-comment S19jProBB manifest row count is $count, expected 1"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 printf '# %s\n' "$expected" > "$tmp/comment-decoy.conf"
-count=$(awk -v row="$expected" '/^[[:space:]]*#/ || /^[[:space:]]*$/ { next } $0 == row { n++ } END { print n+0 }' "$tmp/comment-decoy.conf")
+count=$(awk -v row="$expected" '{ sub(/\r$/, "") } /^[[:space:]]*#/ || /^[[:space:]]*$/ { next } $0 == row { n++ } END { print n+0 }' "$tmp/comment-decoy.conf")
 [ "$count" -eq 0 ] || bad 'a commented manifest decoy was accepted as a route row'
 
 list=$("$harness" list 2>&1)
@@ -29,7 +29,7 @@ printf '%s' "$list" | grep -F 'am3-bb-s19jpro' >/dev/null 2>&1 || bad 'list omit
 hint=$(cd / && "$harness" install-hint S19jProBB 192.0.2.1 2>&1)
 printf '%s' "$hint" | grep -F 'PERSISTENT INSTALL REFUSED' >/dev/null 2>&1 || bad 'install hint does not refuse persistence'
 printf '%s' "$hint" | grep -F 'runtime/SD lab-only' >/dev/null 2>&1 || bad 'install hint omits external-media-only posture'
-procedure=$(printf '%s\n' "$hint" | sed -n '/BP-AM3-BB-GPIO59-WATCHDOG\.md$/ { s/^[[:space:]]*//; p; }' | tail -n 1)
+procedure=$(printf '%s\n' "$hint" | sed -n '/BP-AM3-BB-PSU65-WATCHDOG\.md$/ { s/^[[:space:]]*//; p; }' | tail -n 1)
 [ -n "$procedure" ] && [ "${procedure#/}" != "$procedure" ] && [ -r "$procedure" ] \
     || bad "install hint did not emit a readable absolute procedure path: ${procedure:-<missing>}"
 procedure_blocks="$tmp/procedure-sh"
@@ -45,6 +45,15 @@ for block in "$procedure_blocks"/*.sh; do
 done
 grep -F 'operator-known_hosts' "$procedure" >/dev/null 2>&1 \
     || bad 'procedure does not preserve the exact pinned host-key bytes'
+grep -F 'GPIO59 role remains' "$procedure" >/dev/null 2>&1 \
+    || bad 'procedure does not retire the guessed GPIO59 cutoff role'
+grep -F 'Class4/key1' "$procedure" >/dev/null 2>&1 \
+    || bad 'procedure omits full decoded EEPROM admission before supply ON'
+grep -F 'schema=v3' "$procedure" >/dev/null 2>&1 \
+    || bad 'procedure names a retired route diagnostic schema'
+if grep -Eq 'watchdog disabled|physical GPIO59|cold_boot_profile=15000_13800' "$procedure"; then
+    bad 'procedure restored obsolete actuation/default guidance'
+fi
 grep -F 'if "$@" >"$host_evidence_dir/$phase.transcript" 2>&1; then' "$procedure" >/dev/null 2>&1 \
     || bad 'procedure phase status capture is not safe under shell errexit'
 printf '%s' "$hint" | grep -E 'dcent install|output/dcentos-sysupgrade|--revert-to-stock' >/dev/null 2>&1 \
@@ -94,7 +103,7 @@ cat > "$tmp/ssh" <<'MOCK_SSH'
 #!/bin/sh
 printf '%s\n' "$*" >> "${MOCK_COMMAND_LOG:?}"
 case_dir=/tmp/dcentos-am3-bb.A1b2c3
-receipt='AM3_BB_ROUTE_ADMISSION_RECEIPT schema=v2 run_pid=4242 board_target=am3-bb-s19jpro soc=am335x carrier=S19J_IO_BOARD_V2_0 asic=BM1362 asic_evidence=declared_runtime_composition topology_profile=s19j_io_board_v2_0_exact_v1 gpio_profile=enable59-rst49_60_27_22-plug51_48_47_46-fantach7_20_110_112-led23_45 uart_profile=ttyS1_48022000-ttyS2_48024000-ttyS4_481a8000-3000000 i2c_profile=eeprom0_50_51_52-deny-psu1_10 cold_boot_profile=15000_13800-reset10_1100_retry1x2_200_100-fan10_30 identity_evidence=exact_device_tree'
+receipt='AM3_BB_ROUTE_ADMISSION_RECEIPT schema=v3 run_pid=4242 board_target=am3-bb-s19jpro soc=am335x carrier=S19J_IO_BOARD_V2_0 asic=BM1362 asic_evidence=declared_runtime_composition topology_profile=s19j_io_board_v2_0_exact_v1 gpio_profile=legacy59_metadata-psu65_high-rst49_60_27_22-plug51_48_47_46-fantach7_20_110_112-led23_45 uart_profile=ttyS1_48022000-ttyS2_48024000-ttyS4_481a8000-3000000 i2c_profile=eeprom0_50_51_52-deny-psu1_10 cold_boot_profile=fixed_apw15120_runtime_owner_required-reset10_1100_retry1x2_200_100-fan10_30 identity_evidence=exact_device_tree'
 case "$*" in
     */sys/class/net/eth0/address*) printf '%s\n' "${MOCK_MAC:-02:11:22:33:44:55}" ;;
     *date\ -u*) printf '%s\n' '20260719T120000Z' ;;
@@ -149,14 +158,18 @@ case "$*" in
                     "cmdline=$case_dir/dcentrald --am3-bb-mining" \
                     "$receipt"
                 ;;
-            stale)
+            stale|legacy_supply)
                 printf '%s\n' \
                     'marker_state=absent' \
                     'compatible=ti,am335x-bone-black' \
                     'model=BeagleBone_Black_v2.1 on S19J_IO_BOARD_V2_0' \
                     'current_pid=4242' \
                     "cmdline=$case_dir/dcentrald --am3-bb-mining"
-                printf '%s\n' "$receipt" | sed 's/run_pid=4242/run_pid=99/'
+                if [ "$MOCK_SSH_CASE" = stale ]; then
+                    printf '%s\n' "$receipt" | sed 's/run_pid=4242/run_pid=99/'
+                else
+                    printf '%s\n' "$receipt" | sed 's/schema=v3/schema=v2/; s/fixed_apw15120_runtime_owner_required/15000_13800/'
+                fi
                 ;;
             duplicate)
                 printf '%s\n' \
@@ -288,7 +301,7 @@ if ! PATH="$tmp:$PATH" MOCK_COMMAND_LOG="$tmp/commands.log" MOCK_SSH_CASE=pass M
 fi
 grep -F 'IDENTITY_PASS' "$tmp/detect-pass.out" >/dev/null 2>&1 || bad 'detect PASS omitted the strict identity verdict'
 
-for identity_case in empty wrong_soc stale duplicate; do
+for identity_case in empty wrong_soc stale duplicate legacy_supply; do
     if PATH="$tmp:$PATH" MOCK_COMMAND_LOG="$tmp/commands.log" MOCK_SSH_CASE="$identity_case" MOCK_REST_CASE=pass \
         "$harness" detect S19jProBB 192.0.2.1 --case-dir="$case_dir" $auth_args >"$tmp/detect-$identity_case.out" 2>&1; then
         bad "detect unexpectedly passed $identity_case identity evidence"

@@ -303,10 +303,8 @@ impl CgMinerCommand {
 /// Listens on port 4028 and handles one command per connection
 /// (CGMiner protocol is connect-send-receive-disconnect).
 ///
-/// SECURITY (2026-04-11): Binds to 127.0.0.1 by default to prevent
-/// hashrate theft via unauthenticated `addpool`/`switchpool` commands.
-/// Set `cgminer_bind_lan = true` in [api] config to expose on LAN
-/// (required for pyasic/hass-miner remote monitoring).
+/// Beta images expose read-only LAN monitoring by default. Mutating verbs
+/// remain loopback-only unless the operator enables `cgminer_lan_writes`.
 pub struct CgMinerServer {
     /// Shared application state.
     state: Arc<AppState>,
@@ -332,10 +330,12 @@ impl CgMinerServer {
     /// Spawns a Tokio task that accepts connections and dispatches
     /// commands. Each connection handles exactly one command.
     pub async fn run(&self) -> Result<()> {
-        // SECURITY (2026-04-11): Default to localhost-only. The CGMiner protocol
-        // has NO authentication — any LAN client can send addpool/switchpool to
-        // redirect hashrate. Bind to 0.0.0.0 only when explicitly opted in via
-        // `cgminer_bind_lan = true` for pyasic/hass-miner compatibility.
+        self.serve(self.bind().await?).await
+    }
+
+    async fn bind(&self) -> Result<TcpListener> {
+        // Binding controls visibility; the accepted peer separately controls
+        // write access. CGMiner sessions do not authenticate a LAN caller.
         let bind_addr = if self.bind_lan {
             "0.0.0.0"
         } else {
@@ -351,7 +351,10 @@ impl CgMinerServer {
             })?;
 
         tracing::info!(port = self.port, %bind_addr, "CGMiner API server listening");
+        Ok(listener)
+    }
 
+    async fn serve(&self, listener: TcpListener) -> Result<()> {
         let connection_limit = Arc::new(tokio::sync::Semaphore::new(MAX_CGMINER_CONNECTIONS));
         loop {
             let (mut socket, addr) = listener
@@ -409,6 +412,10 @@ impl CgMinerServer {
         handle_command_arc(&self.state, cmd).await
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "cgminer_lan_tests.rs"]
+mod lan_tests;
 
 /// API-1: is `name` a state-MUTATING CGMiner/LuxOS verb (as opposed to a
 /// pure read, a telemetry projection, or a session-lifecycle gateway)?

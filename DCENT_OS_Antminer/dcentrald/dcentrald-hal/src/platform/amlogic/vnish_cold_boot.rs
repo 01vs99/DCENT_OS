@@ -110,7 +110,7 @@ pub const ACCEPT_INFERRED_ENV: &str = "DCENT_AML_VNISH_ACCEPT_INFERRED";
 /// is wired in a future wave) must call this and refuse to proceed if
 /// it returns `false`.
 pub fn env_gate_is_set() -> bool {
-    std::env::var(ACCEPT_INFERRED_ENV).ok().as_deref() == Some("1")
+    dcentrald_common::lab_env::var(ACCEPT_INFERRED_ENV).ok().as_deref() == Some("1")
 }
 
 // ---------------------------------------------------------------------------
@@ -589,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn cold_boot_unlocked_by_canonical_env_name() {
+    fn cold_boot_override_requires_lab_capability() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var(ACCEPT_INFERRED_ENV).ok();
         std::env::set_var(ACCEPT_INFERRED_ENV, "1");
@@ -601,9 +601,10 @@ mod tests {
             None => std::env::remove_var(ACCEPT_INFERRED_ENV),
         }
 
-        assert!(
+        assert_eq!(
             unlocked,
-            "with {}=1, env_gate_is_set() must return true",
+            dcentrald_common::lab_env::compiled(),
+            "{}=1 only grants the inferred register path in lab builds",
             ACCEPT_INFERRED_ENV
         );
     }

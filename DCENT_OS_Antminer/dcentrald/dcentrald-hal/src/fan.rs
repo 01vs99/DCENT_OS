@@ -619,8 +619,8 @@ impl FanController {
         }
 
         let (Ok(uio_str), Ok(off_str)) = (
-            std::env::var(ENV_AM2_FRONT_FAN_UIO),
-            std::env::var(ENV_AM2_FRONT_FAN_PWM_OFFSET),
+            dcentrald_common::lab_env::var(ENV_AM2_FRONT_FAN_UIO),
+            dcentrald_common::lab_env::var(ENV_AM2_FRONT_FAN_PWM_OFFSET),
         ) else {
             return false;
         };

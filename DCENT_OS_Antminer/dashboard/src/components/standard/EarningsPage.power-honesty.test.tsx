@@ -14,12 +14,12 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 // EarningsPage polls /api/perf/efficiency and (via useNetworkContext)
 // /api/network/block. Both are wrapped in try/catch, so rejecting keeps the
 // component on its null-telemetry render path — exactly the state under test.
-// Donation fetch is resolved at the firmware default (2%), never 0%.
+// Donation fetch is resolved at the firmware 0% opt-in default (C6, 2026-09-01).
 vi.mock('../../api/client', () => ({
   api: {
     getPerfEfficiency: vi.fn().mockRejectedValue(new Error('no perf endpoint')),
     getNetworkBlock: vi.fn().mockRejectedValue(new Error('no network block')),
-    getDonationConfig: vi.fn().mockResolvedValue({ enabled: true, percent: 2 }),
+    getDonationConfig: vi.fn().mockResolvedValue({ enabled: false, percent: 0 }),
   },
 }));
 
@@ -145,12 +145,19 @@ describe('EarningsPage — STD-A-09 Power Draw honesty', () => {
 });
 
 describe('EarningsPage — donation + pool fee net vs gross', () => {
-  it('defaults unknown donation to 2%, never 0%', () => {
-    expect(DEFAULT_DONATION_PERCENT).toBe(2);
-    expect(donationTakePercent(null)).toBe(2);
-    expect(donationTakePercent(undefined)).toBe(2);
+  // RE-ANCHORED 2026-09-01 (C6): the firmware default flipped from 2% to the
+  // 0% opt-in posture (operator decision). The honesty invariant inverts
+  // symmetrically: unknown config must resolve to the SHARED 0% default
+  // (never an invented take-rate), and an OPTED-IN donation must never be
+  // silently zeroed by the earnings math. Both directions are pinned.
+  it('defaults unknown donation to the firmware 0% opt-in default and never zeroes an opted-in take', () => {
+    expect(DEFAULT_DONATION_PERCENT).toBe(0);
+    expect(donationTakePercent(null)).toBe(0);
+    expect(donationTakePercent(undefined)).toBe(0);
     expect(donationTakePercent({ enabled: false, percent: 2 })).toBe(0);
     expect(donationTakePercent({ enabled: true, percent: 2 })).toBe(2);
+    expect(donationTakePercent({ enabled: true, percent: 3 })).toBe(3);
+    expect(donationTakePercent({ enabled: true, percent: 5 })).toBe(5);
   });
 
   it('subtracts donation then pool fee from gross sats and does not reduce electricity', () => {
@@ -178,7 +185,7 @@ describe('EarningsPage — donation + pool fee net vs gross', () => {
     expect(net.poolFeePercent).toBe(1);
   });
 
-  it('labels gross vs net and never presents 0% as the donation default', () => {
+  it('labels gross vs net and resolves the donation rate through the shared firmware default', () => {
     setStore({ status: { hashrate_ghs: 0, uptime_s: 0 }, stats: null });
     render(<EarningsPage />);
 
@@ -188,8 +195,16 @@ describe('EarningsPage — donation + pool fee net vs gross', () => {
     expect(screen.getByTestId('earnings-net-btc-profit').textContent).toMatch(/heat-credit is not included/i);
     expect(screen.getByTestId('earnings-donation-rate')).toBeTruthy();
     expect(screen.getByLabelText('Donation percent used in net earnings (firmware setting)')).toBeTruthy();
+    // RE-ANCHORED (C6): the take-rate must flow through the shared helpers —
+    // a hardcoded literal default here could drift from the firmware's 0%
+    // opt-in default and silently mis-report net earnings in either
+    // direction (previously: hidden 2% take; the guard inverted with the
+    // default flip).
     expect(earningsSrc).toContain('DEFAULT_DONATION_PERCENT');
-    expect(earningsSrc).not.toMatch(/donationPercent.*=\s*0\b/);
+    expect(earningsSrc).toContain('donationTakePercent');
+    expect(earningsSrc).not.toMatch(
+      /donationPercent, setDonationPercent\] = useState\((?!DEFAULT_DONATION_PERCENT)/,
+    );
   });
 });
 

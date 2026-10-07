@@ -104,8 +104,8 @@ pub(crate) fn admit_s17_hybrid_route(
     let expected_controller =
         expected_controller(board_target).expect("promoted target has an expected controller");
     let exact_facets = board_desc.family == BoardFamily::Zynq
-        && board_desc.chain_transport == ChainTransportKind::ZynqHybrid
-        && board_desc.work_engine == WorkEngineKind::SerialWork
+        && board_desc.chain_transport == ChainTransportKind::StockFpga
+        && board_desc.work_engine == WorkEngineKind::FpgaWorkFifo
         && board_desc.asic_protocol == AsicProtocolIdentity::Bm1397
         && board_desc.voltage_controller == expected_controller
         && board_desc.slot_policy == SlotPolicy::ZynqAbFwSetenv;
@@ -193,15 +193,37 @@ mod tests {
 
     #[test]
     fn s17e_bm1396_capture_first_board_is_refused() {
-        // Same family spelling, different silicon lane: the BM1396 rows were
-        // deliberately NOT promoted and must fail closed here even with a
-        // matching protocol claim.
+        // Same family spelling, different silicon lane: S17e owns its BM1396
+        // factory startup and cannot enter the BM1397 hybrid dispatcher even
+        // with a caller's BM1397 protocol claim.
         assert!(admit_s17_hybrid_route(
             &identity("am2-s17e", OBSERVED_CONTROL_BOARD_ZYNQ_AM2),
             RuntimeDispatchKind::S17Hybrid,
             Some(AsicProtocolIdentity::Bm1397),
         )
         .is_err());
+    }
+
+    #[test]
+    fn stale_serial_descriptor_cannot_admit_the_native_fifo_owner() {
+        for target in S17_HYBRID_BOARD_TARGETS {
+            let exact = identity(target, OBSERVED_CONTROL_BOARD_ZYNQ_AM2);
+            let descriptor = exact.board_desc.unwrap();
+            assert_eq!(descriptor.chain_transport, ChainTransportKind::StockFpga);
+            assert_eq!(descriptor.work_engine, WorkEngineKind::FpgaWorkFifo);
+            for old_transport in [true, false] {
+                let mut changed = identity(target, OBSERVED_CONTROL_BOARD_ZYNQ_AM2);
+                let mut stale = descriptor.clone();
+                if old_transport {
+                    stale.chain_transport = ChainTransportKind::ZynqHybrid;
+                } else {
+                    stale.work_engine = WorkEngineKind::SerialWork;
+                }
+                changed.board_desc = Some(Box::leak(Box::new(stale)));
+                assert!(admit_s17_hybrid_route(&changed, RuntimeDispatchKind::S17Hybrid,
+                    Some(AsicProtocolIdentity::Bm1397)).is_err());
+            }
+        }
     }
 
     #[test]

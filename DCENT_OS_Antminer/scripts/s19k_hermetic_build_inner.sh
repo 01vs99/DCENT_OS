@@ -22,7 +22,7 @@ require_env() {
     [ -n "$value" ] || fail "missing required environment: $1"
     case "$value" in
         *"
-"*|*""*) fail "unsafe control character in environment: $1" ;;
+"*|*"$(printf '\r')"*) fail "unsafe control character in environment: $1" ;;
     esac
 }
 
@@ -300,6 +300,13 @@ FULL_CONFIG=$CONFIG_DIR/$DEFCONFIG_FULL
     cat "$CONFIG_DIR/dcentos-common.fragment"
     cat "$CONFIG_DIR/dcentos_am3_aml_common.fragment"
     cat "$CONFIG_DIR/$DEFCONFIG"
+    # This lane pins the RELEASE posture (DCENT_RELEASE_IMAGE=1 below), so
+    # lock the root account exactly as scripts/build_in_docker.sh does on
+    # its RELEASE path (WS-A4): Buildroot applies the last write, and
+    # release_image_provision.sh fails closed in post-build unless the lock
+    # landed. Run 8 of this lane reached post-build for the first time and
+    # was refused precisely here.
+    echo 'BR2_TARGET_GENERIC_ROOT_PASSWD="*"'
 } > "$FULL_CONFIG"
 
 export TARGET=am3-s19kpro

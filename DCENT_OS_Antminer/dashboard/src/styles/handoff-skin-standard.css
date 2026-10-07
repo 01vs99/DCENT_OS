@@ -1,5 +1,5 @@
 /* ═════════════════════════════════════════════════════════════════════════
-   DCENT_OS — Claude-Design handoff visual recreation
+   DCENT_OS — Design-system handoff visual recreation
    VR2: Standard / Mining mode — pixel-faithful port of 'ui_kits/dashboard'.
 
    Loads AFTER handoff-skin.css (which loads last in main.tsx), so every

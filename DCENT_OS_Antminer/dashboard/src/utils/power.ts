@@ -264,10 +264,10 @@ export function getPowerTargetingLabel(power: unknown): string | null {
 
   const measuredWallPower = targeting.current_wall_watts_measured !== false;
   if (!targetWatts) {
-    return `${sourceLabel} active`;
+    return `${sourceLabel} configured`;
   }
   if (!measuredWallPower || targeting.delta_watts == null || !targeting.comparison) {
-    return `${sourceLabel}: ${targetWatts.toLocaleString()} W target active`;
+    return `${sourceLabel}: ${targetWatts.toLocaleString()} W requested`;
   }
 
   const delta = Math.abs(targeting.delta_watts);

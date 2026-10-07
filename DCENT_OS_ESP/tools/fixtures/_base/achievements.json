@@ -1,0 +1,125 @@
+{
+ "entries": [
+  {
+   "bit": 0,
+   "name": "First Share!",
+   "rarity": "common"
+  },
+  {
+   "bit": 1,
+   "name": "Centurion (100)",
+   "rarity": "common"
+  },
+  {
+   "bit": 2,
+   "name": "Marathon (24h)",
+   "rarity": "common"
+  },
+  {
+   "bit": 3,
+   "name": "Hot Stuff!",
+   "rarity": "common"
+  },
+  {
+   "bit": 4,
+   "name": "Best Day Ever!",
+   "rarity": "common"
+  },
+  {
+   "bit": 5,
+   "name": "Block Witness",
+   "rarity": "common"
+  },
+  {
+   "bit": 6,
+   "name": "Streak Master",
+   "rarity": "uncommon"
+  },
+  {
+   "bit": 7,
+   "name": "Kilohash (1000)",
+   "rarity": "uncommon"
+  },
+  {
+   "bit": 8,
+   "name": "TERAHASH CLUB!",
+   "rarity": "uncommon"
+  },
+  {
+   "bit": 9,
+   "name": "Cool & Collected",
+   "rarity": "uncommon"
+  },
+  {
+   "bit": 10,
+   "name": "Million Diff!",
+   "rarity": "uncommon"
+  },
+  {
+   "bit": 11,
+   "name": "Night Owl (16h)",
+   "rarity": "uncommon"
+  },
+  {
+   "bit": 12,
+   "name": "Half-K (500)",
+   "rarity": "rare"
+  },
+  {
+   "bit": 13,
+   "name": "Warm Day (8h)",
+   "rarity": "rare"
+  },
+  {
+   "bit": 14,
+   "name": "Perfect Century!",
+   "rarity": "rare"
+  },
+  {
+   "bit": 15,
+   "name": "Hash King!",
+   "rarity": "rare"
+  },
+  {
+   "bit": 16,
+   "name": "Early Adopter!",
+   "rarity": "rare"
+  },
+  {
+   "bit": 17,
+   "name": "Efficiency Expert",
+   "rarity": "rare"
+  },
+  {
+   "bit": 18,
+   "name": "Diamond Hands!",
+   "rarity": "epic"
+  },
+  {
+   "bit": 19,
+   "name": "Lucky Strike!",
+   "rarity": "epic"
+  },
+  {
+   "bit": 20,
+   "name": "Power Miser!",
+   "rarity": "epic"
+  },
+  {
+   "bit": 21,
+   "name": "Block Party!",
+   "rarity": "epic"
+  },
+  {
+   "bit": 22,
+   "name": "Creature Legend!",
+   "rarity": "epic"
+  },
+  {
+   "bit": 23,
+   "name": "Completionist!",
+   "rarity": "legendary"
+  }
+ ],
+ "total": 24
+}

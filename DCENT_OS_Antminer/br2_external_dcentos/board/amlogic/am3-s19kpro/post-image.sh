@@ -3,23 +3,20 @@
 # DCENTos post-image script — am3-s19kpro (S19K Pro Amlogic NoPic variant)
 # D-Central Technologies, 2026
 #
-# Phase H.9 scaffold (2026-04-29) — first build will be in Phase J on .78.
-#
 # Produces a sysupgrade-shaped tarball with the "sysupgrade-am3-s19k/" prefix
-# for host-driven package validation and rootfs-window evidence inspection.
-# Persistent mutation is denied. The rootfs is
+# for signed host-driven rootfs-window installation. The rootfs is
 # wrapped as a uImage and staged as `root` next to a verified `kernel`.
 #
 # Output files produced in $BINARIES_DIR:
 #   - rootfs.cpio.gz                       (from Buildroot)
 #   - uImage_rootfs.bin                    (mkimage-wrapped, our payload)
 #   - kernel                               (staged from extractions)
-#   - dcentos-sysupgrade-am3-s19kpro.unsigned.tar (A/B intermediate)
+#   - dcentos-sysupgrade-am3-s19kpro.tar (signed release)
 #   - BUILD_INFO.txt
 #
-# The ordinary A/B build never receives the private release key. It emits an
-# exact release-profile intermediate with the pinned public key and no
-# MANIFEST.sig; the equality-gated isolated signer derives the final tar later.
+# The shared release signer signs the exact manifest in this build with a
+# supplied private key and independent pinned public key. No custody receipt
+# or later signing phase is required to assemble the artifact.
 #
 # CRITICAL — :
 #   BOARD_NAME must be "am3-s19k" (not "am3-s19kpro" and not "am3-aml-s19k").
@@ -34,47 +31,52 @@ PACKAGED_ELF_CHECK="${BOARD_DIR}/verify_rootfs_cpio_elf.py"
 
 BOARD_NAME="am3-s19k"
 BOARD_FAMILY="am3"
-OUTPUT_TAR="${BINARIES_DIR}/dcentos-sysupgrade-am3-s19kpro.unsigned.tar"
+OUTPUT_TAR="${BINARIES_DIR}/dcentos-sysupgrade-am3-s19kpro.tar"
 
-# A persistent-image build is release-only and reproducible.  The signed
-# package still carries no live mutation authority; that remains a separate
-# office transaction and the shipped writer is pinned CLEAR_FOR_FLASH=false.
+# A persistent-image build is release-only and reproducible. Building it
+# does not execute the installer's backup, write or readback operations.
 PROJECT_ROOT="$(cd "${BR2_EXTERNAL_DCENTOS_PATH}/.." && pwd)"
 REPO_ROOT="$(cd "${PROJECT_ROOT}/../.." && pwd)"
 . "${PROJECT_ROOT}/scripts/lib/sysupgrade_package_common.sh"
 . "${PROJECT_ROOT}/scripts/lib/am3_geometry.sh"
 
+# The physical mtd5 base is 0x06700000, including the 6 MiB hole before
+# mtd1. U-Boot's 0x0B800000 rootfs therefore starts at mtd5+0x05100000.
+# A caller cannot enlarge the 40 MiB window or substitute the size-sum base.
+[ "$DCENT_AM3_ROOTFS_MTD" = /dev/mtd5 ] &&
+[ "$DCENT_AM3_ROOTFS_OFFSET_HEX" = 0x05100000 ] &&
+[ "$DCENT_AM3_ROOTFS_WINDOW_HEX" = 0x02800000 ] &&
+[ "$DCENT_AM3_OFFSET_FROM_END_MTD0_TO_MTD1" = 0x600000 ] &&
+[ "$DCENT_AM3_NANDROOTFS_GLOBAL" = 0x0B800000 ] || {
+    echo "ERROR: S19k release requires its exact physical mtd5 rootfs geometry" >&2
+    exit 1
+}
+
 [ "${DCENT_PACKAGE_STATUS:-release}" = release ] || {
     echo "ERROR: S19k persistent image requires DCENT_PACKAGE_STATUS=release" >&2
     exit 1
 }
-[ "${DCENT_RELEASE_IMAGE:-0}" = 1 ] || {
+# RELEASE posture is required and — since WS-A4 (2026-09-01) — the default.
+# An explicit DEV/LAB opt-out (DCENT_DEV_IMAGE=1 / DCENT_RELEASE_IMAGE=0)
+# still fails closed here: the S19k persistent image is release-only.
+dcent_release_posture_is_release || {
     echo "ERROR: S19k persistent image requires DCENT_RELEASE_IMAGE=1" >&2
+    echo "       (the RELEASE image posture is the default; DCENT_DEV_IMAGE=1 /" >&2
+    echo "        DCENT_RELEASE_IMAGE=0 selects a DEV/LAB image, which the S19k" >&2
+    echo "        persistent lane refuses.)" >&2
     exit 1
 }
 [ "${DCENT_REQUIRE_RELEASE_KEY:-0}" = 1 ] || {
     echo "ERROR: S19k persistent image requires DCENT_REQUIRE_RELEASE_KEY=1" >&2
     exit 1
 }
-[ "${DCENT_S19K_UNSIGNED_INTERMEDIATE:-0}" = 1 ] || { echo "ERROR: S19k A/B build requires DCENT_S19K_UNSIGNED_INTERMEDIATE=1" >&2; exit 1; }
-[ -z "${DCENT_RELEASE_SIGNING_KEY:-}" ] || { echo "ERROR: S19k A/B build must not receive DCENT_RELEASE_SIGNING_KEY" >&2; exit 1; }
+[ "${DCENT_S19K_UNSIGNED_INTERMEDIATE:-0}" = 0 ] || { echo "ERROR: S19k release requires the single signed posture; unsigned intermediates are not supported" >&2; exit 1; }
+[ -n "${DCENT_RELEASE_SIGNING_KEY:-}" ] || { echo "ERROR: S19k release requires DCENT_RELEASE_SIGNING_KEY" >&2; exit 1; }
 [ -n "${DCENT_RELEASE_PUBKEY_FILE:-}" ] || { echo "ERROR: S19k persistent image requires DCENT_RELEASE_PUBKEY_FILE" >&2; exit 1; }
-[ -n "${DCENT_S19K_EXPECTED_RELEASE_KEY_SHA256:-}" ] || { echo "ERROR: S19k persistent image requires DCENT_S19K_EXPECTED_RELEASE_KEY_SHA256" >&2; exit 1; }
-[ -n "${DCENT_S19K_NATIVE_OWNER_RECEIPT:-}" ] || { echo "ERROR: S19k persistent image requires DCENT_S19K_NATIVE_OWNER_RECEIPT" >&2; exit 1; }
-[ -n "${DCENT_S19K_STOCK_RECOVERY_RECEIPT:-}" ] || { echo "ERROR: S19k persistent image requires DCENT_S19K_STOCK_RECOVERY_RECEIPT" >&2; exit 1; }
-case "$DCENT_S19K_EXPECTED_RELEASE_KEY_SHA256" in
-    *[!0-9a-f]*|'') echo "ERROR: expected release-key SHA-256 is not lowercase hex" >&2; exit 1 ;;
-    *) ;;
-esac
-[ "${#DCENT_S19K_EXPECTED_RELEASE_KEY_SHA256}" -eq 64 ] || {
-    echo "ERROR: expected release-key SHA-256 must be exactly 64 hex characters" >&2
-    exit 1
-}
-for required_file in "$DCENT_RELEASE_PUBKEY_FILE" \
-    "$DCENT_S19K_NATIVE_OWNER_RECEIPT" "$DCENT_S19K_STOCK_RECOVERY_RECEIPT"
+for required_file in "$DCENT_RELEASE_PUBKEY_FILE" "$DCENT_RELEASE_SIGNING_KEY"
 do
     [ -f "$required_file" ] && [ ! -L "$required_file" ] || {
-        echo "ERROR: required S19k release evidence is missing or unsafe: $required_file" >&2
+        echo "ERROR: required S19k release key is missing or unsafe: $required_file" >&2
         exit 1
     }
 done
@@ -85,10 +87,13 @@ dcent_release_provenance_init
     echo "ERROR: release build target must be dcentos_am3_s19kpro_defconfig" >&2
     exit 1
 }
-[ "$DCENT_BUILD_ARCH" = aarch64 ] || {
-    echo "ERROR: release build architecture must be aarch64" >&2
-    exit 1
-}
+case "$DCENT_BUILD_ARCH" in
+    aarch64|aarch64-unknown-linux-musl) ;;
+    *)
+        echo "ERROR: release build architecture must be aarch64 (got: $DCENT_BUILD_ARCH)" >&2
+        exit 1
+        ;;
+esac
 
 echo "=== DCENTos Post-Image Builder (am3-s19kpro) ==="
 echo ""
@@ -154,7 +159,7 @@ require_rootfs_path "usr/sbin/ubiattach"
 require_rootfs_path "usr/bin/dropbearkey"
 require_rootfs_path "usr/bin/openssl"
 require_rootfs_path "usr/bin/python3"
-require_rootfs_path "usr/sbin/dcent-s19k-postinstall-witness.py"
+reject_rootfs_pattern '(^|/)dcent-s19k-postinstall-witness.py$'
 require_rootfs_path "usr/sbin/dcent-s19k-data-mount"
 require_rootfs_path "usr/local/bin/dcentrald"
 require_rootfs_path "usr/share/dcentos/install-custody/dcentrald_s19k.toml"
@@ -166,7 +171,7 @@ require_rootfs_path "etc/dcentos-platform"
 require_rootfs_path "etc/fw_env.config"
 reject_rootfs_pattern '(^|/)(S50telnet|in\.telnetd|telnetd|telnet)$|telnet'
 reject_rootfs_pattern '(^|/)S46post-install$'
-echo "Rootfs audit: witnessed access services present; unsigned S46 and telnet paths absent"
+echo "Rootfs audit: persistent operator access services present; historical witness, unsigned S46 and telnet paths absent"
 
 # Re-admit the executable bytes from the final compressed cpio, not merely the
 # target tree post-build inspected. This closes the post-build -> filesystem
@@ -308,125 +313,33 @@ Build: ${DCENT_CREATED_AT_UTC}
 Board: ${BOARD_NAME}
 Kernel: Amlogic 4.9.113 (am3-aml / S19K Pro NoPic)
 Rootfs: DCENTos (Buildroot, uImage-wrapped gzip CPIO)
-Artifact contract: host-driven rootfs-window image; signature added only after exact A/B equality
+Artifact contract: signed host-driven rootfs-window image; target-side sysupgrade unsupported
 EOF
 METADATA_SHA256=$(sha256sum "$SUP_DIR/METADATA" | awk '{print $1}')
 METADATA_SIZE=$(stat -c%s "$SUP_DIR/METADATA")
 
-# Bind exact dependency receipts and the disabled host writer into the signed
-# package. These are offline evidence inputs, not target-side tools.
-NATIVE_OWNER_LEAF="native-owner-verification.json"
-STOCK_RECOVERY_LEAF="stock-recovery-verification.json"
-BUILDER_LEAF="build_amlogic_native_install.sh"
-WRITER_LEAF="install_amlogic_persistent.sh"
-BUILDER_SRC="${PROJECT_ROOT}/scripts/${BUILDER_LEAF}"
-WRITER_SRC="${PROJECT_ROOT}/scripts/${WRITER_LEAF}"
-for helper in "$BUILDER_SRC" "$WRITER_SRC"; do
-    [ -f "$helper" ] && [ ! -L "$helper" ] || {
-        echo "ERROR: S19k persistent-install helper is missing or unsafe: $helper" >&2
-        exit 1
-    }
-done
-cp "$DCENT_S19K_NATIVE_OWNER_RECEIPT" "$SUP_DIR/$NATIVE_OWNER_LEAF"
-cp "$DCENT_S19K_STOCK_RECOVERY_RECEIPT" "$SUP_DIR/$STOCK_RECOVERY_LEAF"
-cp "$BUILDER_SRC" "$SUP_DIR/$BUILDER_LEAF"
-cp "$WRITER_SRC" "$SUP_DIR/$WRITER_LEAF"
-
-NATIVE_OWNER_SHA256=$(sha256sum "$SUP_DIR/$NATIVE_OWNER_LEAF" | awk '{print $1}')
-NATIVE_OWNER_SIZE=$(stat -c%s "$SUP_DIR/$NATIVE_OWNER_LEAF")
-STOCK_RECOVERY_SHA256=$(sha256sum "$SUP_DIR/$STOCK_RECOVERY_LEAF" | awk '{print $1}')
-STOCK_RECOVERY_SIZE=$(stat -c%s "$SUP_DIR/$STOCK_RECOVERY_LEAF")
-BUILDER_SHA256=$(sha256sum "$SUP_DIR/$BUILDER_LEAF" | awk '{print $1}')
-BUILDER_SIZE=$(stat -c%s "$SUP_DIR/$BUILDER_LEAF")
-WRITER_SHA256=$(sha256sum "$SUP_DIR/$WRITER_LEAF" | awk '{print $1}')
-WRITER_SIZE=$(stat -c%s "$SUP_DIR/$WRITER_LEAF")
-
-# Base checksums exist before dcent_stage_release_key appends the exact key.
+# Exact kernel/root bytes and the public trust root are covered by the shared
+# manifest. Custody receipts and host-side recovery scripts are not runtime
+# payloads and cannot be prerequisites for this signed build.
 {
     echo "${KERNEL_SHA256}  kernel"
     echo "${ROOTFS_SHA256}  root"
     echo "${METADATA_SHA256}  METADATA"
-    echo "${NATIVE_OWNER_SHA256}  ${NATIVE_OWNER_LEAF}"
-    echo "${STOCK_RECOVERY_SHA256}  ${STOCK_RECOVERY_LEAF}"
-    echo "${BUILDER_SHA256}  ${BUILDER_LEAF}"
-    echo "${WRITER_SHA256}  ${WRITER_LEAF}"
 } > "$SUP_DIR/SHA256SUMS"
-
-# Build tarball — directory MUST be sysupgrade-am3-s19k/ (brick-rule).
-# Final manifest rewrite through the shared helper. The A/B package contains
-# no signature or private-key-derived bytes; the isolated signer adds only
-# MANIFEST.sig after equality and public-input validation. This package is
-# structurally installable for the host extractor, but it grants no writer
-# authority and does not pre-acknowledge the VNish AML safety gate.
 DCENT_TOOLBOX_INSTALL_COMMAND="dcent install <ip> -f dcentos-sysupgrade-am3-s19kpro.tar --artifact-dir <restore_verified_dir>"
 DCENT_TOOLBOX_UPDATE_COMMAND="$DCENT_TOOLBOX_INSTALL_COMMAND"
 DCENT_TOOLBOX_REQUIRES_INACTIVE_SLOT=false
 DCENT_TOOLBOX_INSTALL_MODE=host_driven_rootfs_window_lab
 DCENT_TARGET_SIDE_SYSUPGRADE=false
 DCENT_PACKAGE_INSTALLABLE=true
-dcent_stage_release_key
-
-ACTUAL_RELEASE_KEY_SHA256=$(sha256sum "$SUP_DIR/release_ed25519.pub" | awk '{print $1}')
-[ "$ACTUAL_RELEASE_KEY_SHA256" = "$DCENT_S19K_EXPECTED_RELEASE_KEY_SHA256" ] || {
-    echo "ERROR: staged release key differs from externally expected identity" >&2
-    exit 1
-}
-
-IMAGE_CONTRACT_CHECK="${PROJECT_ROOT}/scripts/s19k_persistent_image_verify.py"
-[ -f "$IMAGE_CONTRACT_CHECK" ] && [ ! -L "$IMAGE_CONTRACT_CHECK" ] || {
-    echo "ERROR: S19k persistent-image contract verifier is missing or unsafe" >&2
-    exit 1
-}
-python3 "$IMAGE_CONTRACT_CHECK" build-contract \
-    --root "$SUP_DIR/root" \
-    --native-owner-receipt "$SUP_DIR/$NATIVE_OWNER_LEAF" \
-    --stock-recovery-receipt "$SUP_DIR/$STOCK_RECOVERY_LEAF" \
-    --release-key "$SUP_DIR/release_ed25519.pub" \
-    --native-install-builder "$SUP_DIR/$BUILDER_LEAF" \
-    --persistent-install-writer "$SUP_DIR/$WRITER_LEAF" \
-    --source-commit "$DCENT_SOURCE_COMMIT" \
-    --source-date-epoch "$SOURCE_DATE_EPOCH" \
-    --build-target "$DCENT_BUILD_TARGET" \
-    --build-arch "$DCENT_BUILD_ARCH" \
-    --toolchain-id "$DCENT_TOOLCHAIN_ID" \
-    --expected-release-key-sha256 "$DCENT_S19K_EXPECTED_RELEASE_KEY_SHA256" \
-    --output "$SUP_DIR/IMAGE_CONTRACT.json" >/dev/null
-IMAGE_CONTRACT_SHA256=$(sha256sum "$SUP_DIR/IMAGE_CONTRACT.json" | awk '{print $1}')
-IMAGE_CONTRACT_SIZE=$(stat -c%s "$SUP_DIR/IMAGE_CONTRACT.json")
-echo "${IMAGE_CONTRACT_SHA256}  IMAGE_CONTRACT.json" >> "$SUP_DIR/SHA256SUMS"
-
-DCENT_EXTRA_PAYLOAD_BLOCK=",
-    \"native_owner_verification\": {
-      \"path\": \"sysupgrade-${BOARD_NAME}/${NATIVE_OWNER_LEAF}\",
-      \"size\": ${NATIVE_OWNER_SIZE},
-      \"sha256\": \"${NATIVE_OWNER_SHA256}\"
-    },
-    \"stock_recovery_verification\": {
-      \"path\": \"sysupgrade-${BOARD_NAME}/${STOCK_RECOVERY_LEAF}\",
-      \"size\": ${STOCK_RECOVERY_SIZE},
-      \"sha256\": \"${STOCK_RECOVERY_SHA256}\"
-    },
-    \"native_install_builder\": {
-      \"path\": \"sysupgrade-${BOARD_NAME}/${BUILDER_LEAF}\",
-      \"size\": ${BUILDER_SIZE},
-      \"sha256\": \"${BUILDER_SHA256}\"
-    },
-    \"persistent_install_writer\": {
-      \"path\": \"sysupgrade-${BOARD_NAME}/${WRITER_LEAF}\",
-      \"size\": ${WRITER_SIZE},
-      \"sha256\": \"${WRITER_SHA256}\"
-    },
-    \"persistent_image_contract\": {
-      \"path\": \"sysupgrade-${BOARD_NAME}/IMAGE_CONTRACT.json\",
-      \"size\": ${IMAGE_CONTRACT_SIZE},
-      \"sha256\": \"${IMAGE_CONTRACT_SHA256}\"
-    }"
+# Do not allow ambient metadata from another package to add unreviewed payloads.
+DCENT_EXTRA_PAYLOAD_BLOCK=""
 export DCENT_EXTRA_PAYLOAD_BLOCK
+dcent_stage_release_key
 dcent_write_sysupgrade_manifest
 dcent_sign_sysupgrade_manifest
 
-# Normalize metadata for the unsigned intermediate. GNU tar's exact
-# ordering/ownership controls make the complete A/B bytes reproducible.
+# Normalize signed package metadata for reproducible ordering and ownership.
 find "$SUP_DIR" -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
 (cd "$STAGING" && tar --sort=name --format=ustar --owner=0 --group=0 \
     --numeric-owner --mtime="@${SOURCE_DATE_EPOCH}" \
@@ -465,10 +378,11 @@ Rootfs (uImage-wrapped gzip CPIO): uImage_rootfs.bin
   SHA256: ${ROOTFS_SHA256}
 
 Artifact contract:
-  Unsigned deterministic A/B intermediate; not a publishable release artifact.
-  The isolated signer adds only MANIFEST.sig after exact A/B equality.
-  Install authority remains separate and false.
-  The bound host writer retains CLEAR_FOR_FLASH=false; no NAND write occurred.
+  Signed manifest with exact kernel/root payload hashes and a pinned public key.
+  Host installation retains backup, exact geometry and write/readback checks.
+  No NAND write occurred during package construction.
+  The package is structurally installable for the host extractor, but it grants no writer:
+  mutation authority stays with the reviewed host transaction, never this artifact.
   Offline package inspection:
     scripts/pre_flash_validate.sh --package-only $(basename "${OUTPUT_TAR}") ${BOARD_NAME}
   Recorded research geometry (not mutation authority):
@@ -477,7 +391,7 @@ Artifact contract:
     rootfs_window=${DCENT_AM3_ROOTFS_WINDOW_HEX}
 
 Target fleet:
-  s19kpro-78 (Amlogic am3-aml, BM1366) - evidence-validation target only
+  am3-s19k (Amlogic S19k Pro, BM1366)
 EOF
 
 echo ""

@@ -1,0 +1,24 @@
+# Flash and NVS dumps from this unit are NEVER committed.
+#
+# They contain the operator's Wi-Fi PSK and pool credentials in cleartext —
+# `DcentAxeConfig` documents that the default NVS partition is unencrypted, and
+# the AxeOS "main" namespace stores `wifipass` the same way. This mirrors the
+# standing rule for held vendor factory dumps: reference them by SHA-256, never
+# commit their contents.
+#
+# The stock backup is also 16 MB, which does not belong in git regardless.
+# Its SHA-256 is committed (`stock-full-16mb.bin.sha256`) so the restore
+# artifact stays verifiable, and `extract_nvs.py` + `make_nvs.py` reproduce
+# every derived file from it.
+stock-full-16mb.bin
+stock-nvs.bin
+stock-nvs-dump.txt
+stock-nvs-extracted.json
+live-nvs.bin
+live-nvs-extracted.json
+live-nvs.json
+stock-nvs.json
+new-nvs.bin
+new-nvs.csv
+nvsval_*.txt
+themecolors.txt

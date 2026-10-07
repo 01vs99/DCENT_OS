@@ -4,7 +4,7 @@
 
 use dcentaxe_hal::board::{
     AccessoryMode, BitAxeModel, BoardConfig, BoardHardwareConfig, BoardVersionProfile,
-    FanControllerKind, PowerControllerKind, TempSensorKind,
+    FanControllerKind, FanPopulation, PowerControllerKind, TempSensorKind,
 };
 use dcentaxe_stratum::StratumConfig;
 
@@ -954,6 +954,25 @@ pub struct DcentAxeConfig {
     /// the current `SCHEMA_VERSION` both round-trip cleanly.
     #[serde(default)]
     pub schema_version: u8,
+    /// XPSAFE-8: which dual-fan headers the operator declares PHYSICALLY
+    /// POPULATED on this unit.
+    ///
+    /// Default [`FanPopulation::Both`] — the reference build for every dual-fan
+    /// row — so `#[serde(default)]` makes every existing NVS blob round-trip
+    /// with byte-identical gate behavior.
+    ///
+    /// This is deliberately a FIRST-CLASS config field and NOT part of
+    /// [`BoardHardwareConfig`]: `apply_hardware_override_if_unrecognized`
+    /// refuses hardware overrides for a recognized row, because a registered
+    /// row's fan/thermal/power topology is the firmware's safety authority.
+    /// Fan POPULATION is not topology — it is a fact about one physical unit
+    /// that the row cannot know — so it travels on its own field and never
+    /// touches the refused path.
+    ///
+    /// It does not relax the mandatory-tach requirement. A Hex still must prove
+    /// a tachometer; this only scopes WHICH headers the proof is demanded from.
+    #[serde(default)]
+    pub fans_populated: FanPopulation,
 }
 
 fn default_mqtt_port() -> u16 {
@@ -1498,6 +1517,12 @@ impl DcentAxeConfig {
             board.asic_count = self.asic_count;
         }
         self.apply_hardware_override_if_unrecognized(&mut board, "board_config");
+        // XPSAFE-8: fan POPULATION is per-unit physical truth, not row topology,
+        // so it is applied unconditionally — after the hardware-override guard
+        // above, and deliberately outside it. It cannot widen the board's
+        // capabilities: `requires_fan_tach()` is untouched, so a Hex still must
+        // prove a tachometer either way.
+        board.set_fans_populated(self.fans_populated);
 
         board
     }
@@ -1950,6 +1975,8 @@ impl Default for DcentAxeConfig {
             allow_unsigned_ota: false,
             room_temp_source: RoomTempSource::Local,
             schema_version: SCHEMA_VERSION,
+            // XPSAFE-8: the reference build populates both headers.
+            fans_populated: FanPopulation::Both,
         }
     }
 }
@@ -4954,7 +4981,10 @@ mod identity_gate_tests {
     // body, per the include_str! self-match trap rule) instead of runtime cfg!.
     #[test]
     fn default_model_for_build_has_lucky_arms() {
-        let src = include_str!("config.rs");
+        // Checkout-invariant: the fn-end search below spans line breaks, so normalise CRLF
+        // first (this guard failed on every autocrlf worktree in the 2026-09-03 UI Gauntlet).
+        let src_owned = include_str!("config.rs").replace("\r\n", "\n");
+        let src: &str = src_owned.as_str();
         let fn_start = src
             .find("pub(crate) fn default_model_for_build()")
             .expect("default_model_for_build must exist");

@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMPDIR_TEST="$(mktemp -d "${TMPDIR:-/tmp}/dcentos cargo capsule.XXXXXX")"
 trap 'rm -rf "$TMPDIR_TEST"' EXIT
+trap 'printf "cargo capsule fixture failed at line %s\n" "$LINENO" >&2' ERR
 
 SOURCE_REPO="$TMPDIR_TEST/source-repo"
 EXTERNAL_REPO="$TMPDIR_TEST/external-inputs"
@@ -12,8 +13,10 @@ CONTROL_PARENT="$TMPDIR_TEST/control"
 FAKE_BIN="$TMPDIR_TEST/fake-bin"
 FAKE_STATE="$TMPDIR_TEST/docker-state"
 DOCKER_LOG="$TMPDIR_TEST/docker.log"
+FIXTURE_DIR="$TMPDIR_TEST/elf-fixtures"
 mkdir -p \
     "$SOURCE_REPO/DCENT_OS_Antminer/scripts" \
+    "$SOURCE_REPO/DCENT_OS_Antminer/scripts/lib" \
     "$SOURCE_REPO/DCENT_OS_Antminer/scripts/hw-acceptance" \
     "$SOURCE_REPO/DCENT_OS_Antminer/docs/architecture" \
     "$SOURCE_REPO/DCENT_OS_Antminer/dcentrald" \
@@ -26,11 +29,14 @@ mkdir -p \
 
 for helper in \
     atomic_publish_file.py durable_file_io.py \
+    atomic_publish_directory.py release_set_publication.py \
     build-dcentrald.sh build_input_snapshot.py binary_build_receipt.py \
     release_capsule_lineage.py release_invocation.py release_result_stage.py \
     release_docker_resources.py source_closure.py source_snapshot.py; do
     cp "$SCRIPT_DIR/$helper" "$SOURCE_REPO/DCENT_OS_Antminer/scripts/$helper"
 done
+cp "$SCRIPT_DIR/lib/release_posture.sh" \
+    "$SOURCE_REPO/DCENT_OS_Antminer/scripts/lib/release_posture.sh"
 grep -Fq 'from atomic_publish_file import' \
     "$SOURCE_REPO/DCENT_OS_Antminer/scripts/binary_build_receipt.py"
 grep -Fq 'from durable_file_io import' \
@@ -63,6 +69,13 @@ cp "$SOURCE_REPO/DCENT_OS_Antminer/scripts/build_inputs.manifest" \
 # the external root supplies payload bytes and nothing else.
 printf '%s\n' 'attacker-controlled manifest must not be opened' \
     > "$EXTERNAL_REPO/DCENT_OS_Antminer/scripts/build_inputs.manifest"
+
+# Keep the real key/ELF, dashboard and native dependency validators in the
+# authenticated snapshot. Only the expensive compiler/container and npm
+# processes are represented by bounded fixtures; the produced bytes are real.
+PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/cargo_capsule_fixture.py" \
+    --source-repo "$SOURCE_REPO" --fixtures "$FIXTURE_DIR" --fake-bin "$FAKE_BIN"
+OTA_PUBLIC_KEY_HEX="$(cat "$FIXTURE_DIR/ota-key.hex")"
 
 git -C "$SOURCE_REPO" init -q
 git -C "$SOURCE_REPO" config user.email test@example.invalid
@@ -205,7 +218,10 @@ if [ "$kind" = build ]; then
 fi
 if [ "$kind" = run ]; then
     name=""; invocation=""; results=""; source_mount=""; schema_mount=""; cargo_mount=""; image=""; capsule_mode=0
-    metadata_target="" manifest_public_key_hex=""
+    metadata_target="" manifest_public_key_hex="" ota_public_key_hex=""
+    # Model conflicting image defaults; only explicit Docker assignments win.
+    cargo_jobs=19 cargo_incremental=1
+    cargo_jobs_seen=0 cargo_incremental_seen=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --rm) shift ;;
@@ -226,13 +242,39 @@ if [ "$kind" = run ]; then
                 case "$2" in
                     DCENT_CAPSULE_MODE=*) capsule_mode=${2#*=};;
                     DCENT_METADATA_TARGET=*) metadata_target=${2#*=};;
+                    CARGO_BUILD_JOBS=*) cargo_jobs=${2#*=}; cargo_jobs_seen=$((cargo_jobs_seen + 1));;
+                    CARGO_INCREMENTAL=*) cargo_incremental=${2#*=}; cargo_incremental_seen=$((cargo_incremental_seen + 1));;
                     DCENT_MANIFEST_PUBLIC_KEY_HEX=*) manifest_public_key_hex=${2#*=};;
+                    DCENT_OTA_PUBLIC_KEY_HEX=*) ota_public_key_hex=${2#*=};;
                 esac
                 shift 2 ;;
             sha256:*) image=$1; shift; break ;;
             *) shift ;;
         esac
     done
+    [ "$cargo_jobs_seen" = 1 ] && [ "$cargo_jobs" = 2 ] || { echo "missing exact two-job container assignment" >&2; exit 94; }
+    [ "$cargo_incremental_seen" = 1 ] && [ "$cargo_incremental" = 0 ] || { echo "missing explicit incremental-disable assignment" >&2; exit 95; }
+    [ "$#" = 3 ] && [ "$1" = bash ] && [ "$2" = -c ] || { echo "unexpected container command" >&2; exit 96; }
+    # Extract only the environment filter from the actual passed container body.
+    # Never execute that body (it contains real Cargo commands).
+    compile_env_filter="$(python3 - "$3" <<'PY_COMPILE_FILTER'
+import sys
+
+lines = sys.argv[1].splitlines()
+marker = "env | LC_ALL=C sort | grep -E " + chr(92)
+matches = []
+for index, line in enumerate(lines):
+    if line.strip() != marker:
+        continue
+    quoted = lines[index + 1].strip()
+    assert quoted.endswith(chr(92)), "filter lacks line continuation"
+    quoted = quoted[:-1].rstrip()
+    assert quoted.startswith('"') and quoted.endswith('"'), "filter is not one quoted argument"
+    matches.append(quoted[1:-1])
+assert len(matches) == 1, "expected one actual Docker compile environment filter"
+print(matches[0])
+PY_COMPILE_FILTER
+)"
     source_mount="$(fake_shell_path "$source_mount")"
     schema_mount="$(fake_shell_path "$schema_mount")"
     results="$(fake_shell_path "$results")"
@@ -242,6 +284,9 @@ if [ "$kind" = run ]; then
         results=$source_mount
     else
         [ -n "$results" ] || { echo 'missing result mount' >&2; exit 92; }
+        [ "$ota_public_key_hex" = "$(cat "$FAKE_ELF_DIR/ota-key.hex")" ] || {
+            echo 'missing independently trusted OTA container assignment' >&2; exit 97;
+        }
     fi
     printf '%s\n' "$source_mount" > "$state/observed-source-mount"
     printf '%s\n' "$schema_mount" > "$state/observed-schema-mount"
@@ -258,12 +303,33 @@ if [ "$kind" = run ]; then
     release="$results/target/$triple/release"
     inventory="$results/target/release-inventory"
     mkdir -p "$release" "$inventory"
-    for binary in dcentrald dcentos-init dcentos-discovery; do printf 'ELF-%s\n' "$binary" > "$release/$binary"; chmod 755 "$release/$binary"; done
+    for binary in dcentrald dcentos-init dcentos-discovery; do
+        cp "$FAKE_ELF_DIR/$triple" "$release/$binary"
+        chmod 755 "$release/$binary"
+    done
+    if [ "${FAKE_DOCKER_BAD_ELF_KEY:-0}" = 1 ]; then
+        python3 - "$release/dcentrald" <<'PY_BAD_ELF'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+raw = bytearray(path.read_bytes())
+profile = b'dcentos-build-identity/v1'.ljust(32, b'\0')
+assert raw.count(profile) == 1
+raw[raw.index(profile) + 36] ^= 1
+path.write_bytes(raw)
+PY_BAD_ELF
+    fi
+    if [ "${FAKE_DOCKER_BAD_OTA_OBSERVATION:-0}" = 1 ]; then
+        ota_public_key_hex=$(printf '0%.0s' {1..64})
+    fi
     printf '{}\n' > "$inventory/$triple.metadata.json"
     printf 'rustc 1.90.0\ncargo 1.90.0\nbuilder_base_reference=test\nbuilder_image_id=%s\nbuilder_package_resolution=test\n' "$digest" > "$inventory/$triple.toolchain.txt"
     {
         printf 'AR_aarch64_unknown_linux_musl=/usr/local/bin/zig-ar\n'
+        printf 'CARGO_BUILD_JOBS=%s\n' "$cargo_jobs"
         printf 'CARGO_BUILD_PROFILE=release\n'
+        printf 'CARGO_INCREMENTAL=%s\n' "$cargo_incremental"
+        printf 'CARGO_INCREMENTAL_DECOY=1\n'
         printf 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld\n'
         printf 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=-C linker=rust-lld\n'
         printf 'CARGO_TARGET_DIR=/cargo-target\n'
@@ -273,9 +339,10 @@ if [ "$kind" = run ]; then
         printf 'DCENT_BUILDER_KIND=docker-cross\n'
         printf 'DCENT_BUILDER_PACKAGE_RESOLUTION=official-zig-0.13.0-sha256-d45312e6\n'
         printf 'DCENT_MANIFEST_KEY_ID=\n'
-        printf 'DCENT_MANIFEST_PUBLIC_KEY_HEX=%s\n' "$(printf 'a%.0s' {1..64})"
+        printf 'DCENT_MANIFEST_PUBLIC_KEY_HEX=%s\n' "$manifest_public_key_hex"
+        printf 'DCENT_OTA_PUBLIC_KEY_HEX=%s\n' "$ota_public_key_hex"
         printf 'RUSTFLAGS=-C link-arg=-s -C target-cpu=cortex-a53 -C target-feature=+crt-static\n'
-    } > "$inventory/$triple.compile-env.txt"
+    } | LC_ALL=C sort | grep -E "$compile_env_filter" > "$inventory/$triple.compile-env.txt"
     if [ -n "$name" ]; then rm -f "$state/containers/$name"; fi
     exit 0
 fi
@@ -330,6 +397,7 @@ run_driver() {
         PATH="$FAKE_BIN:$PATH" \
         DCENT_DOCKER_BIN=docker \
         FAKE_DOCKER_STATE="$FAKE_STATE" FAKE_DOCKER_LOG="$DOCKER_LOG" \
+        FAKE_ELF_DIR="$FIXTURE_DIR" \
         DCENT_CAPSULE_GIT_OBJECT_REPO="$SOURCE_REPO" \
         DCENT_CAPSULE_SOURCE_SNAPSHOT="$SNAPSHOT_DESCRIPTOR" \
         DCENT_CAPSULE_SOURCE_COMMIT="$SOURCE_COMMIT" \
@@ -340,6 +408,7 @@ run_driver() {
         DCENT_CAPSULE_EXTERNAL_INPUT_REPO_ROOT="$EXTERNAL_REPO" \
         DCENT_CAPSULE_CARGO_BUILD_INPUT_SNAPSHOT="${CARGO_BUILD_INPUT_SNAPSHOT_OVERRIDE:-$CARGO_BUILD_INPUT_SNAPSHOT}" \
         DCENT_MANIFEST_PUBLIC_KEY_HEX="$(printf 'a%.0s' {1..64})" \
+        DCENT_RELEASE_PUBKEY_FILE="${RELEASE_PUBKEY_OVERRIDE-$FIXTURE_DIR/test-pub.pem}" \
         DCENT_RUST_BUILDER_BASE="rust-test@sha256:$(printf 'b%.0s' {1..64})" \
         "$SOURCE_REPO/DCENT_OS_Antminer/scripts/build-dcentrald.sh" "$target"
 }
@@ -350,7 +419,16 @@ printf 'do-not-touch\n' > "$LIVE_SENTINEL"
 
 new_capsule success
 : > "$DOCKER_LOG"
-run_driver >/dev/null
+if ! run_driver >"$TMPDIR_TEST/success.out" 2>&1; then
+    cat "$TMPDIR_TEST/success.out" >&2
+    exit 1
+fi
+grep -Fq 'seven exact source profiles verified' "$TMPDIR_TEST/success.out"
+grep -Fq 'verified compiled release OTA identity' "$TMPDIR_TEST/success.out"
+python3 "$SCRIPT_DIR/release_dashboard.py" verify \
+    --source "$SNAPSHOT_TREE/DCENT_OS_Antminer/dashboard" --output "$RESULT_ROOT/dashboard" >/dev/null
+test ! -e "$SNAPSHOT_TREE/DCENT_OS_Antminer/dashboard/node_modules"
+test ! -e "$SNAPSHOT_TREE/DCENT_OS_Antminer/dashboard/dist"
 TRIPLE=armv7-unknown-linux-musleabihf
 for binary in dcentrald dcentos-init dcentos-discovery; do
     test -f "$RESULT_ROOT/target/$TRIPLE/release/$binary"
@@ -377,24 +455,46 @@ test -f "$CARGO_BUILD_INPUT_SNAPSHOT"
 # candidate without weakening its split source/result/invocation authorities.
 new_capsule amlogic-success
 : > "$DOCKER_LOG"
-run_driver amlogic >/dev/null
+# Host environment must not remove the resource bound passed to Docker.
+if ! CARGO_BUILD_JOBS=19 CARGO_INCREMENTAL=1 CARGO_PROFILE_RELEASE_INCREMENTAL=true \
+    run_driver amlogic >"$TMPDIR_TEST/amlogic-success.out" 2>&1; then
+    cat "$TMPDIR_TEST/amlogic-success.out" >&2
+    exit 1
+fi
 TRIPLE=aarch64-unknown-linux-musl
 grep -Fq "DCENT_MANIFEST_PUBLIC_KEY_HEX=$(printf 'a%.0s' {1..64})" "$DOCKER_LOG"
+grep -Fq "DCENT_OTA_PUBLIC_KEY_HEX=$OTA_PUBLIC_KEY_HEX" "$DOCKER_LOG"
 for binary in dcentrald dcentos-init dcentos-discovery; do
     test -f "$RESULT_ROOT/target/$TRIPLE/release/$binary"
     test -f "$RESULT_ROOT/target/$TRIPLE/release/$binary.build-receipt.json"
     grep -q '"schema_version":4' "$RESULT_ROOT/target/$TRIPLE/release/$binary.build-receipt.json"
 done
 PYTHONPATH="$SCRIPT_DIR" python3 - \
-    "$RESULT_ROOT/target/$TRIPLE/release/dcentrald.build-receipt.json" <<'PY'
+    "$RESULT_ROOT/target/$TRIPLE/release/dcentrald.build-receipt.json" "$OTA_PUBLIC_KEY_HEX" <<'PY'
 import json
 import sys
 import s19k_native_build_verify as verifier
 
 with open(sys.argv[1], "r", encoding="utf-8") as handle:
     receipt = json.load(handle)
-observed = verifier._manifest_key_contract(receipt, receipt["builder"])
+observed = receipt["build_environment"]["DCENT_MANIFEST_PUBLIC_KEY_HEX"]
 assert observed == "a" * 64
+compile_env = receipt["compile_environment"]["entries"]
+# The historical S19k acceptance schema remains frozen. The current driver
+# adds an independent OTA key and verifies it against the actual daemon ELF;
+# retain an exact environment census here without rewriting that old schema.
+assert compile_env == {
+    **verifier.COMPILE_ENVIRONMENT,
+    "DCENT_BUILDER_BASE_REFERENCE": receipt["builder"]["base_reference"],
+    "DCENT_BUILDER_IMAGE_ID": receipt["builder"]["image_id"],
+    "DCENT_MANIFEST_KEY_ID": "",
+    "DCENT_MANIFEST_PUBLIC_KEY_HEX": observed,
+    "DCENT_OTA_PUBLIC_KEY_HEX": sys.argv[2],
+}
+assert compile_env["CARGO_BUILD_JOBS"] == "2"
+assert compile_env["CARGO_INCREMENTAL"] == "0"
+assert compile_env["DCENT_OTA_PUBLIC_KEY_HEX"] == sys.argv[2]
+assert "CARGO_INCREMENTAL_DECOY" not in compile_env
 assert receipt["build_environment"] == {
     "DCENT_MANIFEST_KEY_ID": "",
     "DCENT_MANIFEST_PUBLIC_KEY_HEX": observed,
@@ -406,6 +506,45 @@ test "$(cat "$FAKE_STATE/observed-result-mount")" = "$RESULT_ROOT"
 test ! -e "$FAKE_STATE/volumes/$CARGO_VOLUME"
 test ! -e "$FAKE_STATE/images/dcentos-release-builder:$INVOCATION_ID"
 test -f "$CARGO_BUILD_INPUT_SNAPSHOT"
+
+# A plausible compile observation cannot replace the actual retained ELF
+# identity, and neither can a valid ELF excuse a wrong observation. Bad npm
+# output must fail the real dashboard validator before the result is sealed.
+for failure in elf-key ota-observation dashboard-assets; do
+    new_capsule "$failure"
+    case "$failure" in
+        elf-key) failure_variable=FAKE_DOCKER_BAD_ELF_KEY ;;
+        ota-observation) failure_variable=FAKE_DOCKER_BAD_OTA_OBSERVATION ;;
+        dashboard-assets) failure_variable=FAKE_NPM_BAD_ASSETS ;;
+    esac
+    export "$failure_variable=1"
+    if run_driver >"$TMPDIR_TEST/$failure.out" 2>&1; then
+        echo "$failure unexpectedly entered a sealed Cargo result" >&2; exit 1
+    fi
+    unset "$failure_variable"
+    case "$failure" in
+        elf-key) grep -Fq 'actual daemon ELF does not contain' "$TMPDIR_TEST/$failure.out" ;;
+        ota-observation) grep -Fq 'compile observation is missing' "$TMPDIR_TEST/$failure.out" ;;
+        dashboard-assets) grep -Fq 'dashboard HTML/gzip/digest disagree' "$TMPDIR_TEST/$failure.out" ;;
+    esac
+    test "$(python3 "$SCRIPT_DIR/release_result_stage.py" query --invocation-stage "$INVOCATION_STAGE" --field state "$RESULT_STAGE")" != sealed
+    test ! -e "$FAKE_STATE/volumes/$CARGO_VOLUME"
+    test ! -e "$FAKE_STATE/images/dcentos-release-builder:$INVOCATION_ID"
+    test ! -e "$SNAPSHOT_TREE/DCENT_OS_Antminer/dashboard/dist"
+done
+
+for failure in absent-trusted-key conflicting-ota-key; do
+    new_capsule "$failure"
+    docker_lines_before="$(wc -l < "$DOCKER_LOG")"
+    if [ "$failure" = absent-trusted-key ]; then
+        if RELEASE_PUBKEY_OVERRIDE='' run_driver >"$TMPDIR_TEST/$failure.out" 2>&1; then exit 1; fi
+        grep -Fq 'independently trusted public-key file' "$TMPDIR_TEST/$failure.out"
+    else
+        if DCENT_OTA_PUBLIC_KEY_HEX="$(printf '0%.0s' {1..64})" run_driver >"$TMPDIR_TEST/$failure.out" 2>&1; then exit 1; fi
+        grep -Fq 'compiled OTA key must equal' "$TMPDIR_TEST/$failure.out"
+    fi
+    test "$(wc -l < "$DOCKER_LOG")" = "$docker_lines_before"
+done
 
 # A compatibility handoff target cannot enter the native AArch64 capsule
 # merely because every authority variable is present.
@@ -508,8 +647,9 @@ if env PATH="$FAKE_BIN:$PATH" DCENT_RELEASE_IMAGE=1 \
     exit 1
 fi
 grep -q 'without an authenticated release capsule' "$TMPDIR_TEST/no-capsule.out"
-if ! env PATH="$FAKE_BIN:$PATH" DCENT_DOCKER_BIN=docker \
+if ! env PATH="$FAKE_BIN:$PATH" DCENT_DOCKER_BIN=docker DCENT_DEV_IMAGE=1 \
     FAKE_DOCKER_STATE="$FAKE_STATE" FAKE_DOCKER_LOG="$DOCKER_LOG" \
+    FAKE_ELF_DIR="$FIXTURE_DIR" \
     DCENT_RUST_BUILDER_BASE=rust:1.90-bookworm \
     "$SOURCE_REPO/DCENT_OS_Antminer/scripts/build-dcentrald.sh" zynq \
     >"$TMPDIR_TEST/development.out" 2>&1; then

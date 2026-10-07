@@ -227,7 +227,7 @@ pub const OFFICIAL_S9SE_CGMINER_HIGH_PLL_FILE_OFF: usize = 0x95A38;
 /// across the July HiveOS and September OM builds.
 pub const S9SE_PLL_REGION_LEN: usize = 179 * 16;
 pub const S9SE_CGMINER_HIGH_PLL_STRIDE: usize = 12;
-/// S9k `change_high_pll_by_aisc` still does `asic << 2`. Not S9 SE geometry.
+/// Both production models use `asic << 2` in the per-ASIC PLL path.
 pub const S9K_PLL_ADDR_INTERVAL: u8 = 4;
 
 pub const FREQ_HIGH_PLL_1393: [(u16, u8, u16); 33] = [
@@ -288,7 +288,7 @@ pub enum S9SePllError {
     FrequencyProgramRefused,
     ZeroDivider,
     IndexOutOfRange { index: u8 },
-    S9kChipAddrIntervalRefused { asic: u8, chip_addr: u8 },
+    ChipAddressMismatch { asic: u8, chip_addr: u8 },
 }
 
 pub fn decode_pll_word(word: u32) -> S9SePllWord {
@@ -407,17 +407,14 @@ pub fn pack_frequency_with_addr(broadcast: bool, chip_addr: u8, vil_pll: u32) ->
     pack_set_config(broadcast, chip_addr, REG_PLL0, vil_pll)
 }
 
-/// S9 SE chain address is `asic * 2`. The binary's per-chip PLL helper
-/// still does `asic << 2` (shared T11 / S9k). Refuse that mapping.
+/// Both held S9 SE production ELFs and S9k use 60 populated addresses at stride four.
 pub fn s9se_chip_addr_from_asic_index(asic: u8) -> Option<u8> {
-    asic.checked_mul(S9SE_ADDR_INTERVAL)
+    (asic < crate::s9se_enum::S9SE_CHIPS_PER_CHAIN).then(|| asic * S9SE_ADDR_INTERVAL)
 }
 
-pub fn refuse_s9k_asic_times_four_on_s9se(asic: u8, chip_addr: u8) -> Result<(), S9SePllError> {
-    let s9se = s9se_chip_addr_from_asic_index(asic);
-    let s9k = asic.checked_mul(S9K_PLL_ADDR_INTERVAL);
-    if s9k == Some(chip_addr) && s9se != Some(chip_addr) {
-        return Err(S9SePllError::S9kChipAddrIntervalRefused { asic, chip_addr });
+pub fn admit_s9se_chip_address(asic: u8, chip_addr: u8) -> Result<(), S9SePllError> {
+    if s9se_chip_addr_from_asic_index(asic) != Some(chip_addr) {
+        return Err(S9SePllError::ChipAddressMismatch { asic, chip_addr });
     }
     Ok(())
 }
@@ -626,15 +623,17 @@ mod tests {
             refuse_s9se_frequency_program(),
             Err(S9SePllError::FrequencyProgramRefused)
         );
-        assert_eq!(s9se_chip_addr_from_asic_index(1), Some(2));
-        refuse_s9k_asic_times_four_on_s9se(1, 2).unwrap();
+        assert_eq!(s9se_chip_addr_from_asic_index(1), Some(4));
+        admit_s9se_chip_address(1, 4).unwrap();
         assert!(matches!(
-            refuse_s9k_asic_times_four_on_s9se(1, 4),
-            Err(S9SePllError::S9kChipAddrIntervalRefused {
+            admit_s9se_chip_address(1, 2),
+            Err(S9SePllError::ChipAddressMismatch {
                 asic: 1,
-                chip_addr: 4
+                chip_addr: 2
             })
         ));
-        refuse_s9k_asic_times_four_on_s9se(0, 0).unwrap();
+        admit_s9se_chip_address(0, 0).unwrap();
+        admit_s9se_chip_address(59, 236).unwrap();
+        assert!(admit_s9se_chip_address(60, 240).is_err());
     }
 }

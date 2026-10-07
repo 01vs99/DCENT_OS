@@ -55,6 +55,7 @@ use tokio::sync::mpsc;
 fn build_sv2_config(sv2_addr: std::net::SocketAddr, version_rolling: bool) -> StratumConfig {
     let sv2_url = format!("stratum2+tcp://{}:{}", sv2_addr.ip(), sv2_addr.port());
     StratumConfig {
+        v1_policy: Default::default(),
         pool1: PoolConfig {
             url: sv2_url.clone(),
             worker: "test.miner".into(),

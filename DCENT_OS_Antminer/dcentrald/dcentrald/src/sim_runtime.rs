@@ -24,6 +24,7 @@ fn stratum_config(pool_url: String, worker: &str) -> StratumConfig {
     let mut donation = DonationConfig::default();
     donation.enabled = false;
     StratumConfig {
+        v1_policy: Default::default(),
         pool1: PoolConfig {
             url: pool_url,
             worker: worker.to_string(),

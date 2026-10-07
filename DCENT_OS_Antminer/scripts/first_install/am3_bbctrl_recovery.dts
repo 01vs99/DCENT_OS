@@ -1,0 +1,158 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Dedicated RAM recovery topology, not the LuxOS S19J_IO mining DTB.
+// Physical source: BBCtrl-20210622 devicetree.dtb SHA25603926d8f...6232361.
+// Linux5.4 am33xx.dtsi supplies current clock/interrupt/controller bindings.
+/dts-v1/;
+#include "am33xx.dtsi"
+
+/ {
+    model = "DCENT BBCtrl S19j NAND RAM recovery";
+    compatible = "ti,am335x-bone", "ti,am33xx";
+    chosen { stdout-path = "serial0:115200n8"; };
+    aliases { mmc0 = &mmc1; serial0 = &uart0; ethernet0 = &cpsw_emac0; };
+    memory@80000000 { device_type = "memory"; reg = <0x80000000 0x10000000>; };
+    bb_recovery_vmmc: regulator-vmmc {
+        compatible = "regulator-fixed";
+        regulator-name = "vmmcsd_fixed";
+        regulator-min-microvolt = <3300000>;
+        regulator-max-microvolt = <3300000>;
+    };
+};
+
+&am33xx_pinmux {
+    bb_recovery_nand: bb-recovery-nand {
+        // Verbatim donor NAND pad cells. Replace its stale numeric phandle
+        // with this direct reference; no donor reset/LED clients are copied.
+        pinctrl-single,pins = <
+            0x00 0x30 0x04 0x30 0x08 0x30 0x0c 0x30
+            0x10 0x30 0x14 0x30 0x18 0x30 0x1c 0x30
+            0x70 0x30 0x74 0x37 0x7c 0x08 0x90 0x08
+            0x94 0x08 0x98 0x08 0x9c 0x08
+        >;
+    };
+    bb_recovery_mmc: bb-recovery-mmc {
+        // Donor card detect plus upstream AM335x MMC0 native signal pads.
+        pinctrl-single,pins = <
+            0x160 0x2f
+            AM33XX_PADCONF(AM335X_PIN_MMC0_DAT0, PIN_INPUT_PULLUP, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MMC0_DAT1, PIN_INPUT_PULLUP, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MMC0_DAT2, PIN_INPUT_PULLUP, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MMC0_DAT3, PIN_INPUT_PULLUP, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MMC0_CMD, PIN_INPUT_PULLUP, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MMC0_CLK, PIN_INPUT_PULLUP, MUX_MODE0)
+        >;
+    };
+    bb_recovery_uart: bb-recovery-uart {
+        pinctrl-single,pins = <
+            AM33XX_PADCONF(AM335X_PIN_UART0_RXD, PIN_INPUT_PULLUP, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_UART0_TXD, PIN_OUTPUT_PULLDOWN, MUX_MODE0)
+        >;
+    };
+    bb_recovery_mii: bb-recovery-mii {
+        // Same MII PHY0 topology as donor; pad definitions from Linux5.4
+        // am335x-bone-common.dtsi. No second Ethernet slave is enabled.
+        pinctrl-single,pins = <
+            AM33XX_PADCONF(AM335X_PIN_MII1_RX_ER, PIN_INPUT_PULLUP, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MII1_TX_EN, PIN_OUTPUT_PULLDOWN, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MII1_RX_DV, PIN_INPUT_PULLUP, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MII1_TXD3, PIN_OUTPUT_PULLDOWN, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MII1_TXD2, PIN_OUTPUT_PULLDOWN, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MII1_TXD1, PIN_OUTPUT_PULLDOWN, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MII1_TXD0, PIN_OUTPUT_PULLDOWN, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MII1_TX_CLK, PIN_INPUT_PULLUP, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MII1_RX_CLK, PIN_INPUT_PULLUP, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MII1_RXD3, PIN_INPUT_PULLUP, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MII1_RXD2, PIN_INPUT_PULLUP, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MII1_RXD1, PIN_INPUT_PULLUP, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MII1_RXD0, PIN_INPUT_PULLUP, MUX_MODE0)
+        >;
+    };
+    bb_recovery_mdio: bb-recovery-mdio {
+        pinctrl-single,pins = <
+            AM33XX_PADCONF(AM335X_PIN_MDIO, PIN_INPUT_PULLUP | SLEWCTRL_FAST, MUX_MODE0)
+            AM33XX_PADCONF(AM335X_PIN_MDC, PIN_OUTPUT_PULLUP, MUX_MODE0)
+        >;
+    };
+};
+
+&uart0 { status = "okay"; pinctrl-names = "default"; pinctrl-0 = <&bb_recovery_uart>; };
+&uart1 { status = "disabled"; };
+&uart2 { status = "disabled"; };
+&uart3 { status = "disabled"; };
+&uart4 { status = "disabled"; };
+&uart5 { status = "disabled"; };
+&mmc1 {
+    status = "okay";
+    bus-width = <4>;
+    pinctrl-names = "default";
+    pinctrl-0 = <&bb_recovery_mmc>;
+    cd-gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
+    cd-inverted;
+    vmmc-supply = <&bb_recovery_vmmc>;
+};
+&mmc2 { status = "disabled"; };
+&mmc3 { status = "disabled"; };
+&mac { status = "okay"; slaves = <1>; pinctrl-names = "default"; pinctrl-0 = <&bb_recovery_mii>; };
+&cpsw_emac0 { phy-handle = <&bb_recovery_phy0>; phy-mode = "mii"; };
+&davinci_mdio {
+    status = "okay";
+    pinctrl-names = "default";
+    pinctrl-0 = <&bb_recovery_mdio>;
+    bus_freq = <1000000>;
+    bb_recovery_phy0: ethernet-phy@0 { reg = <0>; };
+};
+&elm { status = "okay"; };
+&gpmc {
+    status = "okay";
+    reg = <0x50000000 0x01000000>;
+    ranges = <0 0 0x08000000 0x10000000>;
+    pinctrl-names = "default";
+    pinctrl-0 = <&bb_recovery_nand>;
+    nand@0,0 {
+        compatible = "ti,omap2-nand";
+        gpmc,device-nand;
+        reg = <0 0 0>;
+        nand-bus-width = <8>;
+        gpmc,device-width = <1>;
+        gpmc,sync-clk-ps = <0>;
+        gpmc,cs-on-ns = <0>;
+        gpmc,cs-rd-off-ns = <280>;
+        gpmc,cs-wr-off-ns = <280>;
+        gpmc,adv-on-ns = <50>;
+        gpmc,adv-rd-off-ns = <280>;
+        gpmc,adv-wr-off-ns = <280>;
+        gpmc,we-on-ns = <50>;
+        gpmc,we-off-ns = <200>;
+        gpmc,oe-on-ns = <50>;
+        gpmc,oe-off-ns = <150>;
+        gpmc,access-ns = <200>;
+        gpmc,rd-cycle-ns = <300>;
+        gpmc,wr-cycle-ns = <300>;
+        gpmc,wait-on-read;
+        gpmc,wait-on-write;
+        gpmc,wait-pin = <0>;
+        gpmc,bus-turnaround-ns = <0>;
+        gpmc,cycle2cycle-delay-ns = <120>;
+        gpmc,cycle2cycle-samecsen;
+        gpmc,clk-activation-ns = <0>;
+        gpmc,wait-monitoring-ns = <0>;
+        gpmc,wr-access-ns = <40>;
+        gpmc,wr-data-mux-bus-ns = <0>;
+        ti,nand-ecc-opt = "bch8";
+        ti,elm-id = <&elm>;
+        #address-cells = <1>;
+        #size-cells = <1>;
+        partition@0 { label = "spl"; reg = <0x0 0x20000>; read-only; };
+        partition@1 { label = "spl_backup1"; reg = <0x20000 0x20000>; read-only; };
+        partition@2 { label = "spl_backup2"; reg = <0x40000 0x20000>; read-only; };
+        partition@3 { label = "spl_backup3"; reg = <0x60000 0x20000>; read-only; };
+        partition@4 { label = "u-boot"; reg = <0x80000 0x1c0000>; read-only; };
+        partition@5 { label = "bootenv"; reg = <0x240000 0x20000>; };
+        partition@6 { label = "fdt"; reg = <0x260000 0x20000>; read-only; };
+        partition@7 { label = "kernel"; reg = <0x280000 0x500000>; read-only; };
+        partition@8 { label = "root"; reg = <0x800000 0x1400000>; read-only; };
+        partition@9 { label = "config"; reg = <0x1c00000 0x200000>; read-only; };
+        partition@a { label = "sig"; reg = <0x1e00000 0x200000>; read-only; };
+        partition@b { label = "nvdata"; reg = <0x2000000 0x6000000>; };
+    };
+};

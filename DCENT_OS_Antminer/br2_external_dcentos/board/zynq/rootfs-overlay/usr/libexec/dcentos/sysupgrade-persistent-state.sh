@@ -210,7 +210,7 @@ dcent_persist_validate_source()
         dcent_persist_fail "source keys directory is required for entropy-seed rotation"
         return 1
     }
-    for _dcent_name in config profiles dcent; do
+    for _dcent_name in config profiles dcent network vendor-first-install; do
         dcent_persist_require_directory_or_absent \
             "$_dcent_source/$_dcent_name" "source $_dcent_name" || return 1
     done
@@ -510,7 +510,7 @@ dcent_persist_verify()
     _dcent_destination=$_dcent_destination_real
     dcent_persist_validate_source "$_dcent_source" || return 1
 
-    for _dcent_name in keys config profiles dcent dcentrald.toml dcentos-compat; do
+    for _dcent_name in keys config profiles dcent network vendor-first-install dcentrald.toml dcentos-compat; do
         _dcent_source_path=$_dcent_source/$_dcent_name
         _dcent_destination_path=$_dcent_destination/$_dcent_name
         if dcent_persist_path_exists "$_dcent_source_path"; then
@@ -647,7 +647,7 @@ dcent_persist_stage()
         return 1
     }
 
-    for _dcent_name in keys config profiles dcent dcentrald.toml dcentos-compat; do
+    for _dcent_name in keys config profiles dcent network vendor-first-install dcentrald.toml dcentos-compat; do
         if dcent_persist_path_exists "$_dcent_source/$_dcent_name"; then
             if ! cp -a "$_dcent_source/$_dcent_name" "$_dcent_stage/payload/$_dcent_name"; then
                 rm -rf "$_dcent_stage"
@@ -669,7 +669,7 @@ dcent_persist_stage()
 
     # Install only after every present source entry has a complete, verified
     # staging copy.  Absent source entries intentionally remove stale state.
-    for _dcent_name in keys config profiles dcent dcentrald.toml dcentos-compat; do
+    for _dcent_name in keys config profiles dcent network vendor-first-install dcentrald.toml dcentos-compat; do
         if ! rm -rf "$_dcent_destination/$_dcent_name"; then
             rm -rf "$_dcent_stage"
             dcent_persist_fail "cannot remove old destination $_dcent_name"

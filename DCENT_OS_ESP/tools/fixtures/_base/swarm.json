@@ -1,0 +1,52 @@
+{
+ "schema": 1,
+ "nodeId": "bitaxe-020000000001",
+ "role": "standalone",
+ "clusterId": null,
+ "queenId": "bitaxe-020000000001",
+ "hashrateGhs": 3821.6046337501866,
+ "powerWatts": 111.10205078125,
+ "heatWatts": 111.10205078125,
+ "heatBtuH": 379.0959737568359,
+ "controlMode": "manual",
+ "observedRoomTempC": null,
+ "targetRoomTempC": null,
+ "targetWatts": null,
+ "heatingActive": true,
+ "updatedAt": 1788420179,
+ "local": {
+  "id": "bitaxe-020000000001",
+  "hostname": "dcentaxe-mock",
+  "display_name": "BitAxe Hex Supra",
+  "ip": "192.0.2.42",
+  "board_model": "suprahex",
+  "board_version": "701",
+  "board_target": "bitaxe-hex-supra",
+  "asic_model": "BM1368",
+  "firmware_version": "0.3.0",
+  "mining_enabled": true,
+  "pool_connected": true,
+  "hashrate_ghs": 3778.8553925973333,
+  "last_seen_unix_ms": 1788420177135,
+  "source": "SelfReported"
+ },
+ "peers": [],
+ "peerCount": 0,
+ "discovery": {
+  "mdnsEnabled": true,
+  "mdnsHostname": "dcentaxe-mock.local",
+  "discoveryHint": "mDNS advertising _dcentaxe._tcp",
+  "apiUrl": "http://192.0.2.42/api/swarm",
+  "mcpUrl": "http://192.0.2.42/mcp",
+  "mcpTransport": "http-jsonrpc",
+  "mcpProfile": "dcent.cross-firmware.minimal.v1"
+ },
+ "coordination": {
+  "schema": 1,
+  "enrollmentSupported": false,
+  "reportEndpoint": "/api/swarm/report",
+  "desiredStateEndpoint": null,
+  "heartbeatTtlSec": 300,
+  "desiredState": null
+ }
+}

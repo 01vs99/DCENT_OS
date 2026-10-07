@@ -339,7 +339,9 @@ mod tests {
     use crate::board_desc::{
         AsicProtocolIdentity, BoardDesc, BoardFamily, ChainTransportKind, WorkEngineKind,
     };
-    use dcent_schema::hardware::RuntimeStatus;
+    use dcent_schema::hardware::{
+        GenericConstruction, InstallAuthorization, LifecycleLane, RuntimeStatus,
+    };
 
     #[test]
     fn exact_ten_artifact_and_two_identity_pins_are_stable() {
@@ -405,17 +407,30 @@ mod tests {
 
     #[test]
     fn registered_compositions_remain_management_only_and_package_only() {
+        // 2026-09 refresh: the XP pair landed its exact native serial route
+        // (SpecialisedLifecycle over AmlogicNativeSerial), so the rows are no
+        // longer ManagementOnlyByPolicy. What must not move: the package
+        // story stays package-only-denied — producer contract, package
+        // validation, Denied install authorization, no public beta, and no
+        // mining auto-start.
         for target in ["am3-s19xp", "am3-s19jxp"] {
             let board = BoardDesc::lookup(target).expect("registered X19 AML board");
             assert_eq!(board.family, BoardFamily::Amlogic);
             assert_eq!(board.chain_transport, ChainTransportKind::Serial);
-            assert_eq!(board.work_engine, WorkEngineKind::ManagementOnly);
+            assert_eq!(board.work_engine, WorkEngineKind::SerialWork);
             assert_eq!(board.asic_protocol, AsicProtocolIdentity::Bm1366);
             assert!(matches!(
                 board.runtime_status,
-                RuntimeStatus::ManagementOnlyByPolicy { .. }
+                RuntimeStatus::SpecialisedLifecycle {
+                    lane: LifecycleLane::AmlogicNativeSerial,
+                    generic_construction: GenericConstruction::Refused
+                }
             ));
-            assert!(!board.public_beta_install);
+            assert_eq!(
+                board.enablement.install_authorization,
+                InstallAuthorization::Denied
+            );
+            assert!(!board.public_beta_install());
             assert!(!board.mining_default_enabled);
 
             let producer = primary_artifact_producer(target).expect("registered artifact producer");

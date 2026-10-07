@@ -46,6 +46,14 @@ MANIFEST_POLICIES = {
     ): COMMON_ZYNQ_ARTIFACTS,
     (
         "dcentos.am1_s9_sd_image_manifest.v1",
+        "am1-s9i-sd-standalone",
+    ): COMMON_ZYNQ_ARTIFACTS,
+    (
+        "dcentos.am1_s9_sd_image_manifest.v1",
+        "am1-s9j-sd-standalone",
+    ): COMMON_ZYNQ_ARTIFACTS,
+    (
+        "dcentos.am1_s9_sd_image_manifest.v1",
         "am1-s9-sd-piggyback",
     ): frozenset(COMMON_ZYNQ_ARTIFACTS - {"BOOT.bin"}),
 }

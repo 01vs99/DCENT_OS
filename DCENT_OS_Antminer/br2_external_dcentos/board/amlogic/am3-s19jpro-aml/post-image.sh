@@ -1,18 +1,18 @@
 #!/bin/sh
 #
-# DCENTos post-image script — am3-s19jpro-aml (S19j Pro Amlogic PIC1704 variant)
+# DCENTos post-image script â€” am3-s19jpro-aml (S19j Pro Amlogic classic fw89 variant)
 # D-Central Technologies, Phase 4B (2026-05-15)
 #
 # Sibling of board/amlogic/am3-s21/post-image.sh. Same overlay-on-overlay
 # pattern, same aarch64 toolchain, same uImage+CPIO sysupgrade-shaped tar.
-# Differs only in product identity (BM1362 + PIC1704 vs S21's BM1368 + NoPic).
+# Differs only in product identity (BM1362 + classic fw89 PIC application vs S21's BM1368 + NoPic).
 #
 # Produces dcentos-sysupgrade-am3-s19jpro-aml.tar with the
 # "sysupgrade-am3-s19jpro-aml/" prefix for host-driven package validation
-# and rootfs-window install planning. There is no validated target-side AM3
-# sysupgrade implementation.
+# and exact seven-MTD loader preparation. The six-MTD mtd5 rootfs-window
+# writer does not apply to Classic: mtd5 is config, mtd6 is nvdata.
 #
-# CRITICAL — :
+# CRITICAL â€” :
 #   BOARD_NAME must be "am3-s19jpro-aml" here. The directory inside the tar
 #   MUST be `sysupgrade-am3-s19jpro-aml/`. Wrong name = brick on flash.
 #
@@ -67,6 +67,10 @@ require_rootfs_path "etc/init.d/S81mcp"
 require_rootfs_path "etc/init.d/S82dcentrald"
 require_rootfs_path "usr/sbin/dropbear"
 require_rootfs_path "usr/local/bin/dcentrald"
+require_rootfs_path "sbin/init"
+require_rootfs_path "etc/init.d/S37board_setup"
+require_rootfs_path "etc/init.d/S99verify"
+require_rootfs_path "usr/libexec/dcentos/verify-classic-aml-proof.py"
 require_rootfs_path "root/web/server.py"
 require_rootfs_path "root/web/mcp_server.py"
 require_rootfs_path "root/web/ip_reporter.py"
@@ -104,7 +108,8 @@ echo "  SHA256: ${ROOTFS_SHA256}"
 PROJECT_ROOT="$(cd "${BR2_EXTERNAL_DCENTOS_PATH}/.." && pwd)"
 REPO_ROOT="$(cd "${PROJECT_ROOT}/../.." && pwd)"
 . "${PROJECT_ROOT}/scripts/lib/sysupgrade_package_common.sh"
-. "${PROJECT_ROOT}/scripts/lib/am3_geometry.sh"
+# A resource ceiling for the artifact, never writable NAND geometry.
+ROOTFS_PACKAGE_MAX_BYTES=41943040
 
 case "$ROOTFS_SIZE" in
     ''|*[!0-9]*)
@@ -112,11 +117,11 @@ case "$ROOTFS_SIZE" in
         exit 1
         ;;
 esac
-if [ "$ROOTFS_SIZE" -gt "$DCENT_AM3_ROOTFS_WINDOW_DEC" ]; then
-    echo "ERROR: rootfs uImage exceeds Amlogic rootfs window: ${ROOTFS_SIZE} > ${DCENT_AM3_ROOTFS_WINDOW_DEC}" >&2
+if [ "$ROOTFS_SIZE" -gt "$ROOTFS_PACKAGE_MAX_BYTES" ]; then
+    echo "ERROR: rootfs uImage exceeds package limit: ${ROOTFS_SIZE} > ${ROOTFS_PACKAGE_MAX_BYTES}" >&2
     exit 1
 fi
-echo "Rootfs window: ${ROOTFS_SIZE} <= ${DCENT_AM3_ROOTFS_WINDOW_DEC} bytes"
+echo "Rootfs package size: ${ROOTFS_SIZE} <= ${ROOTFS_PACKAGE_MAX_BYTES} bytes"
 
 read_first_nonempty_line() {
     sed -n 's/^[[:space:]]*//;s/[[:space:]]*$//;/^$/!{p;q;}' "$1"
@@ -185,9 +190,9 @@ DCENT_OS
 D-Central Technologies
 Build: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
 Board: ${BOARD_NAME}
-Kernel: Amlogic 4.9.113 (am3-aml / S19j Pro PIC1704 variant)
+Kernel: Amlogic 4.9.113 (am3-aml / S19j Pro classic fw89 variant)
 Rootfs: DCENTos (Buildroot, uImage-wrapped gzip CPIO)
-Install contract: host-driven rootfs-window only; target-side AM3 sysupgrade unsupported
+Install contract: exact Classic seven-MTD image for separate loader preparation; no NAND writer
 EOF
 METADATA_SHA256=$(sha256sum "$SUP_DIR/METADATA" | awk '{print $1}')
 METADATA_SIZE=$(stat -c%s "$SUP_DIR/METADATA")
@@ -226,8 +231,8 @@ cat > "$SUP_DIR/MANIFEST.json" << EOF
     }
   },
   "toolbox": {
-    "install_command": "dcent install <ip> -f dcentos-sysupgrade-am3-s19jpro-aml.tar --artifact-dir <restore_verified_dir>",
-    "update_command": "dcent install <ip> -f dcentos-sysupgrade-am3-s19jpro-aml.tar --artifact-dir <restore_verified_dir>",
+    "install_command": null,
+    "update_command": null,
     "upload_endpoint": null,
     "board_target_header": null,
     "requires_inactive_slot": false
@@ -235,17 +240,16 @@ cat > "$SUP_DIR/MANIFEST.json" << EOF
 }
 EOF
 
-# Final manifest/signature rewrite through shared AM2/AM3 helper. AM3 packages
-# are sysupgrade-shaped artifacts for host-driven rootfs-window tooling only.
-DCENT_TOOLBOX_INSTALL_COMMAND="dcent install <ip> -f dcentos-sysupgrade-am3-s19jpro-aml.tar --artifact-dir <restore_verified_dir>"
-# OTA fleet form of the SAME guarded route (toolbox 2026-08-15: the fleet OTA
-# rail accepts the amlogic_rootfs_window method; identical root SSH +
-# restore-verified + signed-package gates; write+readback, NO auto-reboot).
-DCENT_TOOLBOX_UPDATE_COMMAND="dcent ota update-fleet <ip> -f dcentos-sysupgrade-am3-s19jpro-aml.tar --artifact-dir <restore_verified_dir>"
+# Sign the exact package without claiming an incompatible six-MTD writer.
+# Current loader preparation is local-only; resident/cold entry, backup,
+# boot selection and restore remain separate implementation dependencies.
+DCENT_TOOLBOX_INSTALL_COMMAND=""
+DCENT_TOOLBOX_UPDATE_COMMAND=""
 DCENT_TOOLBOX_REQUIRES_INACTIVE_SLOT=false
-DCENT_TOOLBOX_INSTALL_MODE=host_driven_rootfs_window_lab
+DCENT_TOOLBOX_INSTALL_MODE=package_only_denied
 DCENT_TARGET_SIDE_SYSUPGRADE=false
-DCENT_PACKAGE_STATUS=host_driven_only
+DCENT_PACKAGE_STATUS="${DCENT_PACKAGE_STATUS:-release}"
+DCENT_PACKAGE_INSTALLABLE=false
 dcent_stage_release_key
 dcent_write_sysupgrade_manifest
 dcent_sign_sysupgrade_manifest
@@ -265,7 +269,7 @@ tar tf "$OUTPUT_TAR" | sed 's/^/  /'
 cat > "${BINARIES_DIR}/BUILD_INFO.txt" << EOF
 === DCENTos am3-s19jpro-aml Build Info ===
 Build date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-Board:      ${BOARD_NAME} (S19j Pro Amlogic am3-aml PIC1704 variant)
+Board:      ${BOARD_NAME} (S19j Pro Amlogic am3-aml classic fw89 variant)
 Board family: ${BOARD_FAMILY}
 
 Sysupgrade tarball:
@@ -282,16 +286,13 @@ Rootfs (uImage-wrapped gzip CPIO): uImage_rootfs.bin
   SHA256: ${ROOTFS_SHA256}
 
 Install contract:
-  Host-driven rootfs-window package only. Target-side AM3 sysupgrade is not
-  validated or claimed by this package.
-  scripts/build_amlogic_native_install.sh --variant s19jpro-aml (not yet shipped)
-  output/dcentos-amlogic-s19jpro-aml.bin
-  mtd=${DCENT_AM3_ROOTFS_MTD}
-  rootfs_offset=${DCENT_AM3_ROOTFS_OFFSET_HEX}
-  rootfs_window=${DCENT_AM3_ROOTFS_WINDOW_HEX}
+  Exact Classic seven-MTD image for separate loader preparation.
+  Existing data owner: mtd6 nvdata, UBI0 volume0 nvdada_log; mtd5 is config.
+  No writable offset, boot selector, cold-entry installer or restore
+  transaction is claimed. Do not use the six-MTD mtd5 rootfs-window writer.
 
 Target fleet:
-  (no live S19j Pro Amlogic unit yet; .133 is currently VNish-locked)
+  Exact BHB42601/42621/42641 Classic 126; boots idle after admitted entry.
 EOF
 
 echo ""

@@ -1,8 +1,7 @@
 //! W13.D1: live cold-boot phase emitter (host-safe API surface).
 //!
 //! Holds the `tokio::sync::watch` channel that the cold-boot orchestrators
-//! (`dcentrald-hal::platform::cvitek::cvitek_cold_boot`,
-//! `dcentrald-hal::platform::beaglebone::beaglebone_cold_boot`, etc.)
+//! (such as `dcentrald-hal::platform::beaglebone_cold_boot`)
 //! publish into. The `/api/boot/phase` handler reads the current value;
 //! `/api/boot/timeline` reads the bounded ring of recent transitions.
 //!

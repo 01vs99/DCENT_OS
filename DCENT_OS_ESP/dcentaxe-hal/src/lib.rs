@@ -62,6 +62,21 @@ pub mod hammer_strap;
 // boards keep their exact prior behavior.
 #[cfg(target_os = "espidf")]
 pub mod display;
+// Pure SSD1306 framebuffer + 5x7 glyph core + notification-queue policy (no
+// ESP-IDF dep) — split out of the espidf-only `display` module so the ONE
+// user-facing surface that had no executable contract at all becomes
+// host-renderable. `display.rs` keeps the I2C transport and delegates every
+// pixel decision here, so a host test can render any panel state to PNG and
+// check it against the panel's real 21-column x 4-row budget. Always compiled
+// (like `tmp451_convert` / `pca9544_convert`) so it reaches the host gate on a
+// board that selects `display-none`.
+pub mod display_convert;
+// P1-O1: the fail-closed reason CODES the panel shows when a board refuses to
+// mine, plus the bounded rows that carry them. Same always-compiled, host-pure
+// split as `display_convert` and re-included into `dcentaxe-core` the same way:
+// `main.rs` is espidf-only, so a sentence it composed inline could never be
+// measured against the panel's 21 columns — and all 29 of them were clipped.
+pub mod block_reason;
 pub mod tps546_guard;
 // Alloc-free fail-closed safety primitives (XPSAFE-1): buck-enable polarity +
 // max-cooling fan-duty bytes. No ESP-IDF dep — host-testable and the single

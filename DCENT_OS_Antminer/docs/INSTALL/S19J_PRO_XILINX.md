@@ -1,59 +1,31 @@
-# DCENT_OS Install Notes — Antminer S19j Pro Xilinx
+# S19j Pro with a Xilinx/Zynq controller
 
-**Current status (2026-07-23):**
+Confirm the exact S19j Pro model and Xilinx/Zynq controller in Toolbox. The running board target is `am2-s19j`. The BeagleBone, Amlogic and CVitek S19j Pro controllers require different packages and procedures.
 
-| Layer | Status |
-|---|---|
-| Mining / driver (lab) | Evidence exists (internal); code tier remains Experimental |
-| **Signed sysupgrade artifact** | **Present** (`DCENTOS_XIL3_S19jPro_beta20260617.tar`) |
-| **Toolbox self-update** | Guarded DCENT_OS-to-DCENT_OS `TARGET_SYSUPGRADE`; exact restore evidence + recovery acknowledgement required |
-| **Vendor-source first install** | **Evidence gap**; no authenticated first-install capsule or executable write method |
-| **AM2 SD production** | **Public Beta Experimental** host complete+signed under `releases/am2-sd/…` (CE-410 complete); **cold-boot unproven** → not Supported; not a NAND installer |
+## Existing DCENT_OS installation
 
-**Preferred self-update method:** DCENT_Toolbox (not SD). There is no supported
-vendor-source first-install method. SD is recovery/lab only until exact-target
-cold-boot proof exists.
+The signed `am2-s19jpro` sysupgrade package supports a DCENT_OS self-update. Select it in Toolbox or the dashboard update flow. Verify the selected version and target, keep the required backup and recovery preparation, and wait for the write and readback to finish.
 
-See the install-path overview in [`README.md`](README.md) for the per-method readiness table.
+## First install from another firmware
 
-## Before any install attempt
+Use Toolbox's controller- and source-firmware-specific first-install route. A self-update tar alone does not provide the boot files, recovery preparation or stock-firmware installer needed for first install. Preview the route and use its supplied install capsule when requested. If the required route or package is absent, leave the existing firmware installed and retain the refusal reason for support.
 
-Confirm this is the **Xilinx AM2** carrier, not BeagleBone, Amlogic, or CVitek:
+The Install form has a separate **First install capsule** field. Provide the retained full backup directory for this exact unit, recovery image, installation configuration and pinned SSH host keys. Use the backup procedure reported for the detected source firmware; a settings-only backup is insufficient. The equivalent local preview is:
 
-```bash
-dcent doctor <MINER_IP>
-dcent fingerprint <MINER_IP>
-dcent support --flash-readiness
-dcent install --list-routes --explain <MINER_IP>
+```text
+dcent install MINER_IP --first-install-capsule CAPSULE.tar --artifact-dir UNIT_BACKUP --recovery-image RECOVERY.img --install-config dcentrald.toml --known-hosts known_hosts --dry-run
 ```
 
-Do not force an am2 route onto BB / Amlogic / CVitek. Stock, BraiinsOS, LuxOS,
-and VNish AM2 sources remain plan-visible evidence gaps; converting source
-firmware does not create a DCENT_OS first-install capsule.
+Replace every placeholder with the supplied files or your retained unit backup. This preview verifies the capsule and local backup without contacting the miner. If it succeeds, rerun the same command with `--yes` in place of `--dry-run` to authorize that transaction. Keep its session file: an interrupted transaction must use the reported resume procedure, not a fresh install command. Stock eight-partition recovery transition and dual-slot install have different completion messages; neither automatically reboots the miner.
 
-## Guarded DCENT_OS-source self-update
+## Reboot and first start
 
-1. Full-NAND backup with `readback_verified=true` (mtd4 + mtd7 + mtd8). 
-2. `dcent backup am2-restore-action` until `restore_action_proof.verified=true`. 
-3. Signed package only — verify Ed25519 against the release pin. 
-4. Confirm the detected source firmware is already DCENT_OS.
-5. Dry-run the complete gated command; add `--yes` only after reviewing it.
+Some AM2 routes finish with an accepted upload or a verified inactive-slot write and request a power-cycle. Follow that message after the write has completed. An accepted upload is not proof that DCENT_OS booted. Check the dashboard version, complete the [quickstart](../BETA_QUICKSTART.md), and press Start only after reviewing board, fan and temperature status. Damaged or mismatched EEPROM/PIC identities remain refused.
 
-```bash
-dcent install <MINER_IP> \
-  -f <signed-package> \
-  --artifact-dir <restore_verified_dir> \
-  --accept-am2-persistent-lab \
-  --i-have-recovery \
-  --dry-run \
-  --json
-```
+## Recovery
 
-**Honesty:** AM2 `TARGET_SYSUPGRADE` success is **`upload_accepted`** (inactive
-slot written). The tool does **not** reboot the unit for you — power-cycle, then
-re-detect. Automatic failed-boot rollback is **not** guaranteed; hold serial and
-recovery media.
+Keep the full backup and the route's board-specific recovery media off the miner. Automatic failed-boot rollback is not guaranteed. Use the saved recovery procedure if the new slot does not boot; do not improvise raw U-Boot environment writes or use a sibling model's SD image.
 
-The same command against a vendor-source AM2 target must remain an evidence-gap
-plan with no install method and no persistent write. Historical lab success on
-named units is not a blanket “any S19j Pro” first-install claim.
+## Heater requests
+
+The 600, 900 and 1200 W S19j presets are requested targets. The current hybrid runtime does not have a watt-control owner with admitted power inputs, so it saves these requests without claiming to apply them. The dashboard reports that limitation. These values are not measured wall power, a thermostat, or guaranteed heat output.

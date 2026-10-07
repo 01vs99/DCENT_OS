@@ -1,4 +1,4 @@
-//! AM2 serial-chain topology plan (Codex Phase 2 handoff, 2026-05-26).
+//! AM2 serial-chain topology plan (Phase 2 handoff, 2026-05-26).
 //!
 //! Pure, host-testable abstraction that converts an operator-declared list of
 //! chain UART devices (`MiningConfig::resolved_serial_devices`) into a vector
@@ -176,7 +176,7 @@ mod tests {
     #[test]
     fn legacy_single_device_builds_exactly_one_context() {
         // Phase 1 legacy: only one tty declared → one chain context. This is
-        // the safety contract Codex's handoff explicitly requires.
+        // the safety contract the handoff explicitly requires.
         let plan = build_am2_chain_plan(&["/dev/ttyS1".to_string()]).unwrap();
         assert_eq!(plan.len(), 1);
     }

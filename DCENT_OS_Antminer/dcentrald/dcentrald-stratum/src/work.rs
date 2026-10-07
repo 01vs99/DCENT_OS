@@ -16,6 +16,13 @@ use crate::types::MAX_V1_EXTRANONCE2_SIZE;
 use crate::work_domain::{WorkBuildError, WorkGeneration};
 use sha2::{Digest, Sha256};
 
+/// BIP310 mining.submit carries the full version's negotiated bits.
+/// A negotiated field containing zero still needs an explicit zero value.
+/// https://github.com/bitcoin/bips/blob/master/bip-0310.mediawiki
+pub fn bip310_version_bits(full_version: u32, negotiated_mask: u32) -> Option<String> {
+    (negotiated_mask != 0).then(|| format!("{:08x}", full_version & negotiated_mask))
+}
+
 /// ASIC-ready mining work unit.
 ///
 /// Contains everything an ASIC chip needs to search for valid nonces.
@@ -672,6 +679,23 @@ pub fn difficulty_to_target(difficulty: f64) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bip310_submitted_field_reconstructs_nonzero_base_and_zero_roll() {
+        let base = 0x2000_6001;
+        let mask = 0x0000_6000;
+        for full_version in [0x2000_6001, 0x2000_0001, 0x2000_2001, 0x2000_4001] {
+            let bits = super::bip310_version_bits(full_version, mask).unwrap();
+            let field = u32::from_str_radix(&bits, 16).unwrap();
+            // BIP310 server formula, independent of the formatter.
+            assert_eq!((base & !mask) | (field & mask), full_version);
+        }
+        assert_eq!(
+            super::bip310_version_bits(0x2000_0001, mask).as_deref(),
+            Some("00000000")
+        );
+        assert_eq!(super::bip310_version_bits(base, 0), None);
+    }
+
     use super::*;
 
     #[test]

@@ -194,6 +194,51 @@ fn fallback_hardware_labels(
     )
 }
 
+/// Initial idle API with the immutable image's declared target. This is
+/// configuration identity only: no ASIC, rail, or topology was measured.
+pub(crate) async fn spawn_initial_idle_api(
+    config: DcentraldConfig,
+    board_target: &str,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Result<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)> {
+    let chip = match board_target {
+        "am2-s17p" | "am2-s17plus" | "am2-t17" | "am2-t17plus" => "BM1397",
+        "am2-t17e" | "am2-s17e" => "BM1396",
+        "am2-s19pro" => "BM1398",
+        "am1-s9i" | "am1-s9j" => "BM1387",
+        "am1-s9se" | "am1-s9k" => "BM1393",
+        "am3-s21" => "BM1368",
+        "am3-s21pro" | "am3-s21xp" => "BM1370",
+        "am3-s19xp" | "am3-s19jxp" => "BM1366",
+        "am3-s19jproa" | "am3-s19jproplus" => "BM1362",
+        _ => anyhow::bail!("no initial idle API composition for {board_target}"),
+    };
+    let identity = AdmittedApiHardwareIdentity {
+        control_board_label: format!("{board_target} (image declaration)"),
+        chip_type_label: chip.to_string(),
+        identification: dcentrald_api::HardwareIdentification::from_evidence(
+            vec![
+                dcentrald_api::HardwareIdentityEvidence::declared_asic_board_target(
+                    board_target,
+                    chip,
+                ),
+            ],
+            Some("Initial idle image declaration; ASIC detection has not run".to_string()),
+        ),
+    };
+    spawn_proxy_mode_api_with_identity(
+        config,
+        dcentrald_api::RuntimeHealthMode::Native,
+        None,
+        None,
+        HardwareMutationGate::new_closed(),
+        false,
+        Some(identity),
+        shutdown,
+    )
+    .await
+}
+
 async fn spawn_proxy_mode_api_with_identity(
     config: DcentraldConfig,
     runtime_mode: dcentrald_api::RuntimeHealthMode,
@@ -312,6 +357,9 @@ async fn spawn_proxy_mode_api_with_identity(
     let cgminer_port = config.api.cgminer_port;
     let http_port = config.api.http_port;
 
+    #[cfg(all(test, target_os = "linux"))]
+    initial_idle_api_tests::observe_app_state(&app_state);
+
     match dcentrald_api::start_api_servers(app_state).await {
         Ok((cg, http)) => {
             info!(
@@ -358,3 +406,7 @@ mod tests {
         assert_eq!(labels.1, "BM1362");
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "initial_idle_api_tests.rs"]
+mod initial_idle_api_tests;

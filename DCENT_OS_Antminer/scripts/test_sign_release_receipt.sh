@@ -578,6 +578,66 @@ else:
     else:
         raise SystemExit("overbroad Windows signature ACL was accepted")
 
+    # Staged tier: capsule signatures are created private (the release-set
+    # seal admits only private members); publication flips the stage public.
+    staged_signature = root / "windows-staged-signature.sig"
+    module.sign_receipt(
+        Namespace(
+            receipt=str(root / "receipt.json"),
+            private_key=str(root / "private.pem"),
+            public_key=str(root / "public.pem"),
+            signature=str(staged_signature),
+            staged_output=True,
+        )
+    )
+    module.release_io.require_private_windows_acl(
+        staged_signature, "staged tier signature", require_protected=False
+    )
+    # An idempotent staged retry must reconcile at the private tier (no wedge).
+    module.sign_receipt(
+        Namespace(
+            receipt=str(root / "receipt.json"),
+            private_key=str(root / "private.pem"),
+            public_key=str(root / "public.pem"),
+            signature=str(staged_signature),
+            staged_output=True,
+        )
+    )
+    # The published tier must refuse the staged-private file (tier mixing).
+    try:
+        module.sign_receipt(
+            Namespace(
+                receipt=str(root / "receipt.json"),
+                private_key=str(root / "private.pem"),
+                public_key=str(root / "public.pem"),
+                signature=str(staged_signature),
+            )
+        )
+    except module.SigningError:
+        pass
+    else:
+        raise SystemExit("published tier accepted a staged-private signature")
+    # A stale public-ACL staged target must be refused at the staged tier.
+    stale_public = root / "windows-stale-public-staged.sig"
+    stale_public.write_bytes((root / "receipt.json.sig").read_bytes())
+    module.release_io.set_windows_file_acl(
+        stale_public, module.release_io.WINDOWS_PUBLIC_FILE_SDDL
+    )
+    try:
+        module.sign_receipt(
+            Namespace(
+                receipt=str(root / "receipt.json"),
+                private_key=str(root / "private.pem"),
+                public_key=str(root / "public.pem"),
+                signature=str(stale_public),
+                staged_output=True,
+            )
+        )
+    except module.SigningError:
+        pass
+    else:
+        raise SystemExit("staged tier accepted a stale public-ACL signature")
+
     unsafe_key = root / "windows-public-private.pem"
     unsafe_key.write_bytes((root / "private.pem").read_bytes())
     module.release_io.set_windows_file_acl(

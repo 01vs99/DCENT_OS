@@ -5,6 +5,7 @@ import { CliHint } from './CliHint';
 import { echoCli } from '../../hooks/useCliEcho';
 import { OverlayDialog } from '../common/OverlayDialog';
 import { UpgradeStatusPanel } from '../common/UpgradeStatusPanel';
+import { ChannelUpdatePanel } from './ChannelUpdatePanel';
 import type {
   NetworkTroubleshootResponse,
   PsuTroubleshootResponse,
@@ -34,7 +35,6 @@ export function MaintenanceMode() {
   // Firmware update state
   const [fwFile, setFwFile] = useState<File | null>(null);
   const [stagedUpgrade, setStagedUpgrade] = useState(loadStagedUpgrade);
-  const [fwUrl, setFwUrl] = useState('');
   const [fwProgress, setFwProgress] = useState<number | null>(null);
   const [fwUploading, setFwUploading] = useState(false);
   const [fwError, setFwError] = useState('');
@@ -491,29 +491,7 @@ export function MaintenanceMode() {
               </div>
             )}
 
-            {/* URL-based update */}
-            <div className="mm-url-section">
-              <div className="mm-url-note">
-                Remote fetch is in development:
-              </div>
-              <div className="mm-btn-row">
-                <input
-                  type="url"
-                  value={fwUrl}
-                  onChange={e => setFwUrl(e.target.value)}
-                  placeholder="https://d-central.tech/firmware/dcentos-v0.3.1.squashfs"
-                  className="mm-url-input"
-                />
-                <ActionButton
-                  label="Fetch Coming Soon"
-                  onClick={async () => {
-                    addAlert('warning', 'Remote firmware fetch is in development. Use SSH-based update tooling instead.');
-                  }}
-                  disabled
-                  variant="danger"
-                />
-              </div>
-            </div>
+            <ChannelUpdatePanel />
           </div>
 
           {/* System Tools */}

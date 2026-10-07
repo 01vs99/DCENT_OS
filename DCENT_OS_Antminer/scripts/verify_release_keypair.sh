@@ -35,6 +35,55 @@ command -v od >/dev/null 2>&1 || { echo "od is required" >&2; exit 2; }
 
 fail() { echo "CEREMONY FAIL: $*" >&2; exit 1; }
 
+# Windows long-path plumbing (2026-09-01, Lane H): openssl on this host is a
+# native Win32 build that cannot open (or even stat) paths longer than
+# MAX_PATH-1 = 259 chars. Release signing-authority stage paths are
+# descriptor-derived (two 64-hex components) and routinely exceed 300 chars,
+# which made the ceremony fail with a misleading "does not parse as a key".
+# When running under MSYS/Git-Bash AND the Windows form of a key path is too
+# long, transparently hand openssl the volume's 8.3 short-name form of the
+# SAME file (cygpath -d). This is pure path plumbing: the file, its bytes,
+# and every check below are unchanged. On non-MSYS hosts (WSL/Linux) or when
+# the path is already short, the value passes through untouched.
+MAX_PATH_SAFE=250
+native_readable_keypath() {
+    local value="$1"
+    command -v cygpath >/dev/null 2>&1 || { printf '%s\n' "$value"; return 0; }
+    # MSYS OpenSSL uses the long-path-capable POSIX layer. Its selected file
+    # still goes through all key-format, pair, signature and pin checks below.
+    case "$(openssl version -p 2>/dev/null)" in
+        'platform: Msys-'*) printf '%s\n' "$value"; return 0 ;;
+    esac
+    # cygpath -d rejects relative paths, and a long RELATIVE path resolves to
+    # the same over-length absolute form for the native tool, so absolutize
+    # before measuring.
+    case "$value" in
+        /*|[A-Za-z]:*) ;;
+        *) value="$PWD/$value" ;;
+    esac
+    local win_form
+    win_form="$(cygpath -w "$value" 2>/dev/null)" || { printf '%s\n' "$value"; return 0; }
+    if [ "${#win_form}" -le "$MAX_PATH_SAFE" ]; then
+        printf '%s\n' "$value"
+        return 0
+    fi
+    local short_posix
+    short_posix="$(cygpath -u "$(cygpath -d "$value" 2>/dev/null)" 2>/dev/null)" \
+        || { printf '%s\n' "$value"; return 0; }
+    local short_win
+    short_win="$(cygpath -w "$short_posix" 2>/dev/null)" || short_win=""
+    if [ -z "$short_win" ] || [ "$short_win" = "$win_form" ] || [ "${#short_win}" -gt "$MAX_PATH_SAFE" ]; then
+        # 8.3 names unavailable or still too long (short-name generation
+        # disabled on the volume): fail loudly instead of letting openssl
+        # report a false parse failure on an existing key file.
+        fail "key path exceeds the native openable length and no 8.3 short form is available (enable short names on the volume or move the capsule root shallower): $value"
+    fi
+    [ -f "$short_posix" ] || fail "8.3 short form of the key path does not resolve to the same file: $value"
+    printf '%s\n' "$short_posix"
+}
+PRIV="$(native_readable_keypath "$PRIV")"
+PUB="$(native_readable_keypath "$PUB")"
+
 # Canonical Ed25519 SubjectPublicKeyInfo DER is exactly the 12-byte algorithm/
 # BIT STRING prefix below plus 32 raw public-key bytes. Checking the complete
 # shape is essential: taking the last 32 bytes accepts RSA/ECDSA keys and can

@@ -1,7 +1,5 @@
-# Package and guarded-install A113D identity for Antminer S19j Pro+.
-# Exact held identity: fw-info model=s19jpro-plus/platform=aml/install_type=nand,
-# shared BM1362 A113D kernel/DTB bytes, BHB42612 stock hashboard identity.
-
+# Exact R10 s19jproplus native BM1362 beta; boots idle for pool setup.
+# Production PSU owner, protected EEPROM identity, all selected UARTs.
 [general]
 hostname = "dcentos-s19jproplus"
 log_level = "info"
@@ -9,30 +7,30 @@ log_level = "info"
 [mining]
 enabled = false
 model = "s19jproplus"
-chip = "BM1362"
-chips_per_chain = 120
-chains = 3
-frequency_mhz = 550
-voltage_mv = 13400
+frequency_mhz = 400
+voltage_mv = 12800
 version_rolling = true
 passthrough = false
 suggest_difficulty = 8192
 serial_device = "/dev/ttyS2"
+# The native BM1362 AML executor fixes cold and mining UART to 115200.
 serial_chip_count = 120
 serial_chip_type = "BM1362"
 
 [platform]
 target = "am3-aml-s19jproplus"
+board_target = "am3-s19jproplus"
 
 [pool]
 url = ""
 worker = ""
 password = "x"
+protocol = "sv1"
 
 [thermal]
-target_temp_c = 65.0
-hot_temp_c = 75.0
-dangerous_temp_c = 88.0
+target_temp_c = 60
+hot_temp_c = 70
+dangerous_temp_c = 80
 fan_min_pwm = 10
 fan_max_pwm = 30
 
@@ -42,10 +40,18 @@ timeout_s = 30
 kick_interval_s = 5
 
 [hash_on_disconnect]
-enabled = true
+enabled = false
 
 [mode]
 active = "home"
 
 [autotuner]
+# Initial native beta uses the selected fixed frequency.
 enabled = false
+min_freq_mhz = 400
+max_freq_mhz = 500
+
+[api]
+# Read-only LAN monitoring; remote control requires separate explicit opt-in.
+cgminer_bind_lan = true
+cgminer_lan_writes = false

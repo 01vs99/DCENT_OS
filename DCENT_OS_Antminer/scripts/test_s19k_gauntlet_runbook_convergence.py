@@ -315,11 +315,16 @@ class S19kGauntletRunbookConvergenceTests(unittest.TestCase):
             "test_wrap_raw_elf.py",
             "test_s19k_native_re_verify.py",
             "test_s19k_gauntlet_workflow.py",
-            "s19k_gauntlet_workflow.py verify",
+            "test_s19k_workflow_checkout.sh",
         ):
             with self.subTest(required=required):
-                self.assertIn(required, ci)
-                self.assertIn(required, workflow)
+                self.assertTrue(required in ci, f"offline gate does not execute {required}")
+                self.assertTrue(required in workflow, f"workflow does not execute {required}")
+        checkout = read(PROJECT_ROOT / "scripts/test_s19k_workflow_checkout.sh")
+        self.assertIn('mktemp -d', checkout)
+        self.assertIn('"$SCRIPT_DIR/s19k_gauntlet_workflow.py"', checkout)
+        self.assertIn('--evidence-root "$DCENT_S19K_CHECKOUT_TMP" verify', checkout)
+        self.assertIn('--expect-frontier portable-artifact-custody,native-build-reproducibility,native-secure-firmware-re,static-bhb5690x-controller-interface', checkout)
         self.assertIn(
             "**", workflow
         )
@@ -336,7 +341,11 @@ class S19kGauntletRunbookConvergenceTests(unittest.TestCase):
         context = read(PROJECT_ROOT / "")
         self.assertIn("GPIO437 is **not universal across Amlogic targets**", context)
         self.assertIn("**raw 0 = ON, raw 1 = OFF**", context)
-        self.assertIn("**raw 1 = ON, raw 0 = SafeOff**", context)
+        self.assertIn("Exact S21 Pro/XP independently use the same AM3", context)
+        self.assertIn("0=ON,1=OFF mapping", context)
+        self.assertIn("This does not generalize to S21+/hydro/immersion variants.", context)
+        self.assertIn("is not an electrical rail measurement.", context)
+        self.assertNotIn("**raw 1 = ON, raw 0 = SafeOff**", context)
         self.assertNotIn("PWR_EN polarity confirmed active-HIGH", context)
         self.assertNotIn(
             "Both stock-Bitmain bmminer and VNish cgminer use the same active-HIGH",

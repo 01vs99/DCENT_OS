@@ -611,6 +611,28 @@ impl Tps546 {
         // Configure protection limits (on every regulator in the set)
         tps.configure_limits(i2c, config)?;
 
+        // ── XPSAFE-11: clear the CML this init just created ───────────────────
+        //
+        // `CLEAR_FAULTS` above runs BEFORE `configure_limits`, so any protection
+        // write the part REFUSES latches STATUS_CML and it survives into the
+        // supervisor. On a Hex Supra that meant `STATUS_WORD = 0x0202` on an
+        // electrically healthy rail (VOUT 3.646 V, VIN 11.7 V, IOUT 20.3 A,
+        // 51 C) and the unconditional POWER FAULT hard-kill firing ~17 s into
+        // every run — the board died from the recorded evidence of its own
+        // configuration, having mined happily up to that point.
+        //
+        // This is deliberately NOT hiding the failure. Every refused write has
+        // already logged loudly, with the IC's own STATUS_CML byte and the
+        // effective limit read back from the register. What is discarded here is
+        // only the latched flag, so that a CML seen later by the supervisor
+        // means what it is supposed to mean: a communication fault that happened
+        // AT RUNTIME. The hard-kill itself is untouched and still unconditional.
+        for ch in &tps.channels {
+            let _ = i2c.write(ch.addr, &[0x03]); // PMBUS_CLEAR_FAULTS
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        info!("TPS546: post-configuration fault latch cleared (init-time CML is not a runtime fault)");
+
         // XPSAFE-2: init's legitimate fault-limit writes are done — LATCH the
         // guard so the protection registers are now read-only for the rest of the
         // session. The runtime voltage path (VOUT_COMMAND/OPERATION) is unaffected.
@@ -669,6 +691,11 @@ impl Tps546 {
         use std::thread;
         use std::time::Duration;
         const PMBUS_DELAY: Duration = Duration::from_millis(5);
+        // XPSAFE-10: bounded retry for the warn-and-continue protection writes.
+        // Cheap (each retry costs one PMBUS_DELAY) and it cannot mask a genuine
+        // rejection — a register the part truly refuses still fails all attempts
+        // and still warns, now with the IC's own STATUS_CML attached.
+        const PMBUS_WRITE_ATTEMPTS: u32 = 3;
 
         // VIN thresholds (Linear11 format)
         i2c.write_reg_u16_le(ch.addr, pmbus::VIN_ON, f32_to_pmbus_linear11(config.vin_on))
@@ -712,6 +739,29 @@ impl Tps546 {
         })?;
         thread::sleep(PMBUS_DELAY);
 
+        // XPSAFE-11a: VOUT_SCALE_LOOP must precede every VOUT-referenced
+        // register. It declares the feedback-divider ratio, i.e. how a rail
+        // voltage maps onto the IC's internal reference range. This board runs
+        // three series domains at 0.125 scale; until it is written the part is
+        // still on its NVM scaling, so a 3.6 V-referenced protection limit
+        // lands outside the representable internal range and is refused as
+        // invalid data (STATUS_CML=0x40). It used to be written near the END of
+        // this function, AFTER the four VOUT limits it governs.
+        // Scale loop gain
+        i2c.write_reg_u16_le(
+            ch.addr,
+            pmbus::VOUT_SCALE_LOOP,
+            f32_to_pmbus_linear11(config.scale_loop),
+        )
+        .map_err(|e| {
+            error!(
+                "TPS546 0x{:02x}: VOUT_SCALE_LOOP write failed: {}",
+                ch.addr, e
+            );
+            e
+        })?;
+        thread::sleep(PMBUS_DELAY);
+
         // VOUT limits (ULINEAR16 format)
         i2c.write_reg_u16_le(
             ch.addr,
@@ -732,6 +782,50 @@ impl Tps546 {
             error!("TPS546 0x{:02x}: VOUT_MAX write failed: {}", ch.addr, e);
             e
         })?;
+        thread::sleep(PMBUS_DELAY);
+
+        // ── XPSAFE-11: seed VOUT_COMMAND before the limits that reference it ──
+        //
+        // The four VOUT protection thresholds below are validated by the IC
+        // AGAINST THE CURRENT VOUT_COMMAND, not in isolation. Until this write
+        // existed, `configure_limits` ran while VOUT_COMMAND still held the
+        // part's NVM default, so on a 3-series-domain Hex (3.6 V rail) every
+        // one of them was out of range and the IC rejected all four with
+        // `STATUS_CML = 0x40` ("invalid or unsupported data received").
+        //
+        // The rejections were not cosmetic. `CLEAR_FAULTS` runs BEFORE this
+        // function, so the resulting CML latch survived into the supervisor,
+        // which read `STATUS_WORD = 0x0202` on an electrically healthy rail and
+        // executed the unconditional POWER FAULT hard-kill ~17 s into every
+        // run. The board both ran with unconfigured protection AND died from
+        // the evidence of that failure.
+        //
+        // Two observations pinned the mechanism on live hardware rather than
+        // from the datasheet:
+        //   * A 150 ms settle after the enable GPIO changed nothing, so it is
+        //     not a regulator power-on timing window.
+        //   * `VOUT_MARGIN_LOW` writes the SAME 3.24 V that `VOUT_UV_WARN`
+        //     rejects, and succeeds — margin registers are operating-point
+        //     offsets and are not range-checked against VOUT_COMMAND, while the
+        //     protection limits are.
+        //
+        // Writing VOUT_COMMAND here is safe: `OPERATION` was set to
+        // `OPERATION_OFF` at the top of init and the rail is still commanded
+        // off, so this only sets the target the limits are checked against. The
+        // real operating point is written later by `set_voltage`.
+        if let Err(e) = i2c.write_reg_u16_le(
+            ch.addr,
+            pmbus::VOUT_COMMAND,
+            f32_to_pmbus_ulinear16(config.vout_default, ch.vout_exponent),
+        ) {
+            // Non-fatal on its own: the limit writes below will fail loudly and
+            // visibly if the reference voltage never landed.
+            warn!(
+                "TPS546 0x{:02x}: VOUT_COMMAND seed write failed: {} — the VOUT protection \
+                 limits below are likely to be rejected as out-of-range",
+                ch.addr, e
+            );
+        }
         thread::sleep(PMBUS_DELAY);
 
         // ── Pass-5 audit: VOUT fault/warn thresholds ─────────────────────
@@ -777,11 +871,69 @@ impl Tps546 {
                 continue;
             }
             let raw = f32_to_pmbus_ulinear16(config.vout_default * ratio, ch.vout_exponent);
-            match i2c.write_reg_u16_le(ch.addr, *reg, raw) {
-                Ok(()) => {
-                    thread::sleep(PMBUS_DELAY);
+            // XPSAFE-10: retry with the SAME inter-command delay the success path
+            // uses. The old error arm skipped `PMBUS_DELAY` entirely, so one
+            // rejected write was immediately followed by the next — turning a
+            // single NACK into a burst of them. Retrying also separates a
+            // transient bus NACK from a register the part genuinely refuses.
+            let mut last_err = None;
+            for attempt in 1..=PMBUS_WRITE_ATTEMPTS {
+                match i2c.write_reg_u16_le(ch.addr, *reg, raw) {
+                    Ok(()) => {
+                        if attempt > 1 {
+                            info!(
+                                "TPS546 0x{:02x}: {} write succeeded on attempt {}",
+                                ch.addr, name, attempt
+                            );
+                        }
+                        last_err = None;
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        thread::sleep(PMBUS_DELAY);
+                    }
                 }
-                Err(e) => warn!("TPS546 0x{:02x}: {} write failed: {}", ch.addr, name, e),
+            }
+            thread::sleep(PMBUS_DELAY);
+            if let Some(e) = last_err {
+                // XPSAFE-11: report the limit the part is ACTUALLY enforcing.
+                //
+                // Measured on a Hex Supra (2026-09-03): these four registers are
+                // writable — echoing back each one's own current value succeeds —
+                // but every rail-referenced value this driver computes is refused
+                // with STATUS_CML=0x40 ("invalid or unsupported data"). The part
+                // holds ~1 V-domain defaults (OV_FAULT 1.148 V, OV_WARN 1.090 V,
+                // UV_WARN 0.910 V, UV_FAULT 0.850 V) while we offer 4.500 /
+                // 4.176 / 3.240 / 2.700 V derived from the 3.6 V three-domain
+                // rail. VOUT_COMMAND, VOUT_MIN/MAX and the MARGIN registers all
+                // accept rail-domain values, so the four PROTECTION limits are
+                // evidently scaled differently on a multi-domain board.
+                //
+                // The correct scaling needs the TPS546D24A datasheet: writing a
+                // guessed threshold to a last-line protection register on a 100 W
+                // rail is not something to determine by trial. Until then the
+                // registers keep the part's own defaults — the same state every
+                // Hex Supra has always run in, including under stock AxeOS, whose
+                // upstream ESP-Miner values these are.
+                let effective = i2c
+                    .read_reg_u16_le(ch.addr, *reg)
+                    .map(|v| pmbus_ulinear16_to_f32(v, ch.vout_exponent));
+                warn!(
+                    "TPS546 0x{:02x}: {} REFUSED after {} attempts ({}; STATUS_CML=0x{:02x}) — \
+                     wanted {:.3} V, register stays at {} — protection limit is the part default, \
+                     NOT the configured value",
+                    ch.addr,
+                    name,
+                    PMBUS_WRITE_ATTEMPTS,
+                    e,
+                    i2c.read_reg_u8(ch.addr, pmbus::STATUS_CML).unwrap_or(0xFF),
+                    config.vout_default * ratio,
+                    match effective {
+                        Ok(v) => format!("{v:.3} V"),
+                        Err(_) => "unreadable".to_string(),
+                    }
+                );
             }
         }
 
@@ -794,9 +946,36 @@ impl Tps546 {
             (pmbus::OT_FAULT_RESPONSE, "OT_FAULT_RESP", 0xFF),
         ];
         for (reg, name, val) in fault_responses {
-            match i2c.write_reg_u8(ch.addr, *reg, *val) {
-                Ok(()) => thread::sleep(PMBUS_DELAY),
-                Err(e) => warn!("TPS546 0x{:02x}: {} write failed: {}", ch.addr, name, e),
+            // XPSAFE-10: same bounded retry as the VOUT thresholds above.
+            let mut last_err = None;
+            for attempt in 1..=PMBUS_WRITE_ATTEMPTS {
+                match i2c.write_reg_u8(ch.addr, *reg, *val) {
+                    Ok(()) => {
+                        if attempt > 1 {
+                            info!(
+                                "TPS546 0x{:02x}: {} write succeeded on attempt {}",
+                                ch.addr, name, attempt
+                            );
+                        }
+                        last_err = None;
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        thread::sleep(PMBUS_DELAY);
+                    }
+                }
+            }
+            thread::sleep(PMBUS_DELAY);
+            if let Some(e) = last_err {
+                warn!(
+                    "TPS546 0x{:02x}: {} write failed after {} attempts: {} (STATUS_CML=0x{:02x})",
+                    ch.addr,
+                    name,
+                    PMBUS_WRITE_ATTEMPTS,
+                    e,
+                    i2c.read_reg_u8(ch.addr, pmbus::STATUS_CML).unwrap_or(0xFF)
+                );
             }
         }
 
@@ -847,21 +1026,6 @@ impl Tps546 {
         .map_err(|e| {
             error!(
                 "TPS546 0x{:02x}: IOUT_OC_FAULT write failed: {}",
-                ch.addr, e
-            );
-            e
-        })?;
-        thread::sleep(PMBUS_DELAY);
-
-        // Scale loop gain
-        i2c.write_reg_u16_le(
-            ch.addr,
-            pmbus::VOUT_SCALE_LOOP,
-            f32_to_pmbus_linear11(config.scale_loop),
-        )
-        .map_err(|e| {
-            error!(
-                "TPS546 0x{:02x}: VOUT_SCALE_LOOP write failed: {}",
                 ch.addr, e
             );
             e

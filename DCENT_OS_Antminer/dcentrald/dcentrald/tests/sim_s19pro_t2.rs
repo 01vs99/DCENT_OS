@@ -1,5 +1,8 @@
 #![cfg(feature = "sim-hal")]
 
+#[path = "sim_support/share_oracle.rs"]
+mod share_oracle;
+
 use std::time::Duration;
 
 use dcentrald_asic::chain::{Chain as HashChain, EnumerationCommandDialect};
@@ -10,7 +13,6 @@ use dcentrald_hal::platform::sim::{SimModel, SimNoncePolicy, SimPlatform};
 use dcentrald_stratum::types::{
     default_version_rolling_mask, DonationConfig, PoolConfig, StratumConfig, ValidShare,
 };
-use dcentrald_stratum::v1::mock_pool::{MockV1Pool, MockV1PoolHandle};
 use dcentrald_stratum::{validate_full_header, StratumV1Client, WorkBuilder};
 use tokio::sync::mpsc;
 
@@ -18,6 +20,7 @@ fn stratum_config(pool_url: String, worker: &str) -> StratumConfig {
     let mut donation = DonationConfig::default();
     donation.enabled = false;
     StratumConfig {
+        v1_policy: Default::default(),
         pool1: PoolConfig {
             url: pool_url,
             worker: worker.to_string(),
@@ -148,31 +151,30 @@ async fn assert_headless_t2(
 }
 
 async fn assert_share_accept(chain: FpgaChain, worker: &str) {
-    let (addr, pool) = MockV1Pool::spawn().await.expect("loopback V1 pool");
+    let (addr, pool) = share_oracle::OraclePool::spawn(worker).await;
     let (job_tx, mut job_rx) = mpsc::channel(8);
     let (share_tx, share_rx) = mpsc::channel(8);
     let (status_tx, _status_rx) = mpsc::channel(32);
     let client = StratumV1Client::new(
-        stratum_config(MockV1PoolHandle::url(addr), worker),
+        stratum_config(format!("stratum+tcp://{addr}"), worker),
         job_tx,
         share_rx,
         status_tx,
     );
     let client_task = tokio::spawn(client.run_until_sv2_retry(Duration::from_millis(900)));
-    let mut job = tokio::time::timeout(Duration::from_secs(2), job_rx.recv())
+    let job = tokio::time::timeout(Duration::from_secs(2), job_rx.recv())
         .await
         .expect("job timeout")
         .expect("loopback job");
 
-    // The mock injects an explicit accept-all target for a deterministic host
-    // proof. This avoids falsely claiming a CPU brute-force result at pdiff-1;
-    // the exact 80-byte header still passes the production local validator.
-    job.share_target = [0xff; 32];
+    assert_eq!(job.share_target, share_oracle::target());
     let work = WorkBuilder::new()
         .next_work(&job)
         .expect("finite V1 work allocation");
-    let expected_nonce = 0x1357_2468;
+    assert_eq!(work.extranonce2, "00");
+    let expected_nonce = share_oracle::winning_nonce(&work.extranonce2);
     let header = header_for(&work, expected_nonce);
+    assert_eq!(header, share_oracle::header(&work.extranonce2, expected_nonce).unwrap().to_wire());
     assert!(validate_full_header(&header, &work.share_target));
 
     chain
@@ -217,10 +219,12 @@ async fn assert_share_accept(chain: FpgaChain, worker: &str) {
         .expect("client stop timeout")
         .expect("client task");
     assert_eq!(pool.accepted_shares(), 1);
-    assert!(pool.requests().iter().any(|request| {
-        request.contains("\"method\":\"mining.submit\"")
-            && request.contains(&format!("{expected_nonce:08x}"))
-    }));
+    let submits: Vec<serde_json::Value> = pool.requests().iter()
+        .map(|request| serde_json::from_str(request).expect("serialized pool request"))
+        .filter(|request: &serde_json::Value| request["method"] == "mining.submit")
+        .collect();
+    assert_eq!(submits.len(), 1);
+    assert!(share_oracle::accepts_submission(&submits[0], worker));
     let stats = returned.stats();
     let stats = stats.lock().await;
     assert_eq!(stats.shares_submitted, 1);

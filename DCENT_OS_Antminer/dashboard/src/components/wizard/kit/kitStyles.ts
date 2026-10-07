@@ -1,7 +1,7 @@
 // DCENT_OS Setup Wizard — kit CSS, ported verbatim from
 // `ui_kits/wizard/styles.css` and scoped strictly under `.wiz-shell`.
 //
-// WHY this file exists: the operator loves the Claude-Design wizard kit and
+// WHY this file exists: the operator loves the D-Central design-system wizard kit and
 // the prior CSS-only skin FAILED because production never adopted the kit's
 // STRUCTURE. This rebuild makes production structurally BE the kit (the
 // 3-sphere molecule header, the 11-step numbered rail, the welcome

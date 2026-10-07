@@ -86,7 +86,7 @@ fn read_bytes(path: &str) -> Vec<u8> {
 }
 
 fn env_flag(name: &str) -> bool {
-    std::env::var(name)
+    dcentrald_common::lab_env::var(name)
         .map(|v| {
             matches!(
                 v.as_str(),

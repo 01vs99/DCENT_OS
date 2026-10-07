@@ -81,6 +81,7 @@ impl std::fmt::Display for ProtocolMode {
 pub struct StratumRouter {
     config: StratumConfig,
     protocol_mode: ProtocolMode,
+    capacity_rx: Option<tokio::sync::watch::Receiver<crate::v1::policy::ActiveCapacity>>,
     #[cfg(all(feature = "sv2", feature = "jd"))]
     jd_status_rx: Option<watch::Receiver<crate::v2::jd::JdStatus>>,
 }
@@ -146,6 +147,7 @@ impl StratumRouter {
         Self {
             config,
             protocol_mode,
+            capacity_rx: None,
             #[cfg(all(feature = "sv2", feature = "jd"))]
             jd_status_rx: None,
         }
@@ -157,6 +159,14 @@ impl StratumRouter {
         rx: watch::Receiver<crate::v2::jd::JdStatus>,
     ) -> Self {
         self.jd_status_rx = Some(rx);
+        self
+    }
+
+    pub fn with_capacity_rx(
+        mut self,
+        rx: tokio::sync::watch::Receiver<crate::v1::policy::ActiveCapacity>,
+    ) -> Self {
+        self.capacity_rx = Some(rx);
         self
     }
 
@@ -320,6 +330,11 @@ impl StratumRouter {
                     "Starting Stratum V1 client"
                 );
                 let client = StratumV1Client::new(self.config, job_tx, share_rx, status_tx);
+                let client = if let Some(rx) = self.capacity_rx {
+                    client.with_capacity_rx(rx)
+                } else {
+                    client
+                };
                 client.run().await;
             }
 
@@ -361,6 +376,11 @@ impl StratumRouter {
                     share_rx,
                     status_tx,
                 );
+                let client = if let Some(rx) = self.capacity_rx {
+                    client.with_capacity_rx(rx)
+                } else {
+                    client
+                };
                 #[cfg(feature = "jd")]
                 let client = if let Some(rx) = self.jd_status_rx {
                     client.with_job_declaration_status_rx(rx)
@@ -385,6 +405,11 @@ impl StratumRouter {
                             );
                             let client =
                                 StratumV1Client::new(self.config, job_tx, share_rx, status_tx);
+                            let client = if let Some(rx) = self.capacity_rx {
+                                client.with_capacity_rx(rx)
+                            } else {
+                                client
+                            };
                             client.run().await;
                             return;
                         }
@@ -413,6 +438,11 @@ impl StratumRouter {
                             share_rx,
                             status_tx,
                         );
+                        let client = if let Some(rx) = self.capacity_rx {
+                            client.with_capacity_rx(rx)
+                        } else {
+                            client
+                        };
                         #[cfg(feature = "jd")]
                         let client = if let Some(rx) = self.jd_status_rx {
                             client.with_job_declaration_status_rx(rx)
@@ -428,6 +458,11 @@ impl StratumRouter {
                             "Auto mode: active pool resolves to Stratum V1"
                         );
                         let client = StratumV1Client::new(self.config, job_tx, share_rx, status_tx);
+                        let client = if let Some(rx) = self.capacity_rx {
+                            client.with_capacity_rx(rx)
+                        } else {
+                            client
+                        };
                         client.run().await;
                     }
                 }
@@ -452,6 +487,11 @@ impl StratumRouter {
                     "SV2 requested but not compiled in (feature 'sv2' disabled), falling back to V1"
                 );
                 let client = StratumV1Client::new(self.config, job_tx, share_rx, status_tx);
+                let client = if let Some(rx) = self.capacity_rx {
+                    client.with_capacity_rx(rx)
+                } else {
+                    client
+                };
                 client.run().await;
             }
         }
@@ -465,6 +505,7 @@ mod tests {
 
     fn make_test_config() -> StratumConfig {
         StratumConfig {
+            v1_policy: Default::default(),
             pool1: PoolConfig {
                 url: "stratum+tcp://pool.example.com:3333".into(),
                 worker: "test.worker".into(),

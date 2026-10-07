@@ -1,0 +1,30 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Independent RAM recovery PID1. Never sources card files or executes a capsule.
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 077
+mount -t proc proc /proc || exit 1
+mount -t sysfs sysfs /sys || exit 1
+mount -t devtmpfs devtmpfs /dev || exit 1
+mkdir -p /dev/pts /run /tmp /run/dcentos /mnt/recovery-boot /mnt/recovery-data
+mount -t devpts devpts /dev/pts || exit 1
+mount -t tmpfs -o mode=0755 tmpfs /run || exit 1
+mkdir -p /run/dcentos
+mount -t tmpfs -o mode=1777 tmpfs /tmp || exit 1
+hostname dcent-bb-recovery
+
+# The card is the sole durable store. Never mount an MTD or UBI source.
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    [ -b /dev/mmcblk0p2 ] && break
+    sleep 1
+done
+if mount -t vfat -o ro,nodev,nosuid,noexec /dev/mmcblk0p1 /mnt/recovery-boot &&
+   mount -t ext4 -o rw,nodev,nosuid,noexec /dev/mmcblk0p2 /mnt/recovery-data; then
+    /usr/bin/python3 -I -m dcent_toolbox.core.am3_bb_recovery_service --start-transport
+else
+    echo "DCENT recovery: SD storage unavailable; transport disabled." >/dev/console
+fi
+echo "DCENT BBCtrl RAM recovery. No installation starts automatically." >/dev/console
+echo "Support development: https://d-central.tech/fund/" >/dev/console
+# A dedicated inittab only reaps children. No generated Buildroot rcS/rcK runs.
+exec /sbin/init

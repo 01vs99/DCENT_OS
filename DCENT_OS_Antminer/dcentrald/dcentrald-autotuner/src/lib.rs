@@ -81,6 +81,14 @@ pub mod state_persistence;
 pub mod telemetry;
 pub mod thermal_comp;
 pub mod tuner;
+/// C3a (2026-09-01, Supremacy Gauntlet lane C3a): variant envelope +
+/// cut-ladder guard — the fail-closed substrate under the operator's
+/// "autotune default-ON everywhere" decision. Every tuning step validates
+/// against the variant's declared envelope and BoardDesc cut-ladder BEFORE
+/// execution; variants with UNKNOWN/missing envelope datums refuse to tune
+/// with an explicit surfaced `NotTunable` reason (never tune blind). Also
+/// carries the first-boot safe-stock start gate the daemon feeds.
+pub mod tune_guard;
 // Wave F (RE-001 closure gap-fill, 2026-05-19): tuner-stability clock. The
 // BraiinsOS-shape per-chip autotuner FSM is ALREADY implemented by
 // `tuner::AutoTuner` (TunerState Idle→Characterizing→Verifying→
@@ -734,6 +742,12 @@ pub use tuner::AutoTuner;
 pub use tuner::{
     AutotunerPolicyStatus, AutotunerResumeStateStatus, AutotunerRuntimeStatus, SiliconGradeCounts,
     TuningProgress,
+};
+// C3a: variant envelope + cut-ladder guard surface.
+pub use tune_guard::{
+    default_variant_ladder, resolve_variant_envelope, FirstBootGateSnapshot, FreqStepKind,
+    GuardTelemetry, NotTunableReason, TuneGuard, TuneStepRefusal, VariantTuneEnvelope,
+    TUNE_ENVELOPE_VERSION,
 };
 // FreqCommand is already pub at crate root
 

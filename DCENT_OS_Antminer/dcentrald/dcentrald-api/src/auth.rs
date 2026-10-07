@@ -1,8 +1,8 @@
 //! Authentication middleware for dcentrald API.
 //!
 //! Requires a password on first boot. Password is stored as an argon2id hash
-//! in `/data/dcent/auth.json`. Physical reset: hold reset button 15s to
-//! delete the auth file and reset password.
+//! in `/data/dcent/auth.json`. No reset-button timing is qualified. Use the
+//! checked settings reset, or the documented offline external-media marker.
 //!
 //! Unauthenticated endpoints:
 //!   - GET  /api/auth/status   — returns whether password is set

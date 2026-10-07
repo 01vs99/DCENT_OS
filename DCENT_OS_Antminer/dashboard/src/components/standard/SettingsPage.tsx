@@ -4,6 +4,7 @@ import type { OperatingMode } from '../../api/types';
 import { useModeNavigation } from '../../hooks/useModeNavigation';
 import { useMinerStore } from '../../store/miner';
 import { getSubPage } from '../../utils/router';
+import { startIdleMining } from '../../utils/startIdleMining';
 import { ActionButton } from '../common/ActionButton';
 import { NextStepsPanel } from '../common/NextStepsPanel';
 import { OverlayDialog } from '../common/OverlayDialog';
@@ -12,6 +13,7 @@ import { BackupTab } from './settings/BackupTab';
 import { GeneralTab } from './settings/GeneralTab';
 import { NetworkTab } from './settings/NetworkTab';
 import { SecurityTab } from './settings/SecurityTab';
+import { ReportProblem } from '../common/ReportProblem';
 
 type SystemTab = 'general' | 'security' | 'network' | 'backup' | 'appearance';
 
@@ -40,6 +42,7 @@ export function SettingsPage() {
   const addAlert = useMinerStore(s => s.addAlert);
   const { switchMode } = useModeNavigation();
   const [pendingMode, setPendingMode] = useState<OperatingMode | null>(null);
+  const [canStartMining, setCanStartMining] = useState(false);
   const modeDialogRef = useRef<HTMLDivElement>(null);
   const modeCancelRef = useRef<HTMLButtonElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
@@ -58,6 +61,14 @@ export function SettingsPage() {
     }
     return 'general';
   });
+
+  useEffect(() => {
+    let mounted = true;
+    void api.getConfig().then(config => {
+      if (mounted) setCanStartMining(config.initial_idle_activation_available === true);
+    }).catch(() => { /* The status page retains connection diagnostics. */ });
+    return () => { mounted = false; };
+  }, []);
 
   useEffect(() => {
     const tabFromRoute = settingsTabFromPage(currentPage);
@@ -168,6 +179,7 @@ export function SettingsPage() {
       </div>
 
       <NextStepsPanel mode="standard" />
+      <ReportProblem />
 
       <div
         className="tab-underline"
@@ -219,6 +231,20 @@ export function SettingsPage() {
       <div className="section">
         <div className="section-title">System Actions</div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {canStartMining && (
+            <ActionButton
+              label="Start Mining"
+              onClick={async () => {
+                try {
+                  await startIdleMining(api);
+                  setCanStartMining(false);
+                  addAlert('info', 'Mining start requested. Check status for chip detection and accepted shares.');
+                } catch (error) {
+                  addAlert('warning', error instanceof Error ? error.message : 'Could not start mining.');
+                }
+              }}
+            />
+          )}
           <ActionButton
             label="Restart Mining"
             variant="secondary"

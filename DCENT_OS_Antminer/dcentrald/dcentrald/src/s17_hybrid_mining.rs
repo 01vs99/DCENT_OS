@@ -1,9 +1,10 @@
-//! S17-family (BM1397) AM2/Zynq hybrid mining runtime — desk promotion.
+//! S17-family BM1397 native AM2/Zynq runtime and retained pure wire helpers.
 //!
 //! Campaign `2026-08-27-antminer17-unlock-armada` (agent B1, 2026-08-27).
-//! Recipe-swapped counterpart of the proven BM1362 engine
-//! ([`crate::s19j_hybrid_mining`]); the BM1362 file is regression-pinned and
-//! stays byte-stable. This module owns the BM1397 family values:
+//! The native lifecycle lives in `s17_native_runtime.rs`; factory EEPROM
+//! defaults and raw-source provenance live in `s17_factory_profile.rs` and
+//! .
+//! This module owns the BM1397 family values:
 //!
 //! - **Geometry** (A1 §V2 + stock pattern files): S17/S17 Pro 3×48 (BHB07601),
 //!   S17+ 3×65 (BHB07602), T17 3×30 (BHB07701), T17+ 3×44 (BHB07702 — 44, not
@@ -12,12 +13,19 @@
 //!   register `0x18` (MiscCtrl) — canonical operational word `0x0000_6031`
 //!   (6.25 Mbaud, `dcentrald-silicon-profiles` SSOT). The factory-jig
 //!   PLL3/FastUART pair (reg `0x68`/`0x28`) is an opt-in alternative.
-//! - **Voltage executors**: typed, byte-exact per A3 §2. dsPIC33EP16GS202
-//!   "G2a framed" @ FPGA-bus `0x20|chain` for am2-s17p/am2-t17; PIC16F1704
-//!   "G2b raw" for am2-s17plus/am2-t17plus; APW9 PSU DAC @ `0x10` sub 0x02.
+//! - **Production controller frames** (R05-corrected): BOTH controller
+//!   classes use the bytewise framed law `55 AA LEN CMD payload SUM_BE16` at
+//!   bus0 `0x20|slot`; the dialect split is the SET_VOLTAGE payload width
+//!   (G2a dsPIC `VV 00 00` LEN=7 vs G2b PIC16 `VV` LEN=5 — factory-jig
+//!   `set_dsPIC33EP16GS202_voltage@23D40` vs `set_PIC16F1704_voltage@22AB8`),
+//!   and the held plus-family production dispatch admits no `0x10` opcode at
+//!   all, so rail selection is APW9-owned. APW9 is bus1 address0x10,
+//!   per-byte register0x11, with SUM_LE16 (corrected against raw stock code).
+//!   The pure wire layer lives in the `wire` leaf module (`s17_wire.rs`).
 //! - **Work codec**: BM1397 serial job packet `14 + 4 + N×32` with 4-midstate
 //!   AsicBoost (NOT BIP320 chip-side version rolling — baked-config note),
-//!   job-id `+4 mod 128` (`dcentaxe-asic` BM1397 dispatcher).
+//!   wire job-id `+4 mod128`; the UIO executor retains the FPGA-reconstructed
+//!   full16-bit work ID, including high bits across wire wrap.
 //! - **Power ordering** (A1 §V3): soc/fpga → scan chains → GPIO907=0 → init
 //!   PIC → working voltage → set-address → baud → frequency; reverse on
 //!   power-down with PIC SAFE-OFF and GPIO907=1.
@@ -26,22 +34,20 @@
 //! - am2 hashboard EEPROM `0x50..=0x57` writes are denied at the HAL fabric;
 //!   the denylist is registered before any wire access (rule
 //!    #28).
-//! - dsPIC fw=`0x86` is refused for voltage commands unless
-//!   `DCENT_AM2_S17_TRUST_DEGRADED_FW=1` (lab-only; rule #30).
+//! - Native execution always refuses PIC fw0x86, loader mode and malformed
+//!   replies; historical lab-only pure helpers do not grant native authority.
 //! - SET_VOLTAGE is deferred until 5 stable heartbeat ticks (rule #24).
 //! - No destructive PIC op (RESET `0x07` / JUMP `0x06` / ERASE `0x09` /
 //!   SEND_DATA `0x14`) exists in this module (rule #29); a PIC16 seen in
 //!   loader mode (`0xCC`) fails closed instead of jumping.
 //! - Voltage executors are fail-closed: no reply ⇒ error + teardown, never a
 //!   silent retry loop; heartbeats are bounded.
-//! - **Pre-bench energize gate**: no hardware is energized unless
-//!   `DCENT_AM2_S17_ALLOW_ENERGIZE=1` is set on the bench unit. The gate is
-//!   adjudicated in `main.rs` BEFORE the watchdog is armed, so a gate refusal
-//!   parks management-only with the API up and no armed watchdog.
+//! - Signed runtime-image admission and exact route composition (or an
+//!   explicit compiled lab session) are adjudicated before watchdog arm. The native owner then independently
+//!   checks EEPROM, cooling, controller replies and complete ASIC geometry.
 //!
-//! DESK-ONLY promotion: every byte here is pinned by held-binary RE; no live
-//! S17-family unit has run this code (see the live-bring-up risk list in
-//! ).
+//! Host tests exercise real work/nonce/share correlation and failure cleanup.
+//! No live S17-family unit has run this native implementation yet.
 
 use std::time::Duration;
 
@@ -49,10 +55,70 @@ use anyhow::{anyhow, Context, Result};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::DcentraldConfig;
-use crate::runtime::safety_watchdog::{
-    HybridWatchdogRouteScope, SafetyLiveness, SafetyWatchdogOwner,
-};
+use crate::runtime::safety_watchdog::{S17WatchdogRouteScope, SafetyLiveness, SafetyWatchdogOwner};
 use dcentrald_hal::platform::HardwareMutationGateOwner;
+
+#[path = "s17_native_runtime.rs"]
+mod native;
+pub(crate) use native::S17SafeOffEvidence;
+
+/// Dependency-free wire-dialect leaf (controller frames, APW9 law, executor,
+/// chain I/O seam, work ledger). R05 runtime lane moved the pure layer here so
+/// `tests/r05_*.rs` can `#[path]`-include the exact production implementation
+/// for captured-byte replay; the names below stay the module's public surface.
+#[path = "s17_wire.rs"]
+mod wire;
+pub(crate) use wire::{
+    apw9_dac_for_bitmain_cv, apw9_dac_for_volts, apw9_set_dac_frame, bm1397_chip_addr_from_nonce,
+    bm1397_chip_index_from_nonce, build_bm1397_job_packet, clamp_pic_voltage_cv,
+    discover_divisor, drain_commands, dspic_g2a_checksum, dspic_g2a_frame,
+    dspic_g2a_get_version_frame, dspic_g2a_heartbeat_frame, dspic_g2a_read_pwm_duty_frame,
+    dspic_g2a_read_rail_frame, dspic_g2a_safe_off_frame, dspic_g2a_set_voltage_frame, framed_reply,
+    next_bm1397_job_id, pic16_g2b_get_version_frame, pic16_g2b_heartbeat_frame,
+    pic16_g2b_safe_off_frame, pic16_g2b_set_voltage_frame, register_read, register_write,
+    s17_pic_i2c_addr, work_queue_has_complete_frame_space, BM1397_JOB_HEADER, BM1397_JOB_PACKET_LEN,
+    BM1397_MIDSTATE_SLOTS, ChainIo, REGISTER_WAIT, S17_APW9_DAC_SUBADDR, S17_APW9_I2C_ADDR,
+    S17_BRING_UP_FREQ_MHZ, S17_BRING_UP_VOLTAGE_CV, S17_DEGRADED_DSPIC_FW,
+    S17_EEPROM_WRITE_DENYLIST, S17_PIC16_LOADER_MODE_FW, S17_PIC_VOLTAGE_MAX_CV,
+    S17_PIC_VOLTAGE_MIN_CV, S17_PSU_WATCHDOG_CMD_ABSENT, S17_STABLE_HEARTBEATS_BEFORE_VOLTAGE,
+    S17PicControllerClass, S17PicFirmwareState, S17PicWire, S17VoltageExecutor, WorkLedger,
+};
+#[cfg(test)]
+pub(crate) use wire::MockS17PicWire;
+
+#[derive(Debug)]
+struct S17TerminalSafeOffError {
+    source: anyhow::Error,
+    _closeout: crate::runtime::safety_watchdog::WatchdogCloseoutReceipt,
+}
+
+impl std::fmt::Display for S17TerminalSafeOffError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.source)
+    }
+}
+
+impl std::error::Error for S17TerminalSafeOffError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+pub(crate) fn is_terminal_safe_off_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<S17TerminalSafeOffError>().is_some())
+}
+
+fn terminal_safe_off_error(
+    source: anyhow::Error,
+    closeout: crate::runtime::safety_watchdog::WatchdogCloseoutReceipt,
+) -> anyhow::Error {
+    anyhow::Error::new(S17TerminalSafeOffError {
+        source,
+        _closeout: closeout,
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Targets, geometry, hashboard identities
@@ -158,215 +224,17 @@ pub(crate) const S17_HASHBOARD_POWER_OFF: u8 = 1;
 pub(crate) const S17_GPIO907_SETTLE: Duration = Duration::from_secs(1);
 
 // ---------------------------------------------------------------------------
-// PIC controller classes and byte-exact frames (A3 §2)
+// PIC controller classes and byte-exact frames: moved to the `wire` leaf
+// module (see the `pub(crate) use wire::{…}` re-exports above). The G2b
+// SET_VOLTAGE frame is the jig-captured one-payload-byte form
+// (`set_PIC16F1704_voltage@22AB8`); the production plus-family dispatch
+// admits no 0x10 opcode, so rail selection stays APW9-owned.
 // ---------------------------------------------------------------------------
 
-/// The two S17-family voltage-controller application ABIs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum S17PicControllerClass {
-    /// dsPIC33EP16GS202, framed `55 AA LEN CMD payload SUM16-BE` @ `0x20|chain`
-    /// (am2-s17p, am2-t17).
-    DsPicG2aFramed,
-    /// PIC16F1704, raw S9-family frames via i2c fd with 200 ms pacing
-    /// (am2-s17plus, am2-t17plus).
-    Pic16G2bRaw,
-}
-
-impl S17PicControllerClass {
-    /// Map the BoardDesc adapter class to the wire class (None ⇒ not an
-    /// S17-family plan).
-    pub(crate) fn from_voltage_controller(
-        controller: dcentrald_common::VoltageControllerClass,
-    ) -> Option<Self> {
-        match controller {
-            dcentrald_common::VoltageControllerClass::DsPic33Ep => Some(Self::DsPicG2aFramed),
-            dcentrald_common::VoltageControllerClass::Pic16F1704 => Some(Self::Pic16G2bRaw),
-            _ => None,
-        }
-    }
-
-    pub(crate) const fn settle_after_command(self) -> Duration {
-        match self {
-            // A1 §V3 / A3 §2: 500 ms settle after each dsPIC command.
-            Self::DsPicG2aFramed => Duration::from_millis(500),
-            // A3 §2: 200 ms pacing between raw PIC16 frames.
-            Self::Pic16G2bRaw => Duration::from_millis(200),
-        }
-    }
-}
-
-/// Board PIC I²C address on the FPGA bus: `0x20 | (chain & 7)` → 0x20/0x21/0x22
-/// (A1 §V1 wire-protocol fork falsification; identical for both classes).
-pub(crate) const fn s17_pic_i2c_addr(chain: u8) -> u8 {
-    0x20 | (chain & 7)
-}
-
-/// dsPIC G2a frame checksum: `u16` big-endian sum of `LEN + CMD + payload`
-/// (A3 §2; verified against A1 §V3 example
-/// `55 AA 07 10 A0 00 01 00 B8` → 0x00B8).
-fn dspic_g2a_checksum(len: u8, cmd: u8, payload: &[u8]) -> u16 {
-    let sum = u16::from(len) + u16::from(cmd) + payload.iter().map(|&b| u16::from(b)).sum::<u16>();
-    sum
-}
-
-/// Build a dsPIC G2a framed command: `55 AA LEN CMD payload CK_HI CK_LO` with
-/// `LEN = payload_len + 4` (A3 §2).
-fn dspic_g2a_frame(cmd: u8, payload: &[u8]) -> Vec<u8> {
-    let len = (payload.len() + 4) as u8;
-    let ck = dspic_g2a_checksum(len, cmd, payload);
-    let mut frame = Vec::with_capacity(payload.len() + 6);
-    frame.extend_from_slice(&[0x55, 0xAA, len, cmd]);
-    frame.extend_from_slice(payload);
-    frame.extend_from_slice(&ck.to_be_bytes());
-    frame
-}
-
-/// dsPIC G2a SET_VOLTAGE (CMD `0x10`, payload `[VV, 0x00, 0x00]`, 500 ms
-/// settle). `vv` is the raw code byte the stock flow writes; its cV→code law
-/// is an open live item (A1 "open items": PIC voltage-payload unit encoding).
-pub(crate) fn dspic_g2a_set_voltage_frame(vv: u8) -> Vec<u8> {
-    dspic_g2a_frame(0x10, &[vv, 0x00, 0x00])
-}
-
-/// dsPIC G2a SAFE-OFF / DC-DC off (CMD `0x15`, payload `[0x00]`).
-pub(crate) fn dspic_g2a_safe_off_frame() -> Vec<u8> {
-    dspic_g2a_frame(0x15, &[0x00])
-}
-
-/// dsPIC G2a HEARTBEAT (CMD `0x16`, no payload).
-pub(crate) fn dspic_g2a_heartbeat_frame() -> Vec<u8> {
-    dspic_g2a_frame(0x16, &[])
-}
-
-/// dsPIC G2a GET_VERSION (CMD `0x17`; reply `[05 17 FW x x]`).
-pub(crate) fn dspic_g2a_get_version_frame() -> Vec<u8> {
-    dspic_g2a_frame(0x17, &[])
-}
-
-/// dsPIC G2a READ RAIL mV (CMD `0x29`; reply raw BE16 × 3.3/4096 × 7.6).
-pub(crate) fn dspic_g2a_read_rail_frame() -> Vec<u8> {
-    dspic_g2a_frame(0x29, &[])
-}
-
-/// dsPIC G2a READ PWM duty (CMD `0x2B`; reply PDC0/1/2 BE16).
-pub(crate) fn dspic_g2a_read_pwm_duty_frame() -> Vec<u8> {
-    dspic_g2a_frame(0x2B, &[])
-}
-
-/// PIC16 G2b raw SET_VOLTAGE: `55 AA 10 VV` (A3 §2).
-pub(crate) fn pic16_g2b_set_voltage_frame(vv: u8) -> Vec<u8> {
-    vec![0x55, 0xAA, 0x10, vv]
-}
-
-/// PIC16 G2b raw SAFE-OFF: `55 AA 15 00`.
-pub(crate) fn pic16_g2b_safe_off_frame() -> Vec<u8> {
-    vec![0x55, 0xAA, 0x15, 0x00]
-}
-
-/// PIC16 G2b raw HEARTBEAT: `55 AA 16`.
-pub(crate) fn pic16_g2b_heartbeat_frame() -> Vec<u8> {
-    vec![0x55, 0xAA, 0x16]
-}
-
-/// PIC16 G2b raw GET_VERSION: `55 AA 17` (reply 1 byte; `0xCC` = loader).
-pub(crate) fn pic16_g2b_get_version_frame() -> Vec<u8> {
-    vec![0x55, 0xAA, 0x17]
-}
-
-/// dsPIC33 firmware version that is the proven post-PIC-RESET corruption
-/// state — REFUSED for voltage commands (rust-firmware rule #30).
-pub(crate) const S17_DEGRADED_DSPIC_FW: u8 = 0x86;
-
-/// PIC16 loader-mode GET_VERSION reply — the runtime fails closed (it must
-/// not send the JUMP `0x06` op; recovery-tool owns that).
-pub(crate) const S17_PIC16_LOADER_MODE_FW: u8 = 0xCC;
-
-/// Number of stable heartbeat ticks required before SET_VOLTAGE may be sent
-/// (rust-firmware rule #24 — NACK before stability corrupts the PIC parser).
-pub(crate) const S17_STABLE_HEARTBEATS_BEFORE_VOLTAGE: u32 = 5;
-
 // ---------------------------------------------------------------------------
-// APW9 PSU DAC (A1 §V3 / A3 §2)
+// APW9 PSU DAC, voltage envelope and EEPROM denylist: moved to the `wire`
+// leaf module (re-exported above).
 // ---------------------------------------------------------------------------
-
-/// APW9 PSU I²C address on the FPGA bus (sub-address mode, DAC sub `0x02`).
-pub(crate) const S17_APW9_I2C_ADDR: u8 = 0x10;
-
-/// APW9 DAC-write sub-address (FPGA IIC engine sub-address field).
-pub(crate) const S17_APW9_DAC_SUBADDR: u8 = 0x02;
-
-/// APW9 PSU SET DAC frame: `55 AA 06 83 DAC 00 CK_HI CK_LO` with
-/// `CK = 0x89 + DAC` (A1 §V3; identical SUM16 core law as the dsPIC frames).
-pub(crate) fn apw9_set_dac_frame(dac: u8) -> Vec<u8> {
-    let ck = 0x06u16 + 0x83 + 0x00 + u16::from(dac);
-    let mut frame = Vec::with_capacity(8);
-    frame.extend_from_slice(&[0x55, 0xAA, 0x06, 0x83, dac, 0x00]);
-    frame.extend_from_slice(&ck.to_be_bytes());
-    frame
-}
-
-/// APW9 DAC law: `uint8(765.411764 − 35.833333 × V)` clamped to `[0, 255]`
-/// (f64 literals from the T17 libplatform disasm, A1 §V3). Truncating cast
-/// matches the stock `uint8` semantics (V = 17 V → 156). Valid input range
-/// 14.24–21.36 V; out-of-range volts clamp rather than wrap — callers must
-/// additionally enforce the cV envelope below before asking for a DAC code.
-pub(crate) fn apw9_dac_for_volts(volts: f64) -> u8 {
-    let raw = 765.411_764 - 35.833_333 * volts;
-    raw.clamp(0.0, 255.0) as u8
-}
-
-/// APW9 DAC from the stock `bitmain-voltage` unit (cV×10 on the PSU bus:
-/// 1700 = 17.00 V; A1 §V3).
-pub(crate) fn apw9_dac_for_bitmain_cv(cv: u32) -> u8 {
-    apw9_dac_for_volts(f64::from(cv) / 100.0)
-}
-
-/// NO PSU watchdog command exists in the 17-family stock (A1 §V3: "PSU
-/// watchdog none — no 0x84 template anywhere in stock 17-family"). This
-/// constant documents the refusal: unlike the S19j APW121215a 1 Hz heartbeat
-/// requirement, the APW9 needs no 0x84 keep-alive, and sending one would be
-/// an unproven mutation.
-pub(crate) const S17_PSU_WATCHDOG_CMD_ABSENT: u8 = 0x84;
-
-// ---------------------------------------------------------------------------
-// Voltage envelope (clamps)
-// ---------------------------------------------------------------------------
-
-/// Vendor software clamp for the PIC-controlled hashboard input bus in cV
-/// (18.0–21.0 V; the S17e-class datum "only the 1800-2100 cV vendor software
-/// clamp is statically bounded", `board_desc.rs` AM2_S17E_CLASS_UNCONFIRMED_DATUMS).
-pub(crate) const S17_PIC_VOLTAGE_MIN_CV: u16 = 1800;
-pub(crate) const S17_PIC_VOLTAGE_MAX_CV: u16 = 2100;
-
-/// Bring-up point: 500 MHz @ 1850 cV (VNish 2.0.4 all-SKU identical factory
-/// conf, A2 §2 — the conservative desk-proven first target).
-pub(crate) const S17_BRING_UP_FREQ_MHZ: u32 = 500;
-pub(crate) const S17_BRING_UP_VOLTAGE_CV: u16 = 1850;
-
-/// Clamp a requested PIC bus voltage in cV into the vendor envelope.
-/// Out-of-envelope requests are REFUSED (fail-closed), not silently clamped:
-/// an operator asking for 15 V or 23 V has the wrong units or the wrong board.
-pub(crate) fn clamp_pic_voltage_cv(requested_cv: u16) -> Result<u16> {
-    if (S17_PIC_VOLTAGE_MIN_CV..=S17_PIC_VOLTAGE_MAX_CV).contains(&requested_cv) {
-        Ok(requested_cv)
-    } else {
-        Err(anyhow!(
-            "S17 PIC bus voltage {requested_cv} cV outside the vendor envelope \
-             {S17_PIC_VOLTAGE_MIN_CV}..={S17_PIC_VOLTAGE_MAX_CV} cV — refusing (wrong units or wrong board?)"
-        ))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// EEPROM write-deny (rust-firmware rule #28)
-// ---------------------------------------------------------------------------
-
-/// am2 hashboard EEPROM addresses `0x50..=0x57` — writes denied at the HAL
-/// fabric; the S17 hybrid path registers this list before any wire access
-/// (same production pattern as the BM1362 engine's
-/// `spawn_i2c_service_no_register_touch_with_denylist_and_reserved_preparation`).
-pub(crate) const S17_EEPROM_WRITE_DENYLIST: [u8; 8] =
-    [0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57];
 
 // ---------------------------------------------------------------------------
 // Power ordering (A1 §V3)
@@ -471,75 +339,9 @@ pub(crate) const S17_POWER_DOWN_ORDER: [S17PowerDownStep; 5] = [
 ];
 
 // ---------------------------------------------------------------------------
-// BM1397 serial work codec (dcentaxe-asic reference)
+// BM1397 serial work codec: moved to the `wire` leaf module (re-exported
+// above) so integration tests replay the production builders.
 // ---------------------------------------------------------------------------
-
-/// Job-packet header: `TYPE_JOB | GROUP_SINGLE | CMD_WRITE` = `0x21`
-/// (`dcentaxe-asic/src/common.rs`).
-pub(crate) const BM1397_JOB_HEADER: u8 = 0x21;
-
-/// Fixed 4-midstate job-packet payload length: `14 + 4 + 4×32` = 146 bytes
-/// (`14 + 4 + N×32` with N zero-padded to 4; ESP-Miner always sends the full
-/// 146-byte job_packet struct).
-pub(crate) const BM1397_JOB_PACKET_LEN: usize = 146;
-
-/// BM1397 job-id advance: `+4 mod 128` (4-midstate stride;
-/// `dcentaxe-mining` `DispatcherConfig::for_bm1397`).
-pub(crate) const fn next_bm1397_job_id(current: u8) -> u8 {
-    (current + 4) % 128
-}
-
-/// BM1397 4-midstate AsicBoost: BM1397 uses midstate-based version rolling
-/// with NO chip-side BIP320 mask (baked-config note: "BM1397 is 4-midstate
-/// AsicBoost (NOT BIP320 chip-side)"). This module must not import or derive
-/// the BM1362 BIP320 reconstruction.
-pub(crate) const BM1397_MIDSTATE_SLOTS: usize = 4;
-
-/// Build the BM1397 serial job packet (header byte NOT included — callers
-/// frame it per transport): `job_id(1) num_midstates(1) starting_nonce(4 LE)
-/// nbits(4 LE) ntime(4 LE) merkle4(4) midstate0..3(32×4, zero-padded)`.
-pub(crate) fn build_bm1397_job_packet(
-    job_id: u8,
-    midstates: &[[u8; 32]],
-    starting_nonce: u32,
-    nbits: u32,
-    ntime: u32,
-    merkle4: [u8; 4],
-) -> Result<Vec<u8>> {
-    if midstates.is_empty() || midstates.len() > BM1397_MIDSTATE_SLOTS {
-        return Err(anyhow!(
-            "BM1397 job requires 1..=4 midstates, got {}",
-            midstates.len()
-        ));
-    }
-    let mut packet = Vec::with_capacity(BM1397_JOB_PACKET_LEN);
-    packet.push(job_id);
-    packet.push(midstates.len() as u8);
-    packet.extend_from_slice(&starting_nonce.to_le_bytes());
-    packet.extend_from_slice(&nbits.to_le_bytes());
-    packet.extend_from_slice(&ntime.to_le_bytes());
-    packet.extend_from_slice(&merkle4);
-    for slot in 0..BM1397_MIDSTATE_SLOTS {
-        match midstates.get(slot) {
-            Some(midstate) => packet.extend_from_slice(midstate),
-            None => packet.extend_from_slice(&[0u8; 32]),
-        }
-    }
-    Ok(packet)
-}
-
-/// BM1397 nonce decoding: chip address lives in nonce bits `[24:17]`
-/// (`dcentrald-asic` FPGA driver `decode_nonce`; the S17 jig
-/// `BHB07601_check_nonce` divides by `gChain_Asic_Interval`).
-pub(crate) const fn bm1397_chip_addr_from_nonce(nonce: u32) -> u8 {
-    ((nonce >> 17) & 0xFF) as u8
-}
-
-/// Chip index from a nonce given the chain's address stride.
-pub(crate) const fn bm1397_chip_index_from_nonce(nonce: u32, addr_interval: u8) -> u8 {
-    let interval = if addr_interval == 0 { 1 } else { addr_interval };
-    bm1397_chip_addr_from_nonce(nonce) / interval
-}
 
 // ---------------------------------------------------------------------------
 // Env gates (family-scoped DCENT_AM2_S17_*; -style guard)
@@ -549,7 +351,7 @@ pub(crate) const fn bm1397_chip_index_from_nonce(nonce: u32, addr_interval: u8) 
 /// BM1362 engine's `am2_env_flag` (kept local so the BM1362 file stays
 /// byte-stable).
 pub(crate) fn s17_env_flag(name: &str) -> bool {
-    std::env::var(name)
+    dcentrald_common::lab_env::var(name)
         .map(|v| {
             matches!(
                 v.as_str(),
@@ -575,8 +377,8 @@ pub(crate) const ENV_S17_SKIP_PER_CHIP_INIT: &str = "DCENT_AM2_S17_SKIP_PER_CHIP
 /// OFF; refusing to combine with energization is enforced by the guard.
 pub(crate) const ENV_S17_TRUST_DEGRADED_FW: &str = "DCENT_AM2_S17_TRUST_DEGRADED_FW";
 
-/// THE bench gate: hardware energization is refused unless this is set on the
-/// bench unit. Default OFF everywhere, and images must never set it.
+/// Lab-only bench energization request. Signed native images obtain admission
+/// from the verified image and exact route; the environment cannot grant it.
 pub(crate) const ENV_S17_ALLOW_ENERGIZE: &str = "DCENT_AM2_S17_ALLOW_ENERGIZE";
 
 /// Adjudicated recipe derived from the `DCENT_AM2_S17_*` env family.
@@ -627,6 +429,13 @@ impl S17RecipeEnv {
 /// 3. Trusting degraded PIC firmware while energizing — the fw=0x86 state is
 ///    the proven corruption state; it must never see voltage commands outside
 ///    a read-only lab session.
+/// 4. R05 (2026-09-11): `DCENT_AM2_S17_FAST_UART_PLL3` and
+///    `DCENT_AM2_S17_SERIAL_WORK_DISPATCH` are REFUSED outright — the native
+///    runtime positively discovers the observed divisor and dispatches
+///    through the s17io FPGA work FIFO, and these two knobs were never wired
+///    into it. A bench operator who set one got a silent no-op; a typed
+///    pre-watchdog refusal replaces that footgun (launchers already scrub
+///    both names, so no shipped image can trip this).
 pub(crate) fn adjudicate_s17_recipe_from(flags: S17RecipeEnv) -> Result<S17Recipe> {
     let recipe = S17Recipe {
         fast_uart_pll3: flags.fast_uart_pll3,
@@ -653,257 +462,62 @@ pub(crate) fn adjudicate_s17_recipe_from(flags: S17RecipeEnv) -> Result<S17Recip
              cannot be combined with energization"
         ));
     }
+    if recipe.fast_uart_pll3 {
+        return Err(anyhow!(
+            "S17 recipe guard: DCENT_AM2_S17_FAST_UART_PLL3 is not wired into the native \
+             runtime — the runtime positively discovers the observed chain divisor, so the \
+             factory-jig PLL3/FastUART ladder would be a silent no-op; refusing"
+        ));
+    }
+    if recipe.serial_work_dispatch {
+        return Err(anyhow!(
+            "S17 recipe guard: DCENT_AM2_S17_SERIAL_WORK_DISPATCH is not wired into the native \
+             runtime — the implemented work dispatch is the s17io FPGA work FIFO, so this knob \
+             would be a silent no-op; refusing"
+        ));
+    }
     Ok(recipe)
 }
 
-/// Adjudicate the pre-bench energize gate. Called by `main.rs` BEFORE the
+/// Adjudicate native or lab energization. Called by `main.rs` BEFORE the
 /// watchdog is armed: a refusal parks management-only with the API reachable
 /// and no armed watchdog (no reboot loop).
-pub(crate) fn adjudicate_s17_energize_gate() -> Result<S17Recipe> {
-    adjudicate_s17_recipe_from(S17RecipeEnv::from_env())
-}
-
-// ---------------------------------------------------------------------------
-// Fail-closed typed voltage executor
-// ---------------------------------------------------------------------------
-
-/// Wire transport for PIC/PSU transactions (host-mockable).
-pub(crate) trait S17PicWire {
-    /// Write `write` to `i2c_addr` and read `read_len` bytes back. Implementors
-    /// must apply the EEPROM denylist at their fabric boundary; an `Err`
-    /// return models a missing/negative reply.
-    fn transact(&mut self, i2c_addr: u8, write: &[u8], read_len: usize)
-        -> std::io::Result<Vec<u8>>;
-}
-
-/// Adjudicated PIC firmware state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum S17PicFirmwareState {
-    /// Application firmware byte accepted for voltage commands.
-    App { version: u8 },
-    /// dsPIC post-corruption state (fw=0x86) — refused unless lab-trusted.
-    DegradedDspic,
-    /// PIC16 loader mode (0xCC) — always refused; recovery-tool owns the jump.
-    LoaderMode,
-}
-
-impl S17PicFirmwareState {
-    pub(crate) fn from_version(class: S17PicControllerClass, version: u8) -> Self {
-        if version == S17_PIC16_LOADER_MODE_FW {
-            return Self::LoaderMode;
-        }
-        if class == S17PicControllerClass::DsPicG2aFramed && version == S17_DEGRADED_DSPIC_FW {
-            return Self::DegradedDspic;
-        }
-        Self::App { version }
-    }
-}
-
-/// Typed, fail-closed voltage executor for one hashboard PIC.
 ///
-/// Invariants:
-/// - SET_VOLTAGE is refused until [`S17_STABLE_HEARTBEATS_BEFORE_VOLTAGE`]
-///   consecutive heartbeats have succeeded (rule #24).
-/// - dsPIC fw=`0x86` and PIC16 loader-mode (`0xCC`) are refused for voltage
-///   commands; the executor never sends JUMP/RESET (rule #29).
-/// - Any wire error propagates as `Err` — the caller must tear the chain down;
-///   there is no silent retry.
-pub(crate) struct S17VoltageExecutor<W: S17PicWire> {
-    class: S17PicControllerClass,
-    chain: u8,
-    wire: W,
-    stable_heartbeats: u32,
-    trust_degraded_fw: bool,
-    firmware_version: Option<u8>,
+/// `native_route_energize` is supplied only after startup joins signed image
+/// admission with the exact S17 route. It is applied before recipe guards so
+/// admitted native execution still refuses every incompatible lab recipe.
+pub(crate) fn adjudicate_s17_energize_gate(
+    native_route_energize: bool,
+) -> Result<S17Recipe> {
+    adjudicate_s17_energize_gate_from(S17RecipeEnv::from_env(), native_route_energize)
 }
 
-impl<W: S17PicWire> S17VoltageExecutor<W> {
-    pub(crate) fn new(class: S17PicControllerClass, chain: u8, wire: W) -> Self {
-        Self {
-            class,
-            chain,
-            wire,
-            stable_heartbeats: 0,
-            trust_degraded_fw: false,
-            firmware_version: None,
-        }
+/// Pure form of [`adjudicate_s17_energize_gate`] (injectable for tests): the
+/// admitted route is applied to `allow_energize` before combination guards; a
+/// recipe with no energize admission at all is a refusal (park before the
+/// watchdog arms), never a silent pass-through.
+pub(crate) fn adjudicate_s17_energize_gate_from(
+    mut flags: S17RecipeEnv,
+    native_route_energize: bool,
+) -> Result<S17Recipe> {
+    flags.allow_energize = flags.allow_energize || native_route_energize;
+    let recipe = adjudicate_s17_recipe_from(flags)?;
+    if !recipe.allow_energize {
+        return Err(anyhow!(
+            "S17 energize refused: no admitted native route for hardware energization. \
+             A signed runtime image must match this exact board target before startup. \
+             Compiled lab builds may request a bench session with DCENT_AM2_S17_ALLOW_ENERGIZE=1."
+        ));
     }
-
-    /// Lab-only override for the fw=0x86 refusal (rule #30; guard refuses to
-    /// combine this with energization).
-    pub(crate) fn with_trust_degraded_fw(mut self, trusted: bool) -> Self {
-        self.trust_degraded_fw = trusted;
-        self
-    }
-
-    pub(crate) const fn i2c_addr(&self) -> u8 {
-        s17_pic_i2c_addr(self.chain)
-    }
-
-    /// Probe GET_VERSION and adjudicate the firmware state. Any reply shape
-    /// we cannot parse fails closed.
-    pub(crate) fn probe_firmware(&mut self) -> std::io::Result<S17PicFirmwareState> {
-        let parse: fn(&[u8]) -> std::io::Result<u8> = match self.class {
-            S17PicControllerClass::DsPicG2aFramed => parse_ds_pic_version_reply,
-            S17PicControllerClass::Pic16G2bRaw => parse_pic16_version_reply,
-        };
-        let frame = match self.class {
-            S17PicControllerClass::DsPicG2aFramed => dspic_g2a_get_version_frame(),
-            S17PicControllerClass::Pic16G2bRaw => pic16_g2b_get_version_frame(),
-        };
-        let reply = self.wire.transact(self.i2c_addr(), &frame, 5)?;
-        let version = parse(&reply)?;
-        self.firmware_version = Some(version);
-        Ok(S17PicFirmwareState::from_version(self.class, version))
-    }
-
-    /// One heartbeat transaction; success increments the stability counter.
-    pub(crate) fn heartbeat(&mut self) -> std::io::Result<()> {
-        let frame = match self.class {
-            S17PicControllerClass::DsPicG2aFramed => dspic_g2a_heartbeat_frame(),
-            S17PicControllerClass::Pic16G2bRaw => pic16_g2b_heartbeat_frame(),
-        };
-        // Any non-empty acknowledgement counts; an Err (no reply) propagates.
-        let reply = self.wire.transact(self.i2c_addr(), &frame, 2)?;
-        if reply.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "S17 PIC heartbeat returned no bytes (fail-closed)",
-            ));
-        }
-        self.stable_heartbeats = self.stable_heartbeats.saturating_add(1);
-        Ok(())
-    }
-
-    /// Bounded heartbeat pass: at most `max_attempts` transactions; a missing
-    /// reply is an error (never an unbounded loop).
-    pub(crate) fn heartbeat_bounded(&mut self, max_attempts: u32) -> std::io::Result<()> {
-        let mut remaining = max_attempts.max(1);
-        loop {
-            match self.heartbeat() {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    if remaining <= 1 {
-                        return Err(error);
-                    }
-                    remaining -= 1;
-                }
-            }
-        }
-    }
-
-    /// SET_VOLTAGE with the raw code byte for this controller class. Refused
-    /// (Err) before the 5-stable-heartbeat gate, on degraded/loader firmware,
-    /// without a prior firmware probe, and on any wire fault.
-    pub(crate) fn set_voltage_code(&mut self, vv: u8) -> std::io::Result<()> {
-        if self.stable_heartbeats < S17_STABLE_HEARTBEATS_BEFORE_VOLTAGE {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "S17 PIC SET_VOLTAGE deferred: {} stable heartbeats required, {} observed",
-                    S17_STABLE_HEARTBEATS_BEFORE_VOLTAGE, self.stable_heartbeats
-                ),
-            ));
-        }
-        self.adjudicate_firmware_for_voltage()?;
-        let frame = match self.class {
-            S17PicControllerClass::DsPicG2aFramed => dspic_g2a_set_voltage_frame(vv),
-            S17PicControllerClass::Pic16G2bRaw => pic16_g2b_set_voltage_frame(vv),
-        };
-        let reply = self.wire.transact(self.i2c_addr(), &frame, 2)?;
-        if reply.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "S17 PIC SET_VOLTAGE returned no bytes (fail-closed teardown)",
-            ));
-        }
-        Ok(())
-    }
-
-    /// SAFE-OFF (DC-DC off). Always permitted — safe direction — and still
-    /// fail-closed on a missing reply.
-    pub(crate) fn safe_off(&mut self) -> std::io::Result<()> {
-        let frame = match self.class {
-            S17PicControllerClass::DsPicG2aFramed => dspic_g2a_safe_off_frame(),
-            S17PicControllerClass::Pic16G2bRaw => pic16_g2b_safe_off_frame(),
-        };
-        self.wire.transact(self.i2c_addr(), &frame, 2)?;
-        Ok(())
-    }
-
-    fn adjudicate_firmware_for_voltage(&self) -> std::io::Result<()> {
-        let Some(version) = self.firmware_version else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "S17 PIC firmware not probed; refusing SET_VOLTAGE",
-            ));
-        };
-        match S17PicFirmwareState::from_version(self.class, version) {
-            S17PicFirmwareState::App { .. } => Ok(()),
-            S17PicFirmwareState::DegradedDspic if self.trust_degraded_fw => Ok(()),
-            S17PicFirmwareState::DegradedDspic => Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "S17 dsPIC fw=0x86 (post-corruption state) refused for voltage; \
-                 physical ICSP recovery required",
-            )),
-            S17PicFirmwareState::LoaderMode => Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "S17 PIC16 in loader mode (0xCC) refused for voltage; \
-                 recovery-tool owns the jump op",
-            )),
-        }
-    }
+    Ok(recipe)
 }
 
-/// dsPIC G2a GET_VERSION reply `[05 17 FW x x]` → `FW` (A3 §2).
-fn parse_ds_pic_version_reply(reply: &[u8]) -> std::io::Result<u8> {
-    if reply.len() >= 3 && reply[0] == 0x05 && reply[1] == 0x17 {
-        Ok(reply[2])
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("malformed dsPIC GET_VERSION reply {reply:02X?}"),
-        ))
-    }
-}
-
-/// PIC16 G2b GET_VERSION reply: 1 byte FW (A3 §2).
-fn parse_pic16_version_reply(reply: &[u8]) -> std::io::Result<u8> {
-    if reply.len() == 1 {
-        Ok(reply[0])
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("malformed PIC16 GET_VERSION reply {reply:02X?}"),
-        ))
-    }
-}
-
-/// Host-test mock wire: scripted replies + a transaction log.
-#[cfg(test)]
-#[derive(Default)]
-pub(crate) struct MockS17PicWire {
-    pub replies: std::collections::VecDeque<std::io::Result<Vec<u8>>>,
-    pub log: Vec<(u8, Vec<u8>)>,
-}
-
-#[cfg(test)]
-impl S17PicWire for MockS17PicWire {
-    fn transact(
-        &mut self,
-        i2c_addr: u8,
-        write: &[u8],
-        _read_len: usize,
-    ) -> std::io::Result<Vec<u8>> {
-        self.log.push((i2c_addr, write.to_vec()));
-        self.replies.pop_front().unwrap_or_else(|| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "no reply",
-            ))
-        })
-    }
-}
+// ---------------------------------------------------------------------------
+// Fail-closed typed voltage executor: moved to the `wire` leaf module
+// (re-exported above). The mock transport for host tests lives in
+// `tests/r05_support/s17_scripted_wire.rs` (ScriptedS17I2cWire) with
+// NACK/flush-16-zeros accounting per the f04 fake-transport report §3.2.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Safety admission + miner
@@ -917,8 +531,10 @@ const S17_HYBRID_WATCHDOG_BRINGUP_GRACE: Duration = Duration::from_secs(180);
 #[must_use = "S17 hybrid safety admission must be moved into exactly one mining lifecycle"]
 pub(crate) struct S17HybridSafetyAdmission {
     route_admission: crate::s17_hybrid_admission::S17HybridRouteAdmission,
+    runtime_profile: native::S17RuntimeProfile,
+    runtime_fabric: Option<native::S17FabricIdentity>,
     watchdog: SafetyWatchdogOwner,
-    watchdog_route_scope: HybridWatchdogRouteScope,
+    watchdog_route_scope: S17WatchdogRouteScope,
     liveness: SafetyLiveness,
     hardware_mutation_owner: HardwareMutationGateOwner,
 }
@@ -937,17 +553,29 @@ impl S17HybridSafetyAdmission {
             )
             .map_err(anyhow::Error::msg)?;
 
+        // Profile resolution is a desk-data prerequisite, so missing/invalid
+        // data is reported before a hardware watchdog can be armed.
+        let runtime_profile = native::S17RuntimeProfile::load(route_admission.board_target())?;
+        // Failed boot programming/missing clock visibility parks management
+        // before watchdog arm. Retain the exact observed file owners for run.
+        let runtime_fabric = native::S17FabricIdentity::open()?;
         let liveness = SafetyLiveness::default();
         let expected_liveness = Duration::from_secs_f32(config.thermal.pid_interval_s.max(1.0));
         let (mut watchdog, admission) = SafetyWatchdogOwner::start_before_energizing(
             &config.watchdog,
-            S17_HYBRID_WATCHDOG_BRINGUP_GRACE,
+            if crate::firstlight_census::operation_requested() {
+                S17_HYBRID_WATCHDOG_BRINGUP_GRACE.min(
+                    crate::firstlight_census::initialization_remaining()?,
+                )
+            } else {
+                S17_HYBRID_WATCHDOG_BRINGUP_GRACE
+            },
             expected_liveness,
             liveness.clone(),
         )
         .await?;
         let receipt = admission.require_armed("s17-hybrid")?;
-        let watchdog_route_scope = watchdog.claim_hybrid_route_scope().map_err(|error| {
+        let watchdog_route_scope = watchdog.claim_s17_route_scope().map_err(|error| {
             crate::runtime::safety_watchdog::watchdog_reset_pending_error(
                 "s17-hybrid",
                 format!("post-arm route-scope claim failed: {error:#}"),
@@ -963,6 +591,8 @@ impl S17HybridSafetyAdmission {
 
         Ok(Self {
             route_admission,
+            runtime_profile,
+            runtime_fabric: Some(runtime_fabric),
             watchdog,
             watchdog_route_scope,
             liveness,
@@ -976,13 +606,16 @@ impl S17HybridSafetyAdmission {
 }
 
 /// The BM1397 hybrid engine. Constructible only with the one-shot route +
-/// safety admissions; [`S17HybridMiner::run`] executes the desk-proven phase
-/// plan and fail-closes at the first unproven hardware boundary.
+/// safety admissions; [`S17HybridMiner::run`] executes native work/nonce/share
+/// processing and performs a checked shutdown on cancellation or fault.
 pub struct S17HybridMiner {
     safety_admission: Option<S17HybridSafetyAdmission>,
     config: DcentraldConfig,
     shutdown: CancellationToken,
     state_tx: Option<tokio::sync::watch::Sender<dcentrald_api::MinerState>>,
+    /// Configured exact native-route admission threaded from main so run's
+    /// recipe check sees the same authority as the pre-watchdog admission.
+    energize_opt_in: bool,
 }
 
 impl S17HybridMiner {
@@ -999,7 +632,14 @@ impl S17HybridMiner {
             config,
             shutdown,
             state_tx: None,
+            energize_opt_in: false,
         })
+    }
+
+    /// Thread the configured native-route admission adjudicated by main.
+    pub fn with_energize_opt_in(mut self, energize_opt_in: bool) -> Self {
+        self.energize_opt_in = energize_opt_in;
+        self
     }
 
     /// Attach a live `MinerState` publisher (dashboard), mirroring the BM1362
@@ -1012,20 +652,17 @@ impl S17HybridMiner {
         self
     }
 
-    /// Execute one hybrid lifecycle.
-    ///
-    /// Current (desk promotion) scope: re-adjudicate the recipe env, log the
-    /// full phase plan (geometry, ladder, UART plan, power order), and then
-    /// fail closed at the first boundary that has no live-proof wiring yet —
-    /// the chain UART/FPGA transport execution. The bench milestone replaces
-    /// that boundary with the real transport while keeping every invariant
-    /// above it unchanged.
+    /// Execute the native S17 lifecycle: exact profile and EEPROM identity,
+    /// serialized PIC/cooling/ASIC initialization, pool work and nonce/share
+    /// validation, then a watchdog-issued physical shutdown transaction.
     pub async fn run(mut self) -> Result<()> {
         let safety = self
             .safety_admission
             .take()
             .ok_or_else(|| anyhow!("s17-hybrid run() entered twice"))?;
-        let recipe = adjudicate_s17_recipe_from(S17RecipeEnv::from_env())?;
+        let mut recipe_env = S17RecipeEnv::from_env();
+        recipe_env.allow_energize = recipe_env.allow_energize || self.energize_opt_in;
+        let recipe = adjudicate_s17_recipe_from(recipe_env)?;
         if !recipe.allow_energize {
             return Err(anyhow!(
                 "s17-hybrid energize gate refused after watchdog arm — main.rs must adjudicate \
@@ -1033,52 +670,7 @@ impl S17HybridMiner {
             ));
         }
 
-        let board_target = safety.route_admission.board_target();
-        let chips = s17_chips_per_chain(board_target)
-            .ok_or_else(|| anyhow!("unknown S17 geometry for {board_target}"))?;
-        let interval = s17_addr_interval(board_target)
-            .ok_or_else(|| anyhow!("unknown S17 address stride for {board_target}"))?;
-
-        tracing::info!(
-            board_target,
-            hashboard = s17_hashboard_part_number(board_target),
-            chains = S17_CHAIN_COUNT,
-            chips_per_chain = chips,
-            addr_interval = interval,
-            bring_up_freq_mhz = S17_BRING_UP_FREQ_MHZ,
-            bring_up_voltage_cv = S17_BRING_UP_VOLTAGE_CV,
-            fast_uart_pll3 = recipe.fast_uart_pll3,
-            serial_work_dispatch = recipe.serial_work_dispatch,
-            power_up = ?S17_POWER_UP_ORDER
-                .iter()
-                .map(|step| step.label())
-                .collect::<Vec<_>>(),
-            "s17-hybrid: phase plan admitted"
-        );
-
-        // EEPROM write-denylist contract reference (rule #28): the denylist
-        // must be registered with the I2C service BEFORE any wire access. The
-        // transport binding itself is the bench milestone; keeping the
-        // contract asserted at the point where wire access would begin makes
-        // the invariant impossible to drop silently.
-        debug_assert_eq!(S17_EEPROM_WRITE_DENYLIST.len(), 8);
-        debug_assert_eq!(S17_EEPROM_WRITE_DENYLIST.first(), Some(&0x50));
-        debug_assert_eq!(S17_EEPROM_WRITE_DENYLIST.last(), Some(&0x57));
-
-        let _ = self.shutdown; // bench wiring: cancellation feeds teardown arms.
-        let _ = self.state_tx;
-        let _ = self.config;
-
-        Err(anyhow!(
-            "s17-hybrid live bring-up wiring pending bench milestone: chain UART/FPGA transport \
-             execution for {board_target} ({chips} chips/chain, stride {interval}) is not \
-             live-proven; refusing to energize (desk promotion, \
-             2026-08-27-antminer17-unlock-armada)"
-        ))
-        .with_context(|| {
-            "S17HybridMiner::run reached the unproven transport boundary with \
-             DCENT_AM2_S17_ALLOW_ENERGIZE set"
-        })
+        native::run(self, safety).await
     }
 }
 
@@ -1089,7 +681,128 @@ impl S17HybridMiner {
 mod tests {
     use super::*;
 
+    #[test]
+    fn s17_am2_baked_configs_validate_after_pool_and_start() {
+        for (target, model, chips) in [
+            ("am2-s17p", "s17pro", 48),
+            ("am2-s17plus", "s17+", 65),
+            ("am2-t17", "t17", 30),
+            ("am2-t17plus", "t17+", 44),
+            ("am2-s19pro", "s19pro", 114),
+        ] {
+            let text = if target == "am2-s19pro" {
+                include_str!("../../configs/dcentrald_s19pro_am2_baked_default.toml")
+            } else {
+                include_str!("../../configs/dcentrald_s17pro_am2_baked_default.toml")
+            };
+            let mut config: crate::config::DcentraldConfig = toml::from_str(text).unwrap();
+            config.mining.model = Some(model.into());
+            config.mining.serial_chip_count = Some(chips);
+            assert!(!config.mining.enabled);
+            assert!(!config.has_configured_pool());
+            config.validate().expect("idle image config");
+            config.pool.url = "stratum+tcp://127.0.0.1:3333".into();
+            config.pool.worker = "beta-test".into();
+            config.mining.enabled = true;
+            config.validate().expect("ordinary pool + Start is valid configuration");
+            assert!(config.mining_start_enabled());
+            if target == "am2-s19pro" {
+                assert_eq!(config.mining.voltage_mv, 12800);
+            } else {
+                assert_eq!(config.mining.frequency_mhz, 100);
+            }
+        }
+    }
+
+    #[test]
+    fn s17_native_route_requires_exact_target_carrier_and_chip() {
+        use crate::daemon_lifecycle::PlatformIdentitySnapshot;
+        use crate::runtime::hardware_info::OBSERVED_CONTROL_BOARD_ZYNQ_AM2;
+        use crate::s17_hybrid_admission::admit_s17_hybrid_route;
+        use dcentrald_common::AsicProtocolIdentity;
+
+        // Route composition is an independent prerequisite. Production startup
+        // must also join it with signed runtime-image admission before use.
+        for target in S17_HYBRID_BOARD_TARGETS {
+            let identity = PlatformIdentitySnapshot {
+                declared_board_target: Some(target.into()),
+                observed_board_target: None,
+                board_desc: dcentrald_common::BoardDesc::lookup(target),
+                declared_platform_marker: Some("zynq-bm3-am2".into()),
+                declared_subtype: None,
+                declared_psu_hardware_variant: None,
+                observed_control_board: OBSERVED_CONTROL_BOARD_ZYNQ_AM2.into(),
+            };
+            let route = admit_s17_hybrid_route(
+                &identity, crate::RuntimeDispatchKind::S17Hybrid,
+                Some(AsicProtocolIdentity::Bm1397),
+            ).expect("exact supported S17 route");
+            assert_eq!(route.board_target(), target);
+            for chip in [None, Some(AsicProtocolIdentity::Bm1362), Some(AsicProtocolIdentity::Bm1398)] {
+                assert!(admit_s17_hybrid_route(
+                    &identity, crate::RuntimeDispatchKind::S17Hybrid, chip,
+                ).is_err());
+            }
+            let mut wrong_carrier = identity.clone();
+            wrong_carrier.observed_control_board = "unobserved".into();
+            assert!(admit_s17_hybrid_route(
+                &wrong_carrier, crate::RuntimeDispatchKind::S17Hybrid,
+                Some(AsicProtocolIdentity::Bm1397),
+            ).is_err());
+            let mut wrong_target = identity;
+            wrong_target.declared_board_target = Some("am2-s17e".into());
+            assert!(admit_s17_hybrid_route(
+                &wrong_target, crate::RuntimeDispatchKind::S17Hybrid,
+                Some(AsicProtocolIdentity::Bm1397),
+            ).is_err());
+        }
+    }
+
     const SOURCE: &str = include_str!("s17_hybrid_mining.rs");
+
+    // ---- energize gate three-state admission (2026-09) -----------------
+
+    /// Missing native admission and no lab request refuse before watchdog arm.
+    #[test]
+    fn energize_gate_refuses_without_any_admission() {
+        let err = adjudicate_s17_energize_gate_from(S17RecipeEnv::default(), false)
+            .expect_err("no admission must refuse energize");
+        let msg = format!("{err}");
+        assert!(msg.contains("signed runtime image"), "{msg}");
+        assert!(msg.contains("DCENT_AM2_S17_ALLOW_ENERGIZE"), "{msg}");
+    }
+
+    /// An admitted native route keeps the conservative production recipe.
+    #[test]
+    fn energize_gate_admits_native_route() {
+        let recipe = adjudicate_s17_energize_gate_from(S17RecipeEnv::default(), true)
+            .expect("admitted native route enables energize");
+        assert!(recipe.allow_energize);
+        assert!(!recipe.skip_per_chip_init);
+        assert!(!recipe.trust_degraded_fw);
+    }
+
+    /// Native route admission is applied before the combination guards: the unit
+    /// still refuses the known-bad recipe combinations exactly like a bench
+    /// unit with DCENT_AM2_S17_ALLOW_ENERGIZE=1.
+    #[test]
+    fn energize_gate_native_route_still_hits_combination_guards() {
+        let flags = S17RecipeEnv {
+            skip_per_chip_init: true,
+            ..S17RecipeEnv::default()
+        };
+        let err = adjudicate_s17_energize_gate_from(flags, true)
+            .expect_err("native route + skip_per_chip_init must refuse");
+        assert!(format!("{err}").contains("SKIP_PER_CHIP_INIT"), "{err}");
+
+        let flags = S17RecipeEnv {
+            trust_degraded_fw: true,
+            ..S17RecipeEnv::default()
+        };
+        let err = adjudicate_s17_energize_gate_from(flags, true)
+            .expect_err("native route + trust_degraded_fw must refuse");
+        assert!(format!("{err}").contains("TRUST_DEGRADED_FW"), "{err}");
+    }
 
     // ---- geometry ------------------------------------------------------
 
@@ -1237,13 +950,32 @@ mod tests {
 
     #[test]
     fn pic16_g2b_command_frames_are_byte_exact() {
+        // Jig `set_PIC16F1704_voltage@22AB8` (S17/single-board-test.dec):
+        // LEN=5, ONE payload byte, ck16 = 5 + 0x10 + VV (BE). The dsPIC
+        // 3-byte form must NOT leak into the plus-family dialect.
         assert_eq!(
             pic16_g2b_set_voltage_frame(0x5A),
-            vec![0x55, 0xAA, 0x10, 0x5A]
+            vec![0x55, 0xAA, 0x05, 0x10, 0x5A, 0x00, 0x6F]
         );
-        assert_eq!(pic16_g2b_safe_off_frame(), vec![0x55, 0xAA, 0x15, 0x00]);
-        assert_eq!(pic16_g2b_heartbeat_frame(), vec![0x55, 0xAA, 0x16]);
-        assert_eq!(pic16_g2b_get_version_frame(), vec![0x55, 0xAA, 0x17]);
+        assert_ne!(
+            pic16_g2b_set_voltage_frame(0x5A),
+            dspic_g2a_set_voltage_frame(0x5A),
+            "G2a and G2b SET_VOLTAGE frames are distinct dialects"
+        );
+        // Jig `enable_PIC16F1704_dc_dc@22E6C` / heart_beat / get_version:
+        // same framed law, no-payload ops identical to the dsPIC class.
+        assert_eq!(
+            pic16_g2b_safe_off_frame(),
+            vec![0x55, 0xAA, 0x05, 0x15, 0x00, 0x00, 0x1A]
+        );
+        assert_eq!(
+            pic16_g2b_heartbeat_frame(),
+            vec![0x55, 0xAA, 0x04, 0x16, 0x00, 0x1A]
+        );
+        assert_eq!(
+            pic16_g2b_get_version_frame(),
+            vec![0x55, 0xAA, 0x04, 0x17, 0x00, 0x1B]
+        );
     }
 
     #[test]
@@ -1254,14 +986,16 @@ mod tests {
         assert_eq!(s17_pic_i2c_addr(0), 0x20);
         assert_eq!(s17_pic_i2c_addr(1), 0x21);
         assert_eq!(s17_pic_i2c_addr(2), 0x22);
-        // Settle/pacing per class (A1 §V3 500 ms; A3 §2 200 ms).
+        // Settle/pacing per class: both use the conservative 500 ms
+        // production settle (G2a corrections table; G2b jig paces 100 ms
+        // pre-read and production pacing is unheld — see wire leaf).
         assert_eq!(
             S17PicControllerClass::DsPicG2aFramed.settle_after_command(),
             Duration::from_millis(500)
         );
         assert_eq!(
-            S17PicControllerClass::Pic16G2bRaw.settle_after_command(),
-            Duration::from_millis(200)
+            S17PicControllerClass::Pic16G2bFramed.settle_after_command(),
+            Duration::from_millis(500)
         );
     }
 
@@ -1274,7 +1008,7 @@ mod tests {
         );
         assert_eq!(
             S17PicControllerClass::from_voltage_controller(VoltageControllerClass::Pic16F1704),
-            Some(S17PicControllerClass::Pic16G2bRaw)
+            Some(S17PicControllerClass::Pic16G2bFramed)
         );
         assert_eq!(
             S17PicControllerClass::from_voltage_controller(
@@ -1310,14 +1044,14 @@ mod tests {
     fn apw9_frame_is_byte_exact_with_0x89_plus_dac_checksum() {
         assert_eq!(
             apw9_set_dac_frame(156),
-            vec![0x55, 0xAA, 0x06, 0x83, 0x9C, 0x00, 0x01, 0x25] // CK = 0x89+0x9C = 0x125
+            vec![0x55, 0xAA, 0x06, 0x83, 0x9C, 0x00, 0x25, 0x01] // CK = 0x89+0x9C = 0x125
         );
         assert_eq!(
             apw9_set_dac_frame(0),
-            vec![0x55, 0xAA, 0x06, 0x83, 0x00, 0x00, 0x00, 0x89]
+            vec![0x55, 0xAA, 0x06, 0x83, 0x00, 0x00, 0x89, 0x00]
         );
         assert_eq!(S17_APW9_I2C_ADDR, 0x10);
-        assert_eq!(S17_APW9_DAC_SUBADDR, 0x02);
+        assert_eq!(S17_APW9_DAC_SUBADDR, 0x11);
     }
 
     #[test]
@@ -1499,11 +1233,15 @@ mod tests {
     }
 
     #[test]
-    fn recipe_guard_admits_the_proven_default_and_lab_combos() {
+    fn recipe_guard_admits_the_proven_default_and_refuses_unwired_knobs() {
         assert!(adjudicate_s17_recipe_from(env(false, false, false, false, false)).is_ok());
         assert!(adjudicate_s17_recipe_from(env(false, false, false, false, true)).is_ok());
-        assert!(adjudicate_s17_recipe_from(env(true, false, false, false, true)).is_ok());
-        assert!(adjudicate_s17_recipe_from(env(false, true, false, false, true)).is_ok());
+        // R05: the two never-wired opt-in knobs refuse instead of silently
+        // no-oping (the runtime discovers the divisor and uses the FPGA FIFO).
+        let err = adjudicate_s17_recipe_from(env(true, false, false, false, true)).unwrap_err();
+        assert!(err.to_string().contains("FAST_UART_PLL3"), "{err}");
+        let err = adjudicate_s17_recipe_from(env(false, true, false, false, true)).unwrap_err();
+        assert!(err.to_string().contains("SERIAL_WORK_DISPATCH"), "{err}");
     }
 
     #[test]
@@ -1528,9 +1266,9 @@ mod tests {
     #[test]
     fn set_voltage_is_deferred_until_five_stable_heartbeats() {
         let mut wire = MockS17PicWire::default();
-        wire.replies.push_back(ok(&[0x05, 0x17, 0x82, 0x00, 0x00]));
-        for _ in 0..10 {
-            wire.replies.push_back(ok(&[0x16, 0x01]));
+        wire.replies.push_back(ok(&[0x05, 0x17, 0x82, 0x00, 0x9E]));
+        for _ in 0..5 {
+            wire.replies.push_back(ok(&[6, 0x16, 1, 0, 0, 0x1D]));
         }
         wire.replies.push_back(ok(&[0x10, 0x01]));
         let mut executor = S17VoltageExecutor::new(S17PicControllerClass::DsPicG2aFramed, 1, wire);
@@ -1554,9 +1292,9 @@ mod tests {
     #[test]
     fn degraded_dspic_firmware_is_refused_unless_lab_trusted() {
         let mut wire = MockS17PicWire::default();
-        wire.replies.push_back(ok(&[0x05, 0x17, 0x86, 0x00, 0x00])); // fw=0x86
-        for _ in 0..8 {
-            wire.replies.push_back(ok(&[0x16, 0x01]));
+        wire.replies.push_back(ok(&[0x05, 0x17, 0x86, 0x00, 0xA2])); // fw=0x86
+        for _ in 0..5 {
+            wire.replies.push_back(ok(&[6, 0x16, 1, 0, 0, 0x1D]));
         }
         wire.replies.push_back(ok(&[0x10, 0x01]));
         let mut executor = S17VoltageExecutor::new(S17PicControllerClass::DsPicG2aFramed, 0, wire);
@@ -1572,9 +1310,9 @@ mod tests {
 
         // Lab-only override still works (read-path lab session).
         let mut wire = MockS17PicWire::default();
-        wire.replies.push_back(ok(&[0x05, 0x17, 0x86, 0x00, 0x00]));
-        for _ in 0..8 {
-            wire.replies.push_back(ok(&[0x16, 0x01]));
+        wire.replies.push_back(ok(&[0x05, 0x17, 0x86, 0x00, 0xA2]));
+        for _ in 0..5 {
+            wire.replies.push_back(ok(&[6, 0x16, 1, 0, 0, 0x1D]));
         }
         wire.replies.push_back(ok(&[0x10, 0x01]));
         let mut executor = S17VoltageExecutor::new(S17PicControllerClass::DsPicG2aFramed, 0, wire)
@@ -1589,12 +1327,12 @@ mod tests {
     #[test]
     fn pic16_loader_mode_is_always_refused_and_never_jumped() {
         let mut wire = MockS17PicWire::default();
-        wire.replies.push_back(ok(&[0xCC])); // loader-mode version reply
-        for _ in 0..8 {
-            wire.replies.push_back(ok(&[0x16]));
+        wire.replies.push_back(ok(&[0x05, 0x17, 0xCC, 0x00, 0xE8])); // loader-mode version reply
+        for _ in 0..5 {
+            wire.replies.push_back(ok(&[6, 0x16, 1, 0, 0, 0x1D]));
         }
         wire.replies.push_back(ok(&[0x10]));
-        let mut executor = S17VoltageExecutor::new(S17PicControllerClass::Pic16G2bRaw, 2, wire);
+        let mut executor = S17VoltageExecutor::new(S17PicControllerClass::Pic16G2bFramed, 2, wire);
         assert_eq!(
             executor.probe_firmware().unwrap(),
             S17PicFirmwareState::LoaderMode
@@ -1618,8 +1356,8 @@ mod tests {
     #[test]
     fn unprobed_firmware_refuses_voltage_even_after_heartbeats() {
         let mut wire = MockS17PicWire::default();
-        for _ in 0..8 {
-            wire.replies.push_back(ok(&[0x16, 0x01]));
+        for _ in 0..5 {
+            wire.replies.push_back(ok(&[6, 0x16, 1, 0, 0, 0x1D]));
         }
         let mut executor = S17VoltageExecutor::new(S17PicControllerClass::DsPicG2aFramed, 0, wire);
         for _ in 0..5 {
@@ -1634,9 +1372,9 @@ mod tests {
         // Exactly the probe + five heartbeat acks; the SET transaction then has
         // no scripted reply left, so the wire is silent (fail-closed teardown).
         let mut wire = MockS17PicWire::default();
-        wire.replies.push_back(ok(&[0x05, 0x17, 0x82, 0x00, 0x00]));
+        wire.replies.push_back(ok(&[0x05, 0x17, 0x82, 0x00, 0x9E]));
         for _ in 0..5 {
-            wire.replies.push_back(ok(&[0x16, 0x01]));
+            wire.replies.push_back(ok(&[6, 0x16, 1, 0, 0, 0x1D]));
         }
         let mut executor = S17VoltageExecutor::new(S17PicControllerClass::DsPicG2aFramed, 0, wire);
         executor.probe_firmware().unwrap();
@@ -1660,7 +1398,7 @@ mod tests {
     #[test]
     fn heartbeat_retry_is_bounded() {
         let mut wire = MockS17PicWire::default(); // no replies at all
-        let mut executor = S17VoltageExecutor::new(S17PicControllerClass::Pic16G2bRaw, 0, wire);
+        let mut executor = S17VoltageExecutor::new(S17PicControllerClass::Pic16G2bFramed, 0, wire);
         let err = executor.heartbeat_bounded(3).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
         assert_eq!(executor.wire.log.len(), 3, "exactly the bounded attempts");
@@ -1675,7 +1413,7 @@ mod tests {
 
         let mut wire = MockS17PicWire::default();
         wire.replies.push_back(ok(&[0x17, 0x82])); // PIC16 expects exactly 1 byte
-        let mut executor = S17VoltageExecutor::new(S17PicControllerClass::Pic16G2bRaw, 0, wire);
+        let mut executor = S17VoltageExecutor::new(S17PicControllerClass::Pic16G2bFramed, 0, wire);
         assert!(executor.probe_firmware().is_err());
     }
 }

@@ -89,11 +89,12 @@ cgminer_lan_writes = false
 metrics_require_auth = true
 
 [donation]
-# Voluntary 2% donation — supports open-source firmware development.
-# Our autotuner saves more than 2% in energy — the donation pays for itself.
-# Adjust 0-5% or set enabled = false to disable entirely.
-enabled = true
-percent = 2.0
+# DCENT_OS ships with ZERO mandatory fee. Optional transparent donation:
+# set enabled = true and percent 1-5 (time-sliced, always visible on the
+# dashboard, one tap off). The autotuner is unrelated to this setting and
+# does not offset it. Fund development: https://d-central.tech/fund/
+enabled = false
+percent = 0.0
 pool_url = "stratum+tcp://pool.d-central.tech:3333"
 worker = "DungeonMaster"
 password = "x"
@@ -119,9 +120,17 @@ active = "standard"
 # Per-chip frequency auto-tuning (TABS algorithm)
 # DCENTos tunes all 63 chips in parallel in ~15 seconds
 # VNish takes 3-6 hours doing it one chip at a time
-# Ships DISABLED. measurement_window_s=6 matches the crate default; 3s windows
-# caused false "0 nonces" readings. target_mode=efficiency is the home default.
-enabled = false
+# 3s windows caused false "0 nonces" readings; 6s matches the crate default.
+# target_mode=efficiency is the home default.
+# Autotune is ON by default (operator decision 2026-09-01). Safety contract:
+# the tuner REFUSES to tune blind — every frequency/voltage step validates
+# against the variant's BoardDesc cut-ladder + published envelope BEFORE
+# execution, and variants with unknown/missing envelope datums surface
+# NOT TUNABLE instead of tuning. First boot parks at the safe-stock
+# profile until health + fans + temp-in-envelope (+ ExperimentalOptIn
+# operator ack) pass. Voltage autotune on am2 stays behind the
+# DCENT_AM2_VOLTAGE_AUTOTUNE live-safety fence.
+enabled = true
 preset = "balanced_home"
 target_mode = "efficiency"       # hashrate | power | efficiency
 measurement_window_s = 6         # seconds per binary search step

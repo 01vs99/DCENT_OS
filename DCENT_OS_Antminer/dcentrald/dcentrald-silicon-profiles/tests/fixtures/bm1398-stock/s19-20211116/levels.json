@@ -1,0 +1,27 @@
+{
+	"miner": "S19",
+	"levels": [{
+		"frequency": 675,
+		"voltage": 1380
+	}, {
+
+		"frequency": 675,
+		"voltage": 1400
+	}, {
+
+		"frequency": 675,
+		"voltage": 1420
+	}, {
+
+		"frequency": 650,
+		"voltage": 1380
+	}, {
+
+		"frequency": 650,
+		"voltage": 1400
+	}, {
+
+		"frequency": 650,
+		"voltage": 1420
+	}]
+}

@@ -98,33 +98,43 @@ class S9SeLedgerConvergenceTests(unittest.TestCase):
         self.assertIn("NAND slot layout", block)
         self.assertNotIn("DMA physical base", block)
         constructor = board_desc.split("pub const fn am1_s9se()", 1)[1].split(
-            "pub const fn am1_t15()", 1
+            "pub const fn am1_s9k()", 1
         )[0]
-        for refusal in (
-            "chain_transport: ChainTransportKind::None",
-            "work_engine: WorkEngineKind::ManagementOnly",
-            "public_beta_install: false",
+        # Native C43 composition and generated SD media are now present. Keep
+        # generic construction, automatic mining and onboard installation gated.
+        for boundary in (
+            "lane: LifecycleLane::C43Bm1393Native",
+            "generic_construction: GenericConstruction::Refused",
+            "chain_transport: ChainTransportKind::StockFpga",
+            "work_engine: WorkEngineKind::FpgaWorkFifo",
+            "asic_protocol: AsicProtocolIdentity::Bm1393",
+            "slot_policy: SlotPolicy::LabGated",
+            "release_channel: ReleaseChannel::Beta",
+            "first_install_supported: false",
             "mining_default_enabled: false",
+            "enablement: C43_NATIVE_MEDIA_ENABLEMENT",
         ):
-            self.assertIn(refusal, constructor)
-        # 2026-08-29 packaging-lane wave: the S9 SE research-shell artifact
-        # now EXISTS (dcentos_am1_s9se_defconfig + per-board post-image), so
-        # the row claims the package — but under the PACKAGE-ONLY enablement:
-        # install stays Denied and every mutating operation still refuses.
-        # The pre-artifact pin was ZYNQ_RUNTIME_ONLY_ENABLEMENT with
-        # artifact_kind None; the artifact claim is the ONLY delta.
-        self.assertIn("enablement: ZYNQ_PACKAGE_ONLY_ENABLEMENT", constructor)
-        enablement = board_desc.split(
-            "const ZYNQ_PACKAGE_ONLY_ENABLEMENT", 1
-        )[1].split("};", 1)[0]
-        for refusal in (
+            self.assertIn(boundary, constructor)
+        media = board_desc.split("const C43_NATIVE_MEDIA_ENABLEMENT", 1)[1].split(
+            "};", 1
+        )[0]
+        for boundary in (
+            "external_media_mode: ExternalMediaMode::BootOnly",
+            "external_media_maturity: ExternalMediaMaturity::ArtifactGenerated",
+            "external_media_authorization: InstallAuthorization::LabOnly",
+            "..ZYNQ_PACKAGE_ONLY_ENABLEMENT",
+        ):
+            self.assertIn(boundary, media)
+        base = board_desc.split("const ZYNQ_PACKAGE_ONLY_ENABLEMENT", 1)[1].split(
+            "};", 1
+        )[0]
+        for boundary in (
             "install_authorization: InstallAuthorization::Denied",
             "recovery_maturity: RecoveryMaturity::NotImplemented",
             "artifact_kind: ArtifactKind::SysupgradeBundle",
             "artifact_maturity: ArtifactMaturity::Experimental",
-            "external_media_authorization: InstallAuthorization::Denied",
         ):
-            self.assertIn(refusal, enablement)
+            self.assertIn(boundary, base)
 
     def test_ci_runs_the_zero_match_safe_s9se_suite(self) -> None:
         workflow = (REPO_ROOT / ".github" / "workflows" / "dcentos-offline-gates.yml").read_text(

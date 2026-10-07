@@ -2,6 +2,8 @@
 # Exact held identity: fw-info model=s19jpro-plus/platform=aml/install_type=nand.
 BR2_TARGET_GENERIC_HOSTNAME="dcentos-s19jproplus"
 BR2_TARGET_GENERIC_ISSUE="DCENTos Experimental package for exact S19j Pro+ Amlogic identity"
-BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_DCENTOS_PATH)/board/common/rootfs-overlay $(BR2_EXTERNAL_DCENTOS_PATH)/board/amlogic/rootfs-overlay $(BR2_EXTERNAL_DCENTOS_PATH)/board/amlogic/am3-s19jproplus/rootfs-overlay"
-BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_DCENTOS_PATH)/board/amlogic/am3-s21/post-build.sh $(BR2_EXTERNAL_DCENTOS_PATH)/board/common/prune-runtime-research-tools.sh"
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_DCENTOS_PATH)/board/common/rootfs-overlay $(BR2_EXTERNAL_DCENTOS_PATH)/board/amlogic/rootfs-overlay $(BR2_EXTERNAL_DCENTOS_PATH)/board/amlogic/am3-bm1362-nopic/rootfs-overlay $(BR2_EXTERNAL_DCENTOS_PATH)/board/amlogic/am3-s19jproplus/rootfs-overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_DCENTOS_PATH)/board/amlogic/am3-bm1362-nopic/post-build.sh $(BR2_EXTERNAL_DCENTOS_PATH)/board/common/prune-runtime-research-tools.sh"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_DCENTOS_PATH)/board/amlogic/am3-s19jproplus/post-image.sh"
+
+BR2_PACKAGE_MTD_UBIATTACH=y

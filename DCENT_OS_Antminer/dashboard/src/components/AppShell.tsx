@@ -1,17 +1,13 @@
+import { fundContributeUrl } from '../utils/links';
+export { DCENT_FUND_CANONICAL_URL, fundContributeUrl } from '../utils/links';
 // AppShell — unified shell that replaces the 3-way mode conditional in App.tsx.
 // Provides hash routing sync, unified mode rendering, and page transition animation.
 
 import React, { useEffect } from 'react';
 import { useMinerStore } from '../store/miner';
-import { useHashRoute, setHash, normalizePageForMode } from '../utils/router';
+import { setHash, normalizePageForMode } from '../utils/router';
 import { StandardDashboard } from './standard/StandardDashboard';
-
-/** Canonical Fund / Donate / Support hub (Stripe + BTCPay). */
-export const DCENT_FUND_CANONICAL_URL = 'https://d-central.tech/fund/';
-
-export function fundContributeUrl(placement: string): string {
-  return `${DCENT_FUND_CANONICAL_URL}go?source=dcent_os&placement=${placement}`;
-}
+import { HelpPage } from './common/HelpPage';
 
 /** Cross-mode Fund chip for heater / hacker chrome (Standard uses Sidebar + KitTopBar). */
 export function FundSupportLink({ placement }: { placement: string }) {
@@ -68,9 +64,6 @@ export function AppShell() {
   const currentPage = useMinerStore(s => s.currentPage);
   const setCurrentPage = useMinerStore(s => s.setCurrentPage);
 
-  // Sync hash -> store (hashchange / popstate events)
-  useHashRoute(setCurrentPage);
-
   // Sync store -> hash (when currentPage changes programmatically)
   useEffect(() => {
     setHash(currentPage);
@@ -92,7 +85,9 @@ export function AppShell() {
   // The lazy (non-default) modes need a Suspense ancestor; Standard renders
   // synchronously so the fallback never shows on the default path.
   const content =
-    mode === 'heater' ? (
+    currentPage.split('/')[0] === 'help' ? (
+      <HelpPage />
+    ) : mode === 'heater' ? (
       <BasicDashboard />
     ) : mode === 'hacker' ? (
       <AdvancedDashboard />

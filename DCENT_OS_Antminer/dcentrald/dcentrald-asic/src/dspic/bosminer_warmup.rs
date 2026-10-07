@@ -472,12 +472,13 @@ fn parse_enabled_flag(value: Option<&str>) -> bool {
 }
 
 fn read_enabled_env(name: &str) -> bool {
-    let value = std::env::var(name).ok();
+    let value = dcentrald_common::lab_env::var(name).ok();
     parse_enabled_flag(value.as_deref())
 }
 
 pub fn am2_dspic_read_config_latch_enabled() -> bool {
-    read_enabled_env("DCENT_AM2_DSPIC_READ_CONFIG_LATCH")
+    let value = dcentrald_common::lab_env::var("DCENT_AM2_DSPIC_READ_CONFIG_LATCH").ok();
+    parse_enabled_flag(value.as_deref())
 }
 
 /// Returns the strace-derived prelude transaction list.
@@ -701,7 +702,7 @@ pub fn am2_pic_reset_and_start_app_strace_derived(i2c: &I2cServiceHandle, addr: 
     // Override: `DCENT_AM2_PIC_RESET_FORCE_REDO=1` (lab-only). Lets a
     // future agent or operator force the framed RESET even if the chip
     // is already in app mode. Default-OFF.
-    let force_redo = std::env::var("DCENT_AM2_PIC_RESET_FORCE_REDO")
+    let force_redo = dcentrald_common::lab_env::var("DCENT_AM2_PIC_RESET_FORCE_REDO")
         .map(|v| v.trim() == "1")
         .unwrap_or(false);
     if !force_redo {
@@ -891,7 +892,7 @@ pub fn am2_pic_reset_and_start_app_strace_derived_exclusive(
     // to fw=0x82, which would re-break a post-handoff mining chip. The probe is
     // a separate read transaction; it is NOT part of the atomic warmup block.
     // Override: `DCENT_AM2_PIC_RESET_FORCE_REDO=1` (lab only).
-    let force_redo = std::env::var("DCENT_AM2_PIC_RESET_FORCE_REDO")
+    let force_redo = dcentrald_common::lab_env::var("DCENT_AM2_PIC_RESET_FORCE_REDO")
         .map(|v| v.trim() == "1")
         .unwrap_or(false);
     if !force_redo {
@@ -1586,7 +1587,7 @@ pub fn am2_dspic_postjump_heartbeat_keepalive_enabled() -> bool {
 /// helper is ONLY consulted when the keep-alive is already active, so the
 /// default-OFF byte-identical contract is unaffected.
 pub fn am2_dspic_keepalive_interval_ms() -> u64 {
-    let value = std::env::var("DCENT_AM2_DSPIC_KEEPALIVE_INTERVAL_MS").ok();
+    let value = dcentrald_common::lab_env::var("DCENT_AM2_DSPIC_KEEPALIVE_INTERVAL_MS").ok();
     parse_keepalive_interval_ms(value.as_deref())
 }
 
@@ -1942,7 +1943,7 @@ pub fn am2_dspic_lm75_passthrough_warmup(i2c: &I2cServiceHandle, addr: u8) -> Re
 /// Source:
 /// fallback rung 2.
 pub fn am2_dspic_jump_reverify_max() -> u32 {
-    let value = std::env::var("DCENT_AM2_DSPIC_JUMP_REVERIFY_MAX").ok();
+    let value = dcentrald_common::lab_env::var("DCENT_AM2_DSPIC_JUMP_REVERIFY_MAX").ok();
     parse_reverify_max(value.as_deref())
 }
 
@@ -2183,7 +2184,7 @@ pub const RESET_JUMP_REVERIFY_DEFAULT_DWELL_MS: u64 = 1000;
 /// `a lab unit`-fingerprinted RESET→JUMP path; the fleet/handoff/legacy paths never call
 /// it.
 pub fn am2_dspic_reset_dwell_ms() -> u64 {
-    let value = std::env::var("DCENT_AM2_DSPIC_RESET_DWELL_MS").ok();
+    let value = dcentrald_common::lab_env::var("DCENT_AM2_DSPIC_RESET_DWELL_MS").ok();
     parse_reset_dwell_ms(value.as_deref())
 }
 
@@ -2217,7 +2218,7 @@ fn parse_reset_dwell_ms(value: Option<&str>) -> u64 {
 ///
 /// Source: .
 pub fn am2_dspic_reset_jump_reverify_max() -> u32 {
-    let value = std::env::var("DCENT_AM2_DSPIC_RESET_JUMP_REVERIFY_MAX").ok();
+    let value = dcentrald_common::lab_env::var("DCENT_AM2_DSPIC_RESET_JUMP_REVERIFY_MAX").ok();
     parse_reverify_max(value.as_deref())
 }
 

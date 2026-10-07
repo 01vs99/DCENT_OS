@@ -1,0 +1,2 @@
+# BM1396 beta SSH uses operator-provisioned keys. Dashboard passwords are separate.
+DROPBEAR_ARGS="-s"

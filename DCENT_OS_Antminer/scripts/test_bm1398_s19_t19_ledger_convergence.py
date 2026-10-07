@@ -27,7 +27,7 @@ EXPECTED_MODULES = {"bm1398_nbp1901_stub"}
 EXPECTED_TESTS = {
     "Linux: bash ../scripts/run_filtered_cargo_test.sh -p dcentrald-common --lib -- bm1398_ (11/11)",
     "Linux: bash ../scripts/run_filtered_cargo_test.sh -p dcentrald-api-types --lib -- bm1398_protocol (18/18)",
-    "Linux: bash ../scripts/run_filtered_cargo_test.sh -p dcentrald --bin dcentrald -- bm1398_ (11/11)",
+    "Linux: bash ../scripts/run_filtered_cargo_test.sh -p dcentrald --bin dcentrald -- bm1398_ (16/16)",
     "Linux: cargo +1.90.0 test -p dcentrald-asic drivers::bm1398 --lib (6/6)",
     "Linux: cargo +1.90.0 test -p dcentrald-asic chain::tests::bm1398 --lib (3/3)",
     "Linux: cargo +1.90.0 test -p dcentrald-silicon-profiles bm1398 --lib (30/30 data-only)",
@@ -101,9 +101,30 @@ class Bm1398S19T19LedgerConvergenceTests(unittest.TestCase):
         self.assertIn("ChipRegistry::with_experimental_driver(bm1398::CHIP_ID)", registry)
         self.assertIn("if is_bm1398 && !passthrough", serial)
         self.assertIn(
-            "bm1398_native_route_fails_closed_before_optional_hardware_observation",
+            "bm1398_native_route_consumes_exact_admission_before_generic_hardware",
             serial,
         )
+        # The old generic protocol stub still refuses. The separate native
+        # owner consumes exact admission before generic serial observation.
+        production = serial.split("\n#[cfg(test)]\nmod tests {", 1)[0]
+        run = production.split("pub async fn run(&mut self)", 1)[1]
+        branch_start = run.index("if is_bm1398 && !passthrough {")
+        dispatch = run.index("return crate::s19_bm1398_native_mining::run(", branch_start)
+        generic = run.index("let nopic = if s19k_install_custody_safeoff")
+        self.assertLess(dispatch, generic)
+        admission = "".join(run[branch_start:dispatch].split())
+        self.assertIn("runtime_dispatch_admission.take()", admission)
+        # Re-pinned 2026-09-12 (R07 wave-1 landing, V01-confirmed): the handoff
+        # admits the exact BM1398 FAMILY (am2-s19pro / am2-s19 / am2-t19) via
+        # the platform profile table; per-bin geometry/ladders live in
+        # s19_bm1398_platform and are pinned by the r07 suites. The identity
+        # requirement is unchanged and stays pinned.
+        self.assertIn(
+            "crate::s19_bm1398_native_mining::platform::Bm1398Platform::from_admission("
+            "admission.board_target(),admission.identity(),).is_ok()",
+            admission,
+        )
+        self.assertIn("admission.identity()==dcentrald_common::AsicProtocolIdentity::Bm1398", admission)
 
     def test_workflow_runs_all_three_family_suites_with_zero_match_guards(self) -> None:
         workflow = (

@@ -1,0 +1,68 @@
+# Exact T17e / 78-chip BM1396 cold-300 source profile.
+# Mining stays disabled until pool setup and native runtime admission.
+# Support development: https://d-central.tech/fund/
+[general]
+hostname = "dcentos-t17e"
+log_level = "info"
+
+[pool]
+url = ""
+worker = ""
+password = "x"
+protocol = "sv1"
+
+[mining]
+enabled = false
+model = "t17e"
+frequency_mhz = 300
+voltage_mv = 20000
+version_rolling = false
+passthrough = false
+suggest_difficulty = 256
+serial_chip_count = 78
+serial_chip_type = "BM1396"
+
+[power]
+mode = "bypass"
+target_watts = 0
+
+[thermal]
+target_temp_c = 55
+hot_temp_c = 65
+dangerous_temp_c = 75
+fan_min_pwm = 30
+fan_max_pwm = 30
+
+[api]
+cgminer_port = 4028
+http_port = 8080
+websocket = true
+cgminer_bind_lan = true
+cgminer_lan_writes = false
+metrics_require_auth = true
+
+[donation]
+enabled = false
+percent = 0.0
+pool_url = ""
+worker = ""
+password = "x"
+cycle_duration_s = 3600
+
+[watchdog]
+enabled = true
+kick_interval_s = 5
+
+[hash_on_disconnect]
+enabled = false
+
+[mode]
+active = "standard"
+
+[autotuner]
+enabled = false
+
+[led]
+enabled = true
+heartbeat_on_ms = 100
+heartbeat_off_ms = 900

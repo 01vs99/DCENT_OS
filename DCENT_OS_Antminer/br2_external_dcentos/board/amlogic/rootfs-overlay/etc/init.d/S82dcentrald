@@ -22,36 +22,15 @@ MUTATION_POLICY_FILE="/etc/dcentos/mutation_policy"
 MUTATION_POLICY_HELPER="/usr/libexec/dcentos/mutation-policy.sh"
 
 require_runtime_authority() {
-    IMAGE_PLATFORM=$(cat /etc/dcentos/platform 2>/dev/null || true)
-    IMAGE_TARGET=$(cat /etc/dcentos/board_target 2>/dev/null || true)
-    case "$IMAGE_PLATFORM:$IMAGE_TARGET" in
-        am3-aml-s19k:*|*:am3-s19k|*:am3-s19kpro|*:am3-aml-s19kpro)
-            if [ ! -r "$MUTATION_POLICY_HELPER" ]; then
-                echo "  [FAIL] S19k mutation-policy helper is missing; refusing hardware lifecycle action"
-                return 1
-            fi
-            . "$MUTATION_POLICY_HELPER"
-            if ! dcent_mutation_policy_has "$MUTATION_POLICY_FILE" daemon-hardware; then
-                echo "  [FAIL] S19k daemon-hardware capability is missing or insecure; refusing hardware lifecycle action"
-                return 1
-            fi
-            return 0
-            ;;
-    esac
-    if [ -e "$MUTATION_POLICY_FILE" ]; then
-        MUTATION_POLICY=$(cat "$MUTATION_POLICY_FILE" 2>/dev/null || true)
-        [ "$MUTATION_POLICY" = hardware-enabled ] || {
-            echo "  [FAIL] mutation_policy=$MUTATION_POLICY; refusing hardware lifecycle action"
-            return 1
-        }
+    if [ ! -r "$MUTATION_POLICY_HELPER" ]; then
+        echo "  [FAIL] mutation-policy helper is missing; refusing hardware lifecycle action"
+        return 1
     fi
-    case "$IMAGE_PLATFORM:$IMAGE_TARGET" in
-        am3-aml-t21:*|*:am3-t21|am3-aml-s21xp:*|*:am3-s21xp|\
-        am3-aml-s19xp:*|*:am3-s19xp|am3-aml-s19jxp:*|*:am3-s19jxp)
-            echo "  [FAIL] target remains management-only; refusing hardware lifecycle action"
-            return 1
-            ;;
-    esac
+    . "$MUTATION_POLICY_HELPER"
+    if ! dcent_mutation_policy_has "$MUTATION_POLICY_FILE" daemon-hardware; then
+        echo "  [FAIL] daemon-hardware capability is missing or insecure; refusing hardware lifecycle action"
+        return 1
+    fi
 }
 
 acquire_operation_lock() {
@@ -83,11 +62,14 @@ detect_platform() {
     case "$IMAGE_PLATFORM:$IMAGE_TARGET" in
         am3-aml-s19jpro:am3-s19jpro-aml|\
         am3-aml-s19k:am3-s19k|\
+        am3-aml-s19kpro:am3-s19kpro|\
         am3-aml-s21:am3-s21|\
         am3-aml-s21pro:am3-s21pro|\
         am3-aml-s21xp:am3-s21xp|\
         am3-aml-s19xp:am3-s19xp|\
-        am3-aml-s19jxp:am3-s19jxp)
+        am3-aml-s19jxp:am3-s19jxp|\
+        am3-aml-s19jproa:am3-s19jproa|\
+        am3-aml-s19jproplus:am3-s19jproplus)
             echo "amlogic"
             return
             ;;
@@ -177,7 +159,7 @@ fan_safety_override() {
                 # Amlogic A113D sysfs PWM: period=100000ns (10kHz). PWM 30 of 100
                 # is duty=30000ns. Matches Rust runtime helper
                 # amlogic_pwm_percent_to_duty_ns(pwm=30, period=100000) = 30000.
-                # NEVER above PWM 30 — see feedback_fan_max_30pwm /
+                # NEVER above PWM 30 â€” see feedback_fan_max_30pwm /
                 # feedback_fan_never_blast.
                 for channel in 0 1; do
                     duty=/sys/class/pwm/pwmchip0/pwm${channel}/duty_cycle
@@ -198,7 +180,7 @@ fan_safety_override() {
             fi
             ;;
         beaglebone)
-            # AM335x BB carrier (S19j Pro 3-board variant) — 4 fans on sysfs PWM.
+            # AM335x BB carrier (S19j Pro 3-board variant) â€” 4 fans on sysfs PWM.
             # Stock S70cgminer drove all groups in lockstep; we mirror the same
             # PWM=30 (30000ns / 100000ns period) across every exported channel.
             # Both LuxOS/DCENT_OS pwmchip0+pwmchip2 paths and Bitmain stock
@@ -219,7 +201,7 @@ fan_safety_override() {
             # branch that does NOT execute on these boards. The canonical AM2
             # fan-hold fix (persistent `dcentrald --hold-fan` custodian, since a
             # bare --set-fan one-shot lets the AM2 board revert fans to full
-            # speed — ) lives
+            # speed â€” ) lives
             # in the board/zynq/* overlays that actually ship to AM2 units. This
             # branch is intentionally left as the simple one-shot because it is
             # unreachable on this overlay; do not duplicate the custodian helper
@@ -244,7 +226,7 @@ verify_amlogic_boot_safe_state() {
         echo "$(date): WARN: checked Amlogic board owner is missing" >> "$LOGFILE"
         return 1
     }
-    "$BOARD_SETUP" verify-safe-state >> "$LOGFILE" 2>&1
+    "$BOARD_SETUP" verify-start-safe-state >> "$LOGFILE" 2>&1
 }
 
 emergency_hardware_safe_state() {
@@ -262,6 +244,29 @@ emergency_hardware_safe_state() {
     esac
 }
 
+restart_after_software_closeout() {
+    "$SCRIPT" stop || return $?
+    # The supervisor consumes the exact daemon proof after wait(2), then
+    # removes only its unresolved marker. Stop returning zero is insufficient.
+    RESTART_ATTEMPTS=10
+    while [ "$RESTART_ATTEMPTS" -gt 0 ]; do
+        if RESTART_STATE=$(/bin/sh "$SESSION_LATCH_HELPER" status); then
+            RESTART_STATUS=0
+        else
+            RESTART_STATUS=$?
+        fi
+        case "$RESTART_STATUS:$RESTART_STATE" in
+            0:clear) "$SCRIPT" start; return $? ;;
+            1:unresolved|3:admission-locked) ;;
+            *) echo "  [FAIL] Restart refused: supervisor disposition is $RESTART_STATE"; return 1 ;;
+        esac
+        RESTART_ATTEMPTS=$((RESTART_ATTEMPTS - 1))
+        [ "$RESTART_ATTEMPTS" -eq 0 ] || sleep 1
+    done
+    echo "  [FAIL] Restart refused: exact orderly software closeout was not consumed"
+    return 1
+}
+
 case "$1" in
     start|stop|restart|safety)
         require_runtime_authority || exit 1
@@ -270,6 +275,28 @@ esac
 
 case "$1" in
     start)
+        # Only start requires storage readiness. Stop/safety must remain
+        # available if persistence disappears while the hardware owner runs.
+        if [ "$(cat /etc/dcentos/board_target 2>/dev/null)" = am3-s19jpro-aml ]; then
+            /usr/bin/python3 -I /usr/libexec/dcentos/classic-aml-storage.py check || {
+                echo "  [FAIL] Classic AML persistent namespace is not ready"
+                exit 1
+            }
+        fi
+        case "$(cat /etc/dcentos/board_target 2>/dev/null)" in
+            am3-s19jproa|am3-s19jproplus)
+                /usr/bin/python3 -I /usr/libexec/dcentos/bm1362-nopic-storage.py check || {
+                    echo "  [FAIL] A126/Plus120 persistent namespace is not ready"
+                    exit 1
+                }
+                ;;
+            am3-s19kpro)
+                /usr/bin/python3 -I /usr/libexec/dcentos/s19kpro-nopic-storage.py check || {
+                    echo "  [FAIL] S19k Pro persistent namespace is not ready"
+                    exit 1
+                }
+                ;;
+        esac
         acquire_operation_lock || exit 1
         PLATFORM=$(detect_platform)
         [ "$PLATFORM" != unknown ] || {
@@ -458,8 +485,8 @@ case "$1" in
         ;;
 
     restart)
-        echo "  [FAIL] Amlogic restart is refused before stop: durable electrical disposition/readmission is not yet qualified"
-        exit 1
+        restart_after_software_closeout
+        exit $?
         ;;
 
     safety)

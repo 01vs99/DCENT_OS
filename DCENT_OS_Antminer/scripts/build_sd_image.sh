@@ -53,8 +53,9 @@ FIRMWARE_DIR="$(dirname "$SCRIPT_DIR")"
 PROJECT_ROOT="$(dirname "$FIRMWARE_DIR")"
 WORKSPACE_ROOT="$(dirname "$PROJECT_ROOT")"
 EXTRACTIONS_DIR="$PROJECT_ROOT/extractions/s9"
-BUILDROOT_OUTPUT="$FIRMWARE_DIR/buildroot/output/images"
-SD_OUTPUT_DIR="$BUILDROOT_OUTPUT/sd_card"
+BUILDROOT_OUTPUT="${DCENTOS_BUILDROOT_IMAGES:-$FIRMWARE_DIR/buildroot/output/images}"
+SD_OUTPUT_DIR="${DCENTOS_SD_OUTPUT_DIR:-$BUILDROOT_OUTPUT/sd_card}"
+S9_BOARD_TARGET="${DCENTOS_S9_BOARD_TARGET:-am1-s9}"
 
 # Fallback extraction location used by this workspace today
 KB_EXTRACTIONS_DIR="$WORKSPACE_ROOT/knowledge-base/extractions/s9"
@@ -172,6 +173,17 @@ for arg in "$@"; do
         *)             echo "Unknown option: $arg"; usage; exit 1 ;;
     esac
 done
+
+# Exact sibling builders stage a separate rootfs and select only their own
+# identity. Existing S9 invocations retain their original input/output paths.
+case "$S9_BOARD_TARGET" in
+    am1-s9) S9_MODEL_NAME=S9 ;;
+    am1-s9i|am1-s9j)
+        $STANDALONE || error "$S9_BOARD_TARGET supports standalone SD beta only"
+        S9_MODEL_NAME="S9${S9_BOARD_TARGET#am1-s9}"
+        ;;
+    *) error "Unsupported native BM1387 board target: $S9_BOARD_TARGET" ;;
+esac
 
 # =============================================================================
 # Phase 1: Validate Prerequisites
@@ -709,9 +721,9 @@ if [ -f "$SD_OUTPUT_DIR/dcentos-sd.img" ]; then
     S9_SD_IMAGE_SIZE=$(stat -c%s "$S9_SD_IMAGE" 2>/dev/null || stat -f%z "$S9_SD_IMAGE")
     S9_SD_IMAGE_SHA256=$(sha256sum "$S9_SD_IMAGE" | awk '{print $1}')
     if $STANDALONE; then
-        S9_SD_TARGET="am1-s9-sd-standalone"
+        S9_SD_TARGET="$S9_BOARD_TARGET-sd-standalone"
     else
-        S9_SD_TARGET="am1-s9-sd-piggyback"
+        S9_SD_TARGET="$S9_BOARD_TARGET-sd-piggyback"
     fi
     s9_sd_artifact_bool() {
         if [ -f "$SD_OUTPUT_DIR/$1" ]; then
@@ -749,7 +761,8 @@ EOF
 fi
 
 cat > "$SD_OUTPUT_DIR/BUILD_INFO.txt" << EOF
-=== DCENT_OS S9 SD Card Boot ===
+=== DCENT_OS $S9_MODEL_NAME SD Card Boot ===
+Board target:     $S9_BOARD_TARGET
 Build date:       $BUILD_DATE
 Build mode:       $(if $STANDALONE; then echo 'Standalone SD boot (default)'; else echo 'BraiinsOS compatibility piggyback'; fi)
 Disk image:       $(if $DISK_IMAGE; then echo 'Yes'; else echo 'No'; fi)
@@ -782,12 +795,11 @@ $(if $STANDALONE; then
     echo "MODE: Standalone SD boot (default)"
     echo "  1. Format SD card as FAT32 (or use dcentos-sd.img with dd/balenaEtcher)"
     echo "  2. Copy BOOT.BIN, uEnv.txt, system.bit, uImage, devicetree.dtb, uramdisk.image.gz to SD root"
-    echo "  3. Direct SD path: power off S9, move JP4 LEFT, insert SD, power on"
-    echo "  4. Piggyback (BraiinsOS-NAND S9 only): fw_setenv sd_boot yes ; insert SD ; reboot"
-    echo "     (the old 'keep JP4 in NAND + insert SD' fallback was removed -- 2014.01 nandboot never reads SD)"
-    echo "  5. Wait ~60-90 seconds"
-    echo "  6. Keep the SD card inserted while using DCENT_OS"
-    echo "  7. SSH: root@<miner_ip> (password: dcentral)"
+    echo "  3. Power off the $S9_MODEL_NAME, move JP4 LEFT, insert SD, power on"
+    echo "  4. Wait ~60-90 seconds"
+    echo "  5. Keep the SD card inserted while using DCENT_OS"
+    echo "  6. Open http://<miner_ip> and complete dashboard setup"
+    echo "  7. SSH uses separately provisioned access; there is no release default password"
     echo ""
     echo "This image is SD-boot only; removing the SD card stops DCENT_OS from booting."
     echo "To revert: power off, remove SD, restore JP4 to RIGHT (NAND boot)"
@@ -800,7 +812,8 @@ else
     echo "  5. Reboot: ssh root@<miner_ip> 'reboot'"
     echo "  6. Wait ~60 seconds"
     echo "  7. Keep the SD card inserted while using DCENT_OS"
-    echo "  8. SSH: root@<miner_ip> (password: dcentral)"
+    echo "  8. Open http://<miner_ip> and complete dashboard setup"
+    echo "     SSH uses the access provisioned for this image"
     echo ""
     echo "This path is still SD-boot only; removing the SD card stops DCENT_OS from booting."
     echo "To revert: ssh root@<ip> 'fw_setenv sd_boot' OR remove SD and reboot"
@@ -860,10 +873,8 @@ if $STANDALONE; then
     echo "     Or flash dcentos-sd.img directly with dd/balenaEtcher"
     echo "  2. Flash ONLY with raw/DD mode (Rufus DD / Etcher / dd) -- a Windows"
     echo "     'format this disk?' click destroys the squashfs partition."
-    echo "  3. Direct SD path: power off the S9, move JP4 LEFT, insert SD, power on"
-    echo "  4. Piggyback (BraiinsOS-NAND S9 only): fw_setenv sd_boot yes ; insert SD ; reboot"
-    echo "     (the old 'keep JP4 in NAND + insert SD' fallback does NOT work)"
-    echo "  5. Wait ~60-90 seconds for boot"
+    echo "  3. Power off the $S9_MODEL_NAME, move JP4 LEFT, insert SD, power on"
+    echo "  4. Wait ~60-90 seconds for boot"
     echo "  5. Keep the SD card inserted while using DCENT_OS"
     echo "     Removing the SD card stops DCENT_OS from booting"
 else
@@ -879,7 +890,8 @@ else
     echo "     Removing the SD card stops DCENT_OS from booting"
 fi
 echo ""
-echo -e "  SSH:  ${GREEN}ssh root@<miner_ip>${NC}  (password: ${BOLD}dcentral${NC})"
+echo -e "  Setup: ${GREEN}http://<miner_ip>${NC}"
+echo "  SSH: use separately provisioned access; there is no release default password"
 echo ""
 echo -e "  Write to SD card: ${CYAN}firmware/scripts/write_sd_card.sh${NC}"
 echo ""

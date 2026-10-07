@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# DCENTos post-build script - am3-s21xp management-only evidence target
+# DCENTos post-build script - am3-s21xp exact native BM1370 hardware beta
 #
 
 set -e
@@ -149,15 +149,15 @@ echo "am3-aml-s21xp"  > "${TARGET_DIR}/etc/dcentos/board_family"
 echo "am3-s21xp"      > "${TARGET_DIR}/etc/dcentos/board_target"
 echo "am3-aml-s21xp"  > "${TARGET_DIR}/etc/dcentos/platform"
 
+python3 "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/provision_runtime_policy.py" "$TARGET_DIR"
 MUTATION_POLICY=$(tr -d ' \t\r\n' < "${TARGET_DIR}/etc/dcentos/mutation_policy" 2>/dev/null || true)
-if [ "$MUTATION_POLICY" != management-only ]; then
-    echo "DCENTos post-build (am3-s21xp): ERROR: missing management-only mutation policy" >&2
+if ! grep -Fx daemon-hardware "${TARGET_DIR}/etc/dcentos/mutation_policy" >/dev/null; then
+    echo "DCENTos post-build (am3-s21xp): ERROR: missing exact native hardware mutation policy" >&2
     exit 1
 fi
 
-# Do not stage shared AM3 flash geometry or the base-S21 revert helper. Exact
-# S21 XP production UART/PIC evidence contradicts that inherited platform
-# composition, and no S21 XP storage/recovery route is admitted.
+# Onboard flash geometry/recovery remains a separate target-specific contract.
+# Native runtime admission does not stage a sibling firmware writer.
 
 #  W12-B: also ship the stock-Bitmain manifest (parity with
 # zynq board post-build). The daemon probes /etc/dcentos/ first.
@@ -185,6 +185,8 @@ fi
 echo "DCENTos post-build (am3-s21xp): directories, permissions, and board identity set."
 
 # Production-readiness matrix §7 #1 (public-image trust boundary): release-image
-# marker + first-boot SSH posture when DCENT_RELEASE_IMAGE=1. NO-OP on DEV/LAB.
+# marker + first-boot SSH posture on the RELEASE posture — the DEFAULT since
+# WS-A4 (2026-09-01; canonical resolution scripts/lib/release_posture.sh).
+# NO-OP on an explicit DEV/LAB opt-out (DCENT_DEV_IMAGE=1).
 . "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/release_image_provision.sh"
 dcent_provision_release_image "$TARGET_DIR" "am3-s21xp"

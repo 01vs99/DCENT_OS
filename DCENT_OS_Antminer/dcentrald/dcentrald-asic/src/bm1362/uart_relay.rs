@@ -289,8 +289,8 @@ pub const ACCEPT_INFERRED_SOC_REGS_ENV_DEPRECATED: &str = "DCENT_CV1835_ACCEPT_I
 /// in every shipping configuration — the function below is then a
 /// byte-identical no-op vs. today's "not wired" behaviour.
 fn inferred_soc_regs_unlocked() -> bool {
-    let current = std::env::var(ACCEPT_INFERRED_SOC_REGS_ENV).ok();
-    let deprecated = std::env::var(ACCEPT_INFERRED_SOC_REGS_ENV_DEPRECATED).ok();
+    let current = dcentrald_common::lab_env::var(ACCEPT_INFERRED_SOC_REGS_ENV).ok();
+    let deprecated = dcentrald_common::lab_env::var(ACCEPT_INFERRED_SOC_REGS_ENV_DEPRECATED).ok();
     inferred_soc_regs_unlocked_from_values(current.as_deref(), deprecated.as_deref())
 }
 

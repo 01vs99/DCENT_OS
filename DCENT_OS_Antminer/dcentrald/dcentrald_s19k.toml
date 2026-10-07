@@ -86,7 +86,11 @@ enabled = true
 active = "standard"
 
 [autotuner]
-enabled = false
+# Autotune is ON by default (operator decision 2026-09-01). The variant
+# envelope guard refuses NotTunable variants (refuse, never tune blind);
+# the s19k serial lane has no tuner runtime yet, so this is the config
+# posture, not a tuning claim.
+enabled = true
 min_freq_mhz = 250
 max_freq_mhz = 650
 

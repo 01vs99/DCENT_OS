@@ -109,7 +109,7 @@ def metadata_path_maps(values: List[str]) -> List[tuple]:
             fail("metadata path maps must use CONTAINER_PREFIX=HOST_PREFIX")
         container_text, host_text = value.split("=", 1)
         container = pathlib.PurePosixPath(container_text)
-        host = pathlib.Path(host_text).resolve(strict=True)
+        host = pathlib.Path(host_path_text(host_text)).resolve(strict=True)
         if not container.is_absolute() or not host.is_dir():
             fail("metadata path maps require an absolute container prefix and host directory")
         mappings.append((container, host))
@@ -374,9 +374,64 @@ def parser() -> argparse.ArgumentParser:
     return top
 
 
+def host_path_text(value: str) -> str:
+    """Rewrite Git-Bash (MSYS) drive paths (/d/dir) to native Windows form.
+
+    Host release steps pass paths through shell variables. Plain flag values
+    are auto-converted by MSYS when it launches native Python, but paths
+    embedded in ``key=value`` arguments (the metadata path maps) bypass that
+    conversion and fail strict resolve with WinError 3 on Windows hosts
+    (producer run drop1-20260916-cyg3sjwi, both cohorts). POSIX and native
+    inputs are returned unchanged; on non-Windows hosts this is the identity.
+    """
+    if os.name != "nt" or not isinstance(value, str):
+        return value
+    text = value
+    if text.startswith("\\\\?\\UNC\\"):
+        text = "\\\\" + text[8:]
+    elif text.startswith("//?/UNC/"):
+        text = "//" + text[8:]
+    else:
+        for prefix in ("\\\\?\\", "//?/"):
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+                break
+    if (
+        len(text) >= 2
+        and text[0] == "/"
+        and text[1].isascii()
+        and text[1].isalpha()
+        and (len(text) == 2 or text[2] == "/")
+    ):
+        return text[1].upper() + ":/" + text[3:]
+    return text
+
+
+def normalize_host_path_args(args: argparse.Namespace) -> argparse.Namespace:
+    for field in (
+        "workspace",
+        "source_root",
+        "metadata_json",
+        "artifact",
+        "artifact_dir",
+        "output",
+        "inventory",
+    ):
+        value = getattr(args, field, None)
+        if isinstance(value, str):
+            setattr(args, field, host_path_text(value))
+    if getattr(args, "metadata_path_map", None):
+        args.metadata_path_map = [
+            "=".join((key, host_path_text(mapped)))
+            for entry in args.metadata_path_map
+            for key, _, mapped in (entry.partition("="),)
+        ]
+    return args
+
+
 def main() -> int:
     try:
-        args = parser().parse_args()
+        args = normalize_host_path_args(parser().parse_args())
         args.function(args)
         return 0
     except (InventoryError, KeyError, TypeError, OSError) as error:

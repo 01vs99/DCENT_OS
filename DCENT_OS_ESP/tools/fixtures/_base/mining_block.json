@@ -1,0 +1,27 @@
+{
+ "blockHeight": 965277,
+ "cleanJobs": false,
+ "coinbaseOutputs": [
+  {
+   "scriptHex": "5120deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+   "valueSats": 307023939
+  },
+  {
+   "scriptHex": "0014deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+   "valueSats": 6265794
+  },
+  {
+   "scriptHex": "6a24aa21a9eddeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+   "valueSats": 0
+  }
+ ],
+ "coinbaseValueTotalSatoshis": 313289733,
+ "coinbaseValueUserSatoshis": 0,
+ "jobId": "6a72bdc0000157c0",
+ "merkleBranchCount": 10,
+ "nbits": "17023cc1",
+ "ntime": "6a99204b",
+ "ntimeUnix": 1788420171,
+ "prevHash": "23ff416babb9cedaf0fc41d54cdc68d2dd89f4740000ef6e0000000000000000",
+ "receivedUnixMs": 1788420171503
+}

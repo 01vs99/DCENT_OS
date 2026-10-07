@@ -5,7 +5,8 @@
 //! 2. Performs the handshake (configure, subscribe, authorize)
 //! 3. Receives jobs via mining.notify and sends them to the job dispatcher
 //! 4. Receives shares from the share validator and submits them to the pool
-//! 5. Handles donation time-switching (transparent, voluntary 2% default)
+//! 5. Handles donation time-switching (transparent, voluntary, opt-in —
+//!    disabled by default; DCENT_OS ships 0%)
 //! 6. Reconnects with exponential backoff on disconnect
 //!
 //! Communication with the rest of dcentrald is via typed mpsc channels.
@@ -23,11 +24,12 @@
 //! 3. **(future) pool-requested** ([`PoolRequested`](crate::types::HashOnDisconnectPolicy::PoolRequested))
 //!    — not implemented; refused fail-closed.
 
+use super::policy::{validate_coinbase, ActiveCapacity, DifficultyHints};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use tracing::{debug, error, info, warn};
 
 use super::connection::{
@@ -1429,11 +1431,12 @@ const ID_EXTRANONCE_SUBSCRIBE: u64 = 5;
 ///
 /// ## Donation Time-Switching
 ///
-/// If donation is enabled (2% by default — our autotuner saves more than 2%
-/// in energy, so the donation can pay for itself), the client transparently
-/// switches between the user's pool and the donation pool based on time.
-/// For example, at 2% donation with a 1-hour cycle: mine on user pool for
-/// 3528s, then switch to D-Central donation pool for 72s, then back.
+/// Donation is opt-in (disabled and 0% by default — DCENT_OS ships with
+/// ZERO mandatory fee; the autotuner is unrelated and does not offset it).
+/// When the operator enables it, the client transparently switches between
+/// the user's pool and the donation pool based on time. For example, at a
+/// 2% donation with a 1-hour cycle: mine on user pool for 3528s, then
+/// switch to D-Central donation pool for 72s, then back.
 /// The switching is invisible to the mining pipeline — ASICs keep running,
 /// only the pool connection changes. Fully configurable (0-5%), fully
 /// disableable in Settings.
@@ -1492,6 +1495,12 @@ pub struct StratumV1Client {
 
     /// Tracks submit request IDs -> correlated share metadata until the pool replies.
     pending_submits: Vec<PendingSubmitResponse>,
+    /// Correlation eviction must never erase the unanswered-request deadline.
+    evicted_unanswered_at: Option<Instant>,
+    /// Submitted shares retired without a definitive verdict remain unresolved.
+    retired_unresolved: u64,
+    invalid_jobs: u32,
+    capacity_rx: Option<watch::Receiver<ActiveCapacity>>,
 
     /// Pool-directed reconnect target. Consumed on next connection attempt.
     ///
@@ -1573,6 +1582,87 @@ struct SessionContext {
 }
 
 impl StratumV1Client {
+    pub fn with_capacity_rx(mut self, rx: watch::Receiver<ActiveCapacity>) -> Self {
+        self.capacity_rx = Some(rx);
+        self
+    }
+
+    /// Keep writes selected by pool traffic or capacity updates inside the
+    /// oldest submit's absolute budget too, so a non-reading peer cannot
+    /// postpone expiry by provoking pongs or additional submits.
+    async fn write_session_line(
+        &self,
+        conn: &mut StratumConnection,
+        line: &str,
+    ) -> Result<(), SessionError> {
+        if let Some(deadline) = self.submit_response_deadline() {
+            tokio::time::timeout_at(deadline.into(), conn.write_line(line))
+                .await
+                .map_err(|_| SessionError::SubmitResponseTimeout)?
+                .map_err(SessionError::Connection)
+        } else {
+            conn.write_line(line)
+                .await
+                .map_err(SessionError::Connection)
+        }
+    }
+
+    async fn send_capacity_hint(
+        &mut self,
+        conn: &mut StratumConnection,
+        capacity: ActiveCapacity,
+        hints: &mut DifficultyHints,
+    ) -> Result<(), SessionError> {
+        if let Some(value) = hints.candidate(capacity, Instant::now()) {
+            // Advisory replies use the reserved non-share request ID; they
+            // must never enter submit correlation or acceptance accounting.
+            let request = suggest_difficulty_request(ID_SUGGEST_DIFF, value);
+            self.write_session_line(conn, &serialize_request(&request))
+                .await?;
+            hints.sent(value, Instant::now());
+            info!(
+                suggested_difficulty = value,
+                "Sent optional active-capacity difficulty hint; pool target remains authoritative"
+            );
+        }
+        Ok(())
+    }
+
+    fn unresolved_share_count(&self) -> u64 {
+        self.retired_unresolved
+            .saturating_add(self.pending_submits.len() as u64)
+    }
+
+    fn submit_response_deadline(&self) -> Option<Instant> {
+        self.pending_submits
+            .iter()
+            .map(|pending| pending.submitted_at)
+            .chain(self.evicted_unanswered_at)
+            .min()
+            .map(|sent| {
+                sent + Duration::from_secs(
+                    self.config
+                        .v1_policy
+                        .submit_response_timeout_secs
+                        .clamp(1, 600),
+                )
+            })
+    }
+
+    fn reject_job(&mut self, reason: &str) -> Result<bool, SessionError> {
+        self.invalid_jobs = self.invalid_jobs.saturating_add(1);
+        warn!(
+            reason,
+            invalid_jobs = self.invalid_jobs,
+            "Pool job rejected before work admission"
+        );
+        if self.invalid_jobs >= self.config.v1_policy.max_invalid_jobs.clamp(1, 64) {
+            Err(SessionError::InvalidJobLimit)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Create a new Stratum V1 client.
     ///
     /// # Arguments
@@ -1662,6 +1752,10 @@ impl StratumV1Client {
             work_domains_by_namespace: HashMap::new(),
             failover_fsm: None,
             pending_submits: Vec::with_capacity(64),
+            evicted_unanswered_at: None,
+            retired_unresolved: 0,
+            invalid_jobs: 0,
+            capacity_rx: None,
             pending_reconnect: None,
             pending_share: None,
             nonce_dedup: NonceDedup::default(),
@@ -1867,7 +1961,7 @@ impl StratumV1Client {
                 .map(|index| index + 1),
             stale_jobs_flushed_on_switch: self.last_stale_jobs_flushed_on_switch,
             pending_submit_correlations_cleared: self.last_pending_submit_correlations_cleared,
-            shares_unresolved: self.pending_submits.len() as u64,
+            shares_unresolved: self.unresolved_share_count(),
             pending_submit_dropped: self.pending_submit_dropped,
             pending_share_preserved: self.pending_share.is_some(),
             backoff_ms,
@@ -2486,7 +2580,7 @@ impl StratumV1Client {
                     let session_uptime = session_started_at.elapsed();
                     let (session_delivered_work, session_accepted_share) = {
                         let mut stats = self.stats.lock().await;
-                        stats.shares_unresolved = self.pending_submits.len() as u64;
+                        stats.shares_unresolved = self.unresolved_share_count();
                         stats.pending_submit_dropped = self.pending_submit_dropped;
                         (
                             stats.jobs_received > jobs_before_session,
@@ -2521,7 +2615,10 @@ impl StratumV1Client {
                     // (accepted shares / long clean uptime) still reset as before.
                     session_ended_in_failover_signal = matches!(
                         session_result,
-                        Err(SessionError::NoNotifyTimeout) | Err(SessionError::HighRejectRate)
+                        Err(SessionError::NoNotifyTimeout)
+                            | Err(SessionError::HighRejectRate)
+                            | Err(SessionError::SubmitResponseTimeout)
+                            | Err(SessionError::InvalidJobLimit)
                     );
                     let session_was_healthy = session_delivered_work
                         && !session_ended_in_failover_signal
@@ -2667,7 +2764,7 @@ impl StratumV1Client {
                             {
                                 let mut stats = self.stats.lock().await;
                                 stats.connected = false;
-                                stats.shares_unresolved = self.pending_submits.len() as u64;
+                                stats.shares_unresolved = self.unresolved_share_count();
                             }
                             info!(
                                 pool = %crate::pool_api::sanitize_pool_url(&pool.url),
@@ -3000,6 +3097,18 @@ impl StratumV1Client {
             sv2_retry_remaining,
         } = context;
         self.mining_state_announced = false;
+        self.invalid_jobs = 0;
+
+        let mut capacity_rx = if self.config.v1_policy.dynamic_difficulty {
+            self.capacity_rx.clone()
+        } else {
+            None
+        };
+        let mut difficulty_hints = DifficultyHints::default();
+        let startup_hint = capacity_rx
+            .as_ref()
+            .and_then(|rx| difficulty_hints.candidate(*rx.borrow(), Instant::now()))
+            .or(self.config.suggest_difficulty);
 
         // === STRATUM V1 HANDSHAKE ===
         // The Stratum V1 handshake is a 3-step JSON-RPC sequence over TCP:
@@ -3024,7 +3133,11 @@ impl StratumV1Client {
             let req = configure_request(
                 ID_CONFIGURE,
                 &requested_mask,
-                self.config.suggest_difficulty,
+                if self.config.v1_policy.dynamic_difficulty {
+                    None
+                } else {
+                    self.config.suggest_difficulty
+                },
             );
             conn.write_line(&serialize_request(&req))
                 .await
@@ -3067,7 +3180,7 @@ impl StratumV1Client {
         // Static startup hint only: the pool may ignore it or later override it
         // with mining.set_difficulty; the pool's live difficulty messages remain
         // authoritative after handshake.
-        if let Some(diff) = self.config.suggest_difficulty {
+        if let Some(diff) = startup_hint {
             info!(
                 suggested_diff = diff,
                 "Suggesting initial difficulty {} to pool (pool may ignore this)", diff,
@@ -3080,6 +3193,12 @@ impl StratumV1Client {
 
         // Wait for handshake responses (pool responds asynchronously to all three requests)
         let mut subscribed = false;
+        if let Some(diff) = startup_hint {
+            difficulty_hints.sent(diff, Instant::now());
+        }
+        let mut hint_tick = tokio::time::interval(DifficultyHints::INTERVAL);
+        hint_tick.tick().await;
+
         let mut authorized = false;
         // G28 / F-002 (observability): tracks whether the pool answered mining.configure.
         // The handshake loop exits on subscribed && authorized — it does NOT block on
@@ -3429,6 +3548,20 @@ impl StratumV1Client {
         };
 
         loop {
+            let response_deadline = self.submit_response_deadline();
+            if self.invalid_jobs >= self.config.v1_policy.max_invalid_jobs.clamp(1, 64) {
+                return Err(SessionError::InvalidJobLimit);
+            }
+            if response_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(SessionError::SubmitResponseTimeout);
+            }
+            if no_notify_failover_due(
+                last_notify_at,
+                Duration::from_secs(no_notify_failover_secs),
+                Instant::now(),
+            ) {
+                return Err(SessionError::NoNotifyTimeout);
+            }
             if let Some(pending) = self.pending_share.take() {
                 let share = pending.share;
 
@@ -3553,9 +3686,9 @@ impl StratumV1Client {
                 // a release-INDEPENDENT PII leak via /tmp/dcentrald.log). The
                 // structured debug! above already captures the full safe diagnostic
                 // (id/job_id/nonce/ntime/extranonce2/version_bits) without the worker.
-                if let Err(e) = conn.write_line(&json).await {
+                if let Err(e) = self.write_session_line(&mut conn, &json).await {
                     self.pending_share = Some(PendingSubmit { share });
-                    return Err(SessionError::Connection(e));
+                    return Err(e);
                 }
 
                 self.pending_submits.push(PendingSubmitResponse::new(
@@ -3568,7 +3701,7 @@ impl StratumV1Client {
 
                 let mut stats = self.stats.lock().await;
                 stats.shares_submitted += 1;
-                stats.shares_unresolved = self.pending_submits.len() as u64;
+                stats.shares_unresolved = self.unresolved_share_count();
                 if pending_submit_dropped > 0 {
                     stats.pending_submit_dropped = self.pending_submit_dropped;
                 }
@@ -3588,7 +3721,31 @@ impl StratumV1Client {
                 return Ok(SessionEndReason::CleanStop);
             }
 
+            let response_deadline = self.submit_response_deadline();
             tokio::select! {
+                _ = async {
+                    match response_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                        None => std::future::pending().await,
+                    }
+                } => return Err(SessionError::SubmitResponseTimeout),
+                changed = async {
+                    match capacity_rx.as_mut() {
+                        Some(rx) => rx.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if changed.is_err() {
+                        capacity_rx = None;
+                    } else if let Some(capacity) = capacity_rx.as_ref().map(|rx| *rx.borrow()) {
+                        self.send_capacity_hint(&mut conn, capacity, &mut difficulty_hints).await?;
+                    }
+                }
+                _ = hint_tick.tick(), if capacity_rx.is_some() => {
+                    if let Some(capacity) = capacity_rx.as_ref().map(|rx| *rx.borrow()) {
+                        self.send_capacity_hint(&mut conn, capacity, &mut difficulty_hints).await?;
+                    }
+                }
                 control = self.work_control_rx.recv() => {
                     let Some(V1WorkControl::Extranonce2Exhausted(exhausted)) = control else {
                         continue;
@@ -3652,8 +3809,9 @@ impl StratumV1Client {
 
                     match msg {
                         PoolMessage::Notify { .. } => {
-                            self.handle_notify(msg).await?;
-                            last_notify_at = Instant::now();
+                            if self.handle_notify(msg).await? {
+                                last_notify_at = Instant::now();
+                            }
                         }
                         PoolMessage::SetDifficulty(diff) => {
                             let old_diff = self.current_difficulty;
@@ -3786,15 +3944,11 @@ impl StratumV1Client {
                         PoolMessage::Ping(id) => {
                             // Pool keepalive — respond with pong to prove we're still alive
                             debug!(id, "Pool ping received, responding with pong (keepalive)");
-                            conn.write_line(&pong_response(id))
-                                .await
-                                .map_err(SessionError::Connection)?;
+                            self.write_session_line(&mut conn, &pong_response(id)).await?;
                         }
                         PoolMessage::GetVersion(id) => {
                             debug!(id, user_agent = USER_AGENT, "Pool requested our version string, responding with '{}'", USER_AGENT);
-                            conn.write_line(&version_response(id, USER_AGENT))
-                                .await
-                                .map_err(SessionError::Connection)?;
+                            self.write_session_line(&mut conn, &version_response(id, USER_AGENT)).await?;
                         }
                         PoolMessage::ShowMessage(msg) => {
                             // Pool operators can send human-readable messages — could be
@@ -3905,6 +4059,9 @@ impl StratumV1Client {
                             }
                         }
                         PoolMessage::Unknown(raw) => {
+                            if raw.starts_with("mining.notify") {
+                                self.reject_job("malformed mining.notify fields")?;
+                            }
                             debug!(raw = %raw, "Unknown pool message — probably a pool extension we don't support yet. Ignoring safely.");
                         }
                     }
@@ -4123,7 +4280,7 @@ impl StratumV1Client {
     }
 
     /// Handle a mining.notify message — convert to JobTemplate and send downstream.
-    async fn handle_notify(&mut self, msg: PoolMessage) -> Result<(), SessionError> {
+    async fn handle_notify(&mut self, msg: PoolMessage) -> Result<bool, SessionError> {
         if let PoolMessage::Notify {
             job_id,
             prev_hash,
@@ -4192,7 +4349,7 @@ impl StratumV1Client {
                         "skipping malformed mining.notify job (keeping session + previous job \
                          alive) — a single bad job must not trigger reconnect+backoff"
                     );
-                    return Ok(());
+                    return self.reject_job("invalid mining.notify");
                 }
             };
 
@@ -4248,7 +4405,16 @@ impl StratumV1Client {
                      work at offset 0. This should never happen post-handshake; \
                      investigate the subscribe/notify ordering if it recurs."
                 );
-                return Ok(());
+                return self.reject_job("invalid mining.notify");
+            }
+
+            if let Err(reason) = validate_coinbase(
+                &coinbase1_bytes,
+                &self.extranonce1,
+                self.extranonce2_size,
+                &coinbase2_bytes,
+            ) {
+                return self.reject_job(reason);
             }
 
             // Extranonce2 belongs to the subscription-parameter namespace, not
@@ -4302,7 +4468,13 @@ impl StratumV1Client {
             self.last_job = Some(job.clone());
 
             // Send to job dispatcher (which builds midstates and sends to ASICs)
-            let job_dispatched = self.job_tx.send(job).await.is_ok();
+            let deadline = self
+                .submit_response_deadline()
+                .unwrap_or_else(|| Instant::now() + Duration::from_secs(5))
+                .min(Instant::now() + Duration::from_secs(5));
+            let job_dispatched = tokio::time::timeout_at(deadline.into(), self.job_tx.send(job))
+                .await
+                .is_ok_and(|result| result.is_ok());
             if !job_dispatched {
                 warn!("Job channel full or closed — work dispatcher may have crashed or is backed up. New jobs can't reach the ASICs!");
             } else if !self.mining_state_announced {
@@ -4311,6 +4483,10 @@ impl StratumV1Client {
                     .await;
             }
 
+            if !job_dispatched {
+                return Err(SessionError::DispatcherUnavailable);
+            }
+            self.invalid_jobs = 0;
             let mut stats = self.stats.lock().await;
             stats.jobs_received += 1;
             let total_jobs = stats.jobs_received;
@@ -4338,9 +4514,10 @@ impl StratumV1Client {
                     job_id, total_jobs,
                 );
             }
+            return Ok(true);
         }
 
-        Ok(())
+        Ok(false)
     }
 
     /// Re-dispatch the current job after a mid-session parameter change.
@@ -4384,6 +4561,15 @@ impl StratumV1Client {
 
         job.extranonce1 = self.extranonce1.clone();
         job.extranonce2_size = self.extranonce2_size;
+        if let Err(reason) = validate_coinbase(
+            &job.coinbase1,
+            &job.extranonce1,
+            job.extranonce2_size,
+            &job.coinbase2,
+        ) {
+            let _ = self.reject_job(reason);
+            return;
+        }
         job.version_mask = self.version_mask;
         // Difficulty applies only to subsequent mining.notify jobs. A parameter
         // refresh of the current wire job keeps its notify-time target.
@@ -4513,6 +4699,15 @@ impl StratumV1Client {
         result: Option<Value>,
         error: Option<Value>,
     ) -> bool {
+        if error.as_ref().is_none_or(Value::is_null)
+            && result.as_ref().and_then(Value::as_bool).is_none()
+        {
+            warn!(
+                id,
+                "Ambiguous share response; retaining unresolved request and deadline"
+            );
+            return false;
+        }
         let matched_submit = if let Some(pos) = self
             .pending_submits
             .iter()
@@ -4549,7 +4744,7 @@ impl StratumV1Client {
                 let pool_count = self.pool_count();
                 let mut stats = self.stats.lock().await;
                 stats.latency_ms = latency;
-                stats.shares_unresolved = self.pending_submits.len() as u64;
+                stats.shares_unresolved = self.unresolved_share_count();
                 let sample = latency.min(u32::MAX as u64) as u32;
                 stats.last_latency_ms = Some(sample);
                 if stats.per_pool_latency_ms.len() < pool_count {
@@ -4675,7 +4870,7 @@ impl StratumV1Client {
 
                 let mut stats = self.stats.lock().await;
                 stats.shares_rejected += 1;
-                stats.shares_unresolved = self.pending_submits.len() as u64;
+                stats.shares_unresolved = self.unresolved_share_count();
                 stats.rolling_acceptance_pct = rolling_pct;
                 stats.rolling_acceptance_count = rolling_count;
                 let total_accepted = stats.shares_accepted;
@@ -4716,7 +4911,7 @@ impl StratumV1Client {
 
             let mut stats = self.stats.lock().await;
             stats.shares_accepted += 1;
-            stats.shares_unresolved = self.pending_submits.len() as u64;
+            stats.shares_unresolved = self.unresolved_share_count();
             stats.rolling_acceptance_pct = rolling_pct;
             stats.rolling_acceptance_count = rolling_count;
             let total = stats.shares_accepted;
@@ -4805,7 +5000,7 @@ impl StratumV1Client {
 
             let mut stats = self.stats.lock().await;
             stats.shares_rejected += 1;
-            stats.shares_unresolved = self.pending_submits.len() as u64;
+            stats.shares_unresolved = self.unresolved_share_count();
             stats.rolling_acceptance_pct = rolling_pct;
             stats.rolling_acceptance_count = rolling_count;
             drop(stats);
@@ -4847,6 +5042,13 @@ impl StratumV1Client {
 
         let overflow = self.pending_submits.len() - MAX_PENDING_SUBMITS;
         let dropped: Vec<_> = self.pending_submits.drain(..overflow).collect();
+        if let Some(oldest) = dropped.first() {
+            self.evicted_unanswered_at = Some(
+                self.evicted_unanswered_at
+                    .map_or(oldest.submitted_at, |prior| prior.min(oldest.submitted_at)),
+            );
+        }
+        self.retired_unresolved = self.retired_unresolved.saturating_add(overflow as u64);
         self.pending_submit_dropped = self.pending_submit_dropped.saturating_add(overflow as u64);
         if let (Some(first), Some(last)) = (dropped.first(), dropped.last()) {
             warn!(
@@ -4864,6 +5066,7 @@ impl StratumV1Client {
     }
 
     fn clear_orphaned_pending_submits(&mut self, context: &str) -> u64 {
+        self.evicted_unanswered_at = None;
         if self.pending_submits.is_empty() {
             return 0;
         }
@@ -4886,6 +5089,7 @@ impl StratumV1Client {
             newest_age_ms,
             "Clearing orphaned pending submit correlations from an ended session"
         );
+        self.retired_unresolved = self.retired_unresolved.saturating_add(orphaned_count);
         self.pending_submits.clear();
         orphaned_count
     }
@@ -4953,7 +5157,7 @@ impl StratumV1Client {
             }
         }
         let mut stats = self.stats.lock().await;
-        stats.shares_unresolved = self.pending_submits.len() as u64;
+        stats.shares_unresolved = self.unresolved_share_count();
     }
 
     /// Get the pool configuration for the given index.
@@ -4992,10 +5196,22 @@ impl StratumV1Client {
         self.request_id_counter
     }
 
-    /// Send a status update to the main daemon.
+    /// Deliver telemetry within a short budget and any earlier submit deadline.
+    /// A stalled consumer may lose a notification, as a closed consumer already
+    /// does. Never cancel the caller: a correlated verdict removed from the
+    /// pending ledger still has to complete its local accounting below the send.
     async fn send_status(&self, status: StratumStatus) {
-        if self.status_tx.send(status).await.is_err() {
-            warn!("Status channel closed");
+        let delivery_deadline = Instant::now() + Duration::from_millis(100);
+        let deadline = self
+            .submit_response_deadline()
+            .map(|pending| pending.min(delivery_deadline))
+            .unwrap_or(delivery_deadline);
+        match tokio::time::timeout_at(deadline.into(), self.status_tx.send(status)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => warn!("Status channel closed"),
+            Err(_) => warn!(
+                "Status channel backpressured beyond delivery deadline; notification dropped; local accounting continues"
+            ),
         }
     }
 }
@@ -5076,6 +5292,15 @@ pub enum SessionError {
     #[error("no mining.notify within the configured no-notify-failover window")]
     NoNotifyTimeout,
 
+    #[error("pool did not answer a submitted share within the response deadline")]
+    SubmitResponseTimeout,
+
+    #[error("pool exceeded the consecutive invalid-job limit")]
+    InvalidJobLimit,
+
+    #[error("work dispatcher unavailable within bounded delivery deadline")]
+    DispatcherUnavailable,
+
     #[error("session share reject-rate exceeded the configured failover threshold")]
     HighRejectRate,
 }
@@ -5089,6 +5314,349 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
 
+    fn bounded_session_context(is_donation: bool) -> SessionContext {
+        SessionContext {
+            donation_phase_remaining: Duration::from_secs(60),
+            user_split_remaining: Duration::from_secs(60),
+            is_donation,
+            active_pool_index: 0,
+            sv2_retry_remaining: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn unanswered_submit_deadline_survives_fresh_jobs_on_user_and_donation_routes() {
+        for is_donation in [false, true] {
+            let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+            let mut pool = spawn_handshake_then_drive(move |mut writer| {
+                tokio::spawn(async move {
+                    // Start work, then wait until the pool has actually read
+                    // mining.submit before sending any of the fresh jobs.
+                    writer
+                        .write_all(notify_line("initial", false).as_bytes())
+                        .await
+                        .unwrap();
+                    submitted_rx.await.unwrap();
+                    for index in 0..50 {
+                        if writer
+                            .write_all(notify_line(&format!("live-{index}"), false).as_bytes())
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        // A real active-session status producer stays blocked
+                        // behind the retained receiver while work remains fresh.
+                        if writer.write_all(b"{\"id\":null,\"method\":\"mining.set_difficulty\",\"params\":[2]}\n").await.is_err() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(40)).await;
+                    }
+                })
+            })
+            .await;
+            let observed_submit = tokio::spawn(async move {
+                while let Some(line) = pool.requests_rx.recv().await {
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    if request["method"] == "mining.submit" {
+                        submitted_tx.send(()).unwrap();
+                        return;
+                    }
+                }
+                panic!("pool closed before receiving mining.submit");
+            });
+            let mut config = test_config();
+            config.pool1.url = pool.url.clone();
+            config.v1_policy.submit_response_timeout_secs = 1;
+            let (job_tx, mut job_rx) = mpsc::channel::<JobTemplate>(64);
+            let (share_tx, share_rx) = mpsc::channel(4);
+            let (status_tx, _status_rx) = mpsc::channel(2);
+            let mut client = StratumV1Client::new(config, job_tx, share_rx, status_tx);
+            let feeder = tokio::spawn(async move {
+                let job = job_rx.recv().await.unwrap();
+                let mut share = test_share(&job.job_id, "12345678", None);
+                share.work_generation = job.work_generation;
+                share_tx.send(share).await.unwrap();
+                while job_rx.recv().await.is_some() {}
+            });
+            let endpoint = parse_pool_endpoint(&pool.url).unwrap();
+            let conn = StratumConnection::connect_endpoint(endpoint, Duration::from_secs(1))
+                .await
+                .unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(3),
+                client.run_session(
+                    conn,
+                    &client.config.pool1.clone(),
+                    bounded_session_context(is_donation),
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(result, Err(SessionError::SubmitResponseTimeout)),
+                "{result:?}"
+            );
+            let stats = client.stats.lock().await.clone();
+            // A blocked status receiver costs up to 100 ms per difficulty
+            // message, so a one-second deadline cannot promise >10 jobs.
+            // The wire barrier above proves every live-* job arrived after
+            // the unacknowledged submit; require that causal coverage instead.
+            assert!(
+                stats.jobs_received > 1,
+                "fresh jobs must reach the client after submit"
+            );
+            assert!(client
+                .last_job
+                .as_ref()
+                .unwrap()
+                .job_id
+                .starts_with("live-"));
+            observed_submit.await.unwrap();
+            assert_eq!(
+                (
+                    stats.shares_submitted,
+                    stats.shares_accepted,
+                    stats.shares_rejected
+                ),
+                (1, 0, 0)
+            );
+            assert_eq!(stats.donation_shares, u64::from(is_donation));
+            assert_eq!(client.clear_orphaned_pending_submits("deadline test"), 1);
+            assert_eq!(
+                client.unresolved_share_count(),
+                1,
+                "timeout remains unresolved after reconnect cleanup"
+            );
+            feeder.abort();
+            pool.task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn status_backpressure_preserves_submit_deadline_and_correlated_verdict() {
+        let (job_tx, _job_rx) = mpsc::channel(1);
+        let (_share_tx, share_rx) = mpsc::channel(1);
+        let (status_tx, mut status_rx) = mpsc::channel(1);
+        status_tx.try_send(StratumStatus::Latency(0)).unwrap();
+        let mut config = test_config();
+        config.v1_policy.submit_response_timeout_secs = 1;
+        let mut client = StratumV1Client::new(config, job_tx, share_rx, status_tx);
+        let oldest = Instant::now() - Duration::from_millis(950);
+        for (id, submitted_at) in [(101, oldest), (102, Instant::now())] {
+            client.pending_submits.push(PendingSubmitResponse::new(
+                id,
+                submitted_at,
+                test_share("backpressured", "12345678", None),
+                "worker".into(),
+            ));
+        }
+        client.stats.lock().await.shares_submitted = 2;
+        let deadline = client.submit_response_deadline().unwrap();
+        // The ACK removes 102, then emits Latency before updating acceptance.
+        // A full status sink must not block that accounting or extend 101's age.
+        let started = Instant::now();
+        assert!(!tokio::time::timeout(
+            Duration::from_millis(500),
+            client.handle_submit_response(102, Some(json!(true)), None),
+        )
+        .await
+        .expect("status backpressure must not strand the correlated verdict"));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(client.submit_response_deadline(), Some(deadline));
+        assert!(Instant::now() >= deadline);
+        let stats = client.stats.lock().await;
+        assert_eq!(
+            (
+                stats.shares_submitted,
+                stats.shares_accepted,
+                stats.shares_rejected,
+                stats.shares_unresolved
+            ),
+            (2, 1, 0, 1)
+        );
+        drop(stats);
+        assert_eq!(client.acceptance_tracker.rolling_count(), (1, 1));
+        assert_eq!(client.pending_submits[0].request_id, 101);
+        assert!(matches!(
+            status_rx.try_recv(),
+            Ok(StratumStatus::Latency(0))
+        ));
+        assert!(
+            status_rx.try_recv().is_err(),
+            "dropped delivery cannot invent a status verdict"
+        );
+        // Once a consumer has space, ordinary status delivery still succeeds.
+        client.send_status(StratumStatus::Latency(7)).await;
+        assert!(matches!(
+            status_rx.try_recv(),
+            Ok(StratumStatus::Latency(7))
+        ));
+    }
+
+    #[tokio::test]
+    async fn submit_overflow_and_ambiguous_ack_cannot_reset_oldest_deadline() {
+        let (job_tx, _job_rx) = mpsc::channel(1);
+        let (_share_tx, share_rx) = mpsc::channel(1);
+        let (status_tx, _status_rx) = mpsc::channel(4);
+        let mut client = StratumV1Client::new(test_config(), job_tx, share_rx, status_tx);
+        let oldest = Instant::now() - Duration::from_secs(65);
+        for index in 0..MAX_PENDING_SUBMITS + 2 {
+            client.pending_submits.push(PendingSubmitResponse::new(
+                index as u64,
+                if index == 0 { oldest } else { Instant::now() },
+                test_share("job", "12345678", None),
+                "worker".into(),
+            ));
+        }
+        assert_eq!(client.trim_pending_submits(), 2);
+        assert_eq!(
+            client.submit_response_deadline(),
+            Some(oldest + Duration::from_secs(60))
+        );
+        let before = client.unresolved_share_count();
+        client
+            .handle_submit_response(2, Some(json!({"maybe": true})), None)
+            .await;
+        assert_eq!(client.unresolved_share_count(), before);
+        assert_eq!(
+            client.submit_response_deadline(),
+            Some(oldest + Duration::from_secs(60))
+        );
+    }
+
+    #[tokio::test]
+    async fn unusable_notifications_cannot_extend_work_freshness() {
+        let pool = spawn_handshake_then_drive(|mut writer| {
+            tokio::spawn(async move {
+                for _ in 0..50 {
+                    let mut notification: Value =
+                        serde_json::from_str(notify_line("bad", false).trim()).unwrap();
+                    notification["params"][2] = json!("aa");
+                    let line = notification.to_string() + "\n";
+                    if writer.write_all(line.as_bytes()).await.is_err() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                }
+            })
+        })
+        .await;
+        let mut config = test_config();
+        config.pool1.url = pool.url.clone();
+        config.no_notify_failover_secs = 1;
+        config.v1_policy.max_invalid_jobs = 64;
+        let (job_tx, mut job_rx) = mpsc::channel(8);
+        let (_share_tx, share_rx) = mpsc::channel(1);
+        let (status_tx, _status_rx) = mpsc::channel(64);
+        let mut client = StratumV1Client::new(config, job_tx, share_rx, status_tx);
+        let conn = StratumConnection::connect_endpoint(
+            parse_pool_endpoint(&pool.url).unwrap(),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            client.run_session(
+                conn,
+                &client.config.pool1.clone(),
+                bounded_session_context(false),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, Err(SessionError::NoNotifyTimeout)),
+            "{result:?}"
+        );
+        assert!(client.invalid_jobs >= 10);
+        assert!(job_rx.try_recv().is_err());
+        pool.task.abort();
+    }
+
+    #[tokio::test]
+    async fn valid_work_resets_bad_job_strikes_but_invalid_burst_is_bounded() {
+        let (job_tx, mut job_rx) = mpsc::channel(8);
+        let (_share_tx, share_rx) = mpsc::channel(1);
+        let (status_tx, _status_rx) = mpsc::channel(8);
+        let mut client = StratumV1Client::new(test_config(), job_tx, share_rx, status_tx);
+        client.extranonce1 = vec![0; 4];
+        client.extranonce2_size = 4;
+        client.config.v1_policy.max_invalid_jobs = 3;
+        let good = parse_pool_message(notify_line("good", true).trim()).unwrap();
+        let mut bad = good.clone();
+        if let PoolMessage::Notify { coinbase1, .. } = &mut bad {
+            *coinbase1 = "aa".into();
+        }
+        assert!(!client.handle_notify(bad.clone()).await.unwrap());
+        assert!(client.handle_notify(good).await.unwrap());
+        assert!(job_rx.try_recv().is_ok());
+        assert_eq!(client.invalid_jobs, 0);
+        assert!(!client.handle_notify(bad.clone()).await.unwrap());
+        assert!(!client.handle_notify(bad.clone()).await.unwrap());
+        assert!(matches!(
+            client.handle_notify(bad).await,
+            Err(SessionError::InvalidJobLimit)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dynamic_capacity_hints_reach_wire_without_overriding_pool_target() {
+        let pool = spawn_handshake_then_drive(|mut writer| {
+            tokio::spawn(async move {
+                writer
+                    .write_all(
+                        b"{\"id\":null,\"method\":\"mining.set_difficulty\",\"params\":[32768]}\n",
+                    )
+                    .await
+                    .unwrap();
+                writer
+                    .write_all(notify_line("dynamic", true).as_bytes())
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_secs(7)).await;
+            })
+        })
+        .await;
+        let mut config = test_config();
+        config.donation.enabled = false;
+        config.pool1.url = pool.url.clone();
+        config.v1_policy.dynamic_difficulty = true;
+        config.suggest_difficulty = Some(8192);
+        let (job_tx, _job_rx) = mpsc::channel(8);
+        let (_share_tx, share_rx) = mpsc::channel(1);
+        let (status_tx, _status_rx) = mpsc::channel(32);
+        let (capacity_tx, capacity_rx) = watch::channel(ActiveCapacity::new(1e12).unwrap());
+        let client =
+            StratumV1Client::new(config, job_tx, share_rx, status_tx).with_capacity_rx(capacity_rx);
+        let driver = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            for value in [0.4e12, 0.3e12, 0.5e12] {
+                capacity_tx.send_replace(ActiveCapacity::new(value).unwrap());
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+            tokio::time::sleep(Duration::from_secs(6)).await;
+        });
+        let client = run_client_for_mock_wave(client, Duration::from_millis(5700)).await;
+        assert_eq!(client.current_difficulty, 32768.0);
+        assert_eq!(client.stats.lock().await.shares_accepted, 0);
+        let requests = finish_mock_pool(pool).await;
+        let hints: Vec<Value> = requests
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|request| request["method"] == "mining.suggest_difficulty")
+            .collect();
+        assert_eq!(
+            hints.len(),
+            2,
+            "one startup and one coalesced capacity hint: {hints:?}"
+        );
+        assert_eq!(hints[0]["params"][0], 698);
+        assert_eq!(hints[1]["params"][0], 349);
+        driver.abort();
+    }
+
     struct MockPool {
         url: String,
         requests_rx: mpsc::Receiver<String>,
@@ -5097,6 +5665,7 @@ mod tests {
 
     fn test_config() -> StratumConfig {
         StratumConfig {
+            v1_policy: Default::default(),
             pool1: PoolConfig {
                 url: "stratum+tcp://pool.example.com:3333".to_string(),
                 worker: "user.worker".to_string(),
@@ -5430,6 +5999,7 @@ mod tests {
             parse_pool_message(notify_line("job-1", true).trim()).expect("notify line must parse");
 
         // --- Happy path: a valid extranonce2_size dispatches the job. ---
+        client.extranonce1 = vec![0xab; 4];
         client.extranonce2_size = 4;
         let res = client.handle_notify(msg.clone()).await;
         assert!(res.is_ok(), "valid notify must return Ok");
@@ -5547,6 +6117,7 @@ mod tests {
         let (_share_tx, share_rx) = mpsc::channel(1);
         let (status_tx, _status_rx) = mpsc::channel(4);
         let mut client = StratumV1Client::new(test_config(), job_tx, share_rx, status_tx);
+        client.extranonce1 = vec![0xab; 4];
         client.extranonce2_size = 4;
 
         // Seed a job at a LOW difficulty (1.0) via the happy notify path.
@@ -5600,6 +6171,7 @@ mod tests {
         let (_share_tx, share_rx) = mpsc::channel(1);
         let (status_tx, _status_rx) = mpsc::channel(4);
         let mut client = StratumV1Client::new(test_config(), job_tx, share_rx, status_tx);
+        client.extranonce1 = vec![0xab; 7];
         client.extranonce2_size = 1;
 
         let notify = parse_pool_message(notify_line("mask-refresh", true).trim())
@@ -5661,6 +6233,7 @@ mod tests {
         let (_share_tx, share_rx) = mpsc::channel(1);
         let (status_tx, _status_rx) = mpsc::channel(4);
         let mut client = StratumV1Client::new(test_config(), job_tx, share_rx, status_tx);
+        client.extranonce1 = vec![0xab; 7];
         client.extranonce2_size = 1;
 
         let first_notify =
@@ -5702,6 +6275,7 @@ mod tests {
         let (_share_tx, share_rx) = mpsc::channel(1);
         let (status_tx, _status_rx) = mpsc::channel(4);
         let mut client = StratumV1Client::new(test_config(), job_tx, share_rx, status_tx);
+        client.extranonce1 = vec![0xab; 7];
         client.extranonce2_size = 1;
 
         let a = parse_pool_message(notify_line_with_ntime("wire-a", "66112233", true).trim())
@@ -5759,7 +6333,9 @@ mod tests {
         client.extranonce1 = vec![0xaa];
         client.extranonce2_size = 1;
 
-        let notify = parse_pool_message(notify_line("set-en-replay", true).trim()).expect("notify");
+        let notify =
+            parse_pool_message(notify_line_with_size("set-en-replay", "66112233", true, 2).trim())
+                .expect("notify");
         client
             .handle_notify(notify)
             .await
@@ -5819,6 +6395,15 @@ mod tests {
     }
 
     fn notify_line_with_ntime(job_id: &str, ntime: &str, clean_jobs: bool) -> String {
+        notify_line_with_size(job_id, ntime, clean_jobs, 8)
+    }
+
+    fn notify_line_with_size(
+        job_id: &str,
+        ntime: &str,
+        clean_jobs: bool,
+        extranonce_bytes: usize,
+    ) -> String {
         format!(
             "{}\n",
             serde_json::json!({
@@ -5827,8 +6412,8 @@ mod tests {
                 "params": [
                     job_id,
                     "00".repeat(32),
-                    "01000000",
-                    "ffffffff",
+                    super::super::policy::fixture_coinbase(extranonce_bytes).0,
+                    super::super::policy::fixture_coinbase(extranonce_bytes).1,
                     [],
                     "20000000",
                     "1d00ffff",
@@ -5974,7 +6559,9 @@ mod tests {
                                 .await;
                             let job_id = format!("exhaustion-job-{connection_number}");
                             let _ = writer
-                                .write_all(notify_line(&job_id, true).as_bytes())
+                                .write_all(
+                                    notify_line_with_size(&job_id, "66112233", true, 5).as_bytes(),
+                                )
                                 .await;
                         }
                         request_id if request_id > ID_SUGGEST_DIFF => {
@@ -6160,7 +6747,9 @@ mod tests {
                                 .await;
                             let job_id = format!("namespace-job-{connection_number}");
                             let _ = writer
-                                .write_all(notify_line(&job_id, true).as_bytes())
+                                .write_all(
+                                    notify_line_with_size(&job_id, "66112233", true, 5).as_bytes(),
+                                )
                                 .await;
                             if connection_number == 1 {
                                 for namespace in 1..=MAX_V1_WORK_NAMESPACES_PER_SUBSCRIPTION {
@@ -8207,6 +8796,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unanswered_submit_timeout_cuts_over_user_and_donation_routes() {
+        for donation in [false, true] {
+            let primary = spawn_authorize_then_silent_pool("unanswered-primary").await;
+            let backup = spawn_mock_pool("acknowledging-backup").await;
+            let mut config = test_config();
+            config.pool1.url = primary.url.clone();
+            config.pool2 = Some(backup_pool(&backup.url, "user.backup"));
+            config.donation.enabled = donation;
+            config.donation.pool_url = primary.url.clone();
+            config.donation.fallback_enabled = true;
+            config.donation.fallback_pool_url = backup.url.clone();
+            config.no_notify_failover_secs = 0;
+            config.v1_policy.submit_response_timeout_secs = 1;
+            let (job_tx, mut job_rx) = mpsc::channel::<JobTemplate>(16);
+            let (share_tx, share_rx) = mpsc::channel(8);
+            let (status_tx, _status_rx) = mpsc::channel(256);
+            let mut client = StratumV1Client::new(config, job_tx, share_rx, status_tx);
+            if donation {
+                client.donation_phase = DonationPhase::Donation;
+            }
+            let feeder = tokio::spawn(async move {
+                while let Some(job) = job_rx.recv().await {
+                    let mut share = test_share(&job.job_id, "12345678", None);
+                    share.work_generation = job.work_generation;
+                    if share_tx.send(share).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            let returned = run_client_for_mock_wave(client, Duration::from_secs(4)).await;
+            let stats = returned.stats.lock().await;
+            assert_eq!(
+                stats.shares_accepted, 1,
+                "fallback acknowledgement is credited"
+            );
+            assert_eq!(stats.shares_rejected, 0, "timeout is not a rejection");
+            assert_eq!(returned.unresolved_share_count(), 1);
+            assert_eq!(returned.current_pool_index, usize::from(!donation));
+            assert_eq!(returned.donation_pool_index, usize::from(donation));
+            drop(stats);
+            drop(returned);
+            feeder.abort();
+            let requests = finish_mock_pool(primary).await;
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|line| line.contains("mining.subscribe"))
+                    .count(),
+                1,
+                "unanswered-submit health signal cuts over in one session"
+            );
+            let requests = finish_mock_pool(backup).await;
+            assert!(requests.iter().any(|line| line.contains("mining.submit")));
+        }
+    }
+
+    #[tokio::test]
     async fn mock_donation_primary_failure_routes_submits_to_braiins_fallback() {
         let mut fallback = spawn_mock_pool("donation-fallback-job").await;
         let mut config = test_config();
@@ -8683,7 +9329,7 @@ mod tests {
         assert_eq!(client.pending_submit_dropped, 2);
 
         let status = client.failover_status("unit_test", 0, 0);
-        assert_eq!(status.shares_unresolved, MAX_PENDING_SUBMITS as u64);
+        assert_eq!(status.shares_unresolved, (MAX_PENDING_SUBMITS + 2) as u64);
         assert_eq!(status.pending_submit_dropped, 2);
         assert_eq!(client.pending_submits[0].request_id, 102);
     }

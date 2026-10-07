@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-EXPECTED_SAFETY_CLAMP_COUNT = 103
+# G52 re-pin (see the G52 block below the digest): count 107 -> 108.
 # G30: BM1368 ramp clamp site content/line drift after pure plan thin-wrap;
 # classified count unchanged (91). Digest re-pin only.
 # G42: BM1391 open-coded freq/25 clamp removed; pure-pin ban string replaces site.
@@ -88,7 +88,23 @@ EXPECTED_SAFETY_CLAMP_COUNT = 103
 # which walks `source_root.rglob("*.rs")`, saw it immediately. A tree-scanning
 # gate and an index diff look at different sets — check
 # `git status --porcelain | grep '^??'` before concluding the gate is wrong.
-EXPECTED_SAFETY_CLAMP_DIGEST = "3ab56c59ceeec5a555cd78cb0d98f15385b2fef97e32680a8a57a9d1a29cff86"
+# G51 (2026-09-10 Antminer campaign): 103 -> 107, four added voltage
+# fingerprints; all 103 prior fingerprints remain byte-identical.
+# BM1391 profile DAC saturation and DAC preimage use fixed ordered
+# bounds 0..255 and 16.03..20.28; the stock BM1391 APW8 setting uses
+# 0..255 after a finite software-envelope check. BB plan_step rejects
+# nonfinite/unrepresentable and <0.01 steps before its private dynamic
+# [-maximum_step, maximum_step] clamp. The BB planner owns no actuator;
+# none of these arithmetic pins grants readiness or physical limits.
+# Exact HEAD/current comparison and fixed-bound review are retained in
+# evidence/r09/commit-gate-fixes-v1; no classifier exemption is added.
+# G52 (2026-09-11 GLM-army wave 1, R04 lane): 107 -> 108, one added voltage
+# fingerprint — `drivers/bm1391.rs` `apw8_dac_code` saturates the stock APW8
+# DAC preimage to fixed ordered bounds 0.0..255.0 (the driver-level mirror of
+# the already-pinned `bm1391_mining_profile.rs` DAC law; V01-confirmed lane).
+# All 107 prior fingerprints remain byte-identical; no classifier exemption.
+EXPECTED_SAFETY_CLAMP_COUNT = 108
+EXPECTED_SAFETY_CLAMP_DIGEST = "16bfe6dec78a37d594b8e17bdec92e00e59b901aeb9e3ab47a4352d7ce8e82d2"
 
 CLAMP_RE = re.compile(r"\.clamp\s*\(")
 COMMENT_PREFIXES = ("//", "///", "//!","/*", "*")

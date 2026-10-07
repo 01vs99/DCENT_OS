@@ -173,8 +173,40 @@ def is_reparse(metadata: os.stat_result) -> bool:
     return bool(getattr(metadata, "st_file_attributes", 0) & marker)
 
 
+def host_path_text(value: str) -> str:
+    """Rewrite Git-Bash (MSYS) drive paths (/d/dir) and long-path prefixes.
+
+    MSYS automatic argument conversion is per-argument and inconsistent on
+    long release command lines (see runs drop1-20260916-cyg3sjwi and
+    drop1-20260917-gnscaudk/c1e73bep). Normalizing at the lexical layer
+    makes the shell conversion behavior irrelevant. POSIX and native
+    inputs are returned unchanged; on non-Windows hosts this is identity.
+    """
+    if os.name != "nt" or not isinstance(value, str):
+        return value
+    text = value
+    if text.startswith("\\\\?\\UNC\\"):
+        text = "\\\\" + text[8:]
+    elif text.startswith("//?/UNC/"):
+        text = "//" + text[8:]
+    else:
+        for prefix in ("\\\\?\\", "//?/"):
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+                break
+    if (
+        len(text) >= 2
+        and text[0] == "/"
+        and text[1].isascii()
+        and text[1].isalpha()
+        and (len(text) == 2 or text[2] == "/")
+    ):
+        return text[1].upper() + ":/" + text[3:]
+    return text
+
+
 def absolute(value: str | os.PathLike[str]) -> Path:
-    return Path(os.path.abspath(os.fspath(value)))
+    return Path(os.path.abspath(host_path_text(os.fspath(value))))
 
 
 def inspect_existing_components(path: Path, label: str) -> Path:
@@ -3341,9 +3373,27 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
+def normalize_host_path_args(args: argparse.Namespace) -> argparse.Namespace:
+    # ``output_name`` is intentionally excluded: it is a flat release-set
+    # basename (validate_flat_name), never a host path. Receipt-internal
+    # stage paths inside capability documents are never argparse fields.
+    for field in (
+        "parent",
+        "capability_output",
+        "capability_file",
+        "manifest",
+        "output",
+        "output_parent",
+    ):
+        value = getattr(args, field, None)
+        if isinstance(value, str):
+            setattr(args, field, host_path_text(value))
+    return args
+
+
 def main() -> int:
     try:
-        args = parser().parse_args()
+        args = normalize_host_path_args(parser().parse_args())
         args.function(args)
         return 0
     except (ReleaseSetError, OSError) as error:

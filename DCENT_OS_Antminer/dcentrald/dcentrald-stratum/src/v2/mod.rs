@@ -6,7 +6,7 @@
 //! # Honesty (DESK_NOW rank 12)
 //!
 //! This client is **opt-in** (`protocol = "sv2"` / `"v2"`, or Auto with a
-//! pool `sv2_url`). Host mock-pool harnesses exist. **Live accepted shares
+//! pool `sv2_url`). Host mock-pool and independent SRI-library interoperability harnesses exist. **Live accepted shares
 //! are BENCH_HOLD** — not a production SV2 mining path and **not
 //! Braiins-parity** Job Declaration. JD `probe_once` is a supervisor
 //! connectivity probe (opt-in, `JdConfig.enabled` default false), not

@@ -122,11 +122,11 @@ class Bm1366S19kLedgerConvergenceTests(unittest.TestCase):
         self.assertIn("pub const S19K_NATIVE_MINING_REFUSAL", admission)
         self.assertIn("S19kMiningDisposition::NotImplemented", admission)
         self.assertIn(
-            "if is_bm1366 && !passthrough && !Self::s19k_native_cold_start_opt_in()",
+            "if is_bm1366 && !passthrough && !self.s19k_native_cold_start_requested()",
             serial,
         )
         self.assertIn(
-            "native BM1366 cold-start is default-off",
+            "native BM1366 requires an admitted am3-s19k serial configuration",
             serial,
         )
         self.assertIn(".promote_s19k_native_cold_start(&mut cold_owner)", serial)

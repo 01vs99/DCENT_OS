@@ -1,0 +1,311 @@
+{
+  "scope": "Pure factory-data test vectors, not acquisition or hardware evidence",
+  "corpus": {
+    "path": "tools/fixtures/eeprom/epic-eeprom-corpus-20.json",
+    "bytes": 28105,
+    "sha256": "ef284cf4451323552b62de3a814a914d7f2b02e1927e3967910ae9de5a207c6f"
+  },
+  "original_model_receipt": "",
+  "fixtures": {
+    "held_42601": {
+      "kind": "held_epic_page",
+      "corpus_sample": "BHB42601|fmt=4|keyver=17",
+      "raw": "041167fd849e3d1c536c812220016e66ba071fed3695d62d2bf8a3a763da6bea1ee62e6fbe7d0ad07e6b764c73ebcb11ede442e7f7e6d717d50bf289bf4875eee52531bf108669a66102aef34131ee7129480602fa1a48f6608926e290e0daf81be3abf1e9bb23c482538d747518ba7e7b42ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5a",
+      "raw_pin": {
+        "bytes": 256,
+        "sha256": "de77d7f8666cfe49a1f7f7a1f8f3f0156ffc15dbe09995a64d9d64842cefb41c"
+      },
+      "expected": {
+        "format_version": 4,
+        "board_name": "BHB42601",
+        "board_serial_no": "YDFTYNGBAJHBE10YY",
+        "chip_die": "ED",
+        "chip_marking": "S1CT21CB41",
+        "chip_bin": 3,
+        "chip_tech": "AC",
+        "ft_version": "F1V05B1C1",
+        "pcb_version": 304,
+        "bom_version": 16,
+        "asic_sensor_type": 0,
+        "asic_sensor_addr": 0,
+        "pic_sensor_type": 139,
+        "pic_sensor_addr": 15,
+        "factory_job": "YDFT20210901001-Y1",
+        "pt1_result": 1,
+        "pt1_count": 1,
+        "board_info_crc": 1,
+        "default_volt": 13400,
+        "default_clk": 545,
+        "nonce_rate": 9998,
+        "pcb_warmup_temp": 28,
+        "pcb_cooldown_temp": 32,
+        "test_version": 1,
+        "test_standard": 0,
+        "pt2_result": 1,
+        "pt2_count": 1,
+        "param_info_crc": 14
+      }
+    },
+    "held_42641": {
+      "kind": "held_epic_page",
+      "corpus_sample": "BHB42641|fmt=4|keyver=17",
+      "raw": "04118d48d089961a073e9064e2ac0101ee64b6d26bd86fcacff59c679f9adbf3807fd98c80fd74963a4117661a8a4e8e986a68b76d716956c1770c61a12f2e900e5b2bb2fb145d186b6c897c42d53e09dd0853a9f44155b7ce0d2ac79911daac50176d47d830d8fecee2a2a29b80bac2ddb7ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5a",
+      "raw_pin": {
+        "bytes": 256,
+        "sha256": "c9ae01c9f3277919d8f9473e163ba837cde2b0991075a05bda0cfa6e80309358"
+      },
+      "expected": {
+        "format_version": 4,
+        "board_name": "BHB42641",
+        "board_serial_no": "NGSBYPPBBJHJB3387",
+        "chip_die": "ED",
+        "chip_marking": "G1CH22BE35",
+        "chip_bin": 3,
+        "chip_tech": "AJ",
+        "ft_version": "F1V06B3C1",
+        "pcb_version": 256,
+        "bom_version": 16,
+        "asic_sensor_type": 0,
+        "asic_sensor_addr": 0,
+        "pic_sensor_type": 139,
+        "pic_sensor_addr": 15,
+        "factory_job": "NGSB20220701001",
+        "pt1_result": 1,
+        "pt1_count": 1,
+        "board_info_crc": 12,
+        "default_volt": 13400,
+        "default_clk": 505,
+        "nonce_rate": 9957,
+        "pcb_warmup_temp": 30,
+        "pcb_cooldown_temp": 30,
+        "test_version": 1,
+        "test_standard": 0,
+        "pt2_result": 1,
+        "pt2_count": 1,
+        "param_info_crc": 0
+      }
+    },
+    "held_a126": {
+      "kind": "held_epic_page",
+      "corpus_sample": "BHB42603|fmt=4|keyver=17",
+      "raw": "0411988c127661244f8fe67162974b25b1f22747e21ceb765f63d1306129fbbf0a452db472e77ffe89e517dddf7b2ed4a627e76b24e527081008086e20d80a9dbde725329922a30d46df59838aa4baaca9ca10c2c8e4fa694d3c85c0a59333f6e2b345713f1c6e6db014c5727d72175342f1ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5a",
+      "raw_pin": {
+        "bytes": 256,
+        "sha256": "b359b3f34c374ce699fd09d2cafac0e96e9a92ac0f1fcd802dba15e48c5c3891"
+      },
+      "expected": {
+        "format_version": 4,
+        "board_name": "BHB42603",
+        "board_serial_no": "YNAHYNRBBJEAA01MF",
+        "chip_die": "ED",
+        "chip_marking": "J1C022AJ31",
+        "chip_bin": 5,
+        "chip_tech": "AC",
+        "ft_version": "F1V06B1C1",
+        "pcb_version": 368,
+        "bom_version": 16,
+        "asic_sensor_type": 0,
+        "asic_sensor_addr": 0,
+        "pic_sensor_type": 0,
+        "pic_sensor_addr": 0,
+        "factory_job": "YNAH20220501002-ZB",
+        "pt1_result": 1,
+        "pt1_count": 2,
+        "board_info_crc": 28,
+        "default_volt": 13200,
+        "default_clk": 525,
+        "nonce_rate": 9998,
+        "pcb_warmup_temp": 27,
+        "pcb_cooldown_temp": 29,
+        "test_version": 1,
+        "test_standard": 0,
+        "pt2_result": 1,
+        "pt2_count": 1,
+        "param_info_crc": 10
+      }
+    },
+    "held_plus120": {
+      "kind": "held_epic_page",
+      "corpus_sample": "BHB42612|fmt=4|keyver=17",
+      "raw": "0411b28f76cf8e34ff9e49cc3da061258a324f8c9fb5573a3f5efc8fa21615a9b4c401a4f7d4e12ce25737d3ea0372bd9b6988bda0ca9e0e8620c2e7e6cfc60dfe49d551a970329c8a51478d16a66680dec08e8b9745a2cc713eea7617721ef9e49b3eef8b92a99846a70399a52f890daaccffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5a",
+      "raw_pin": {
+        "bytes": 256,
+        "sha256": "91f360ca8a231366bf7d92d0f766bce2e59c533e65e8cc12ef2131d20634769d"
+      },
+      "expected": {
+        "format_version": 4,
+        "board_name": "BHB42612",
+        "board_serial_no": "PIEMYR5BCJCBD1DS6",
+        "chip_die": "EF",
+        "chip_marking": "SIC022BB28",
+        "chip_bin": 2,
+        "chip_tech": "BD",
+        "ft_version": "F1V05B3C1",
+        "pcb_version": 256,
+        "bom_version": 16,
+        "asic_sensor_type": 0,
+        "asic_sensor_addr": 0,
+        "pic_sensor_type": 0,
+        "pic_sensor_addr": 0,
+        "factory_job": "PIEM20230201003-ZB",
+        "pt1_result": 1,
+        "pt1_count": 1,
+        "board_info_crc": 0,
+        "default_volt": 13600,
+        "default_clk": 660,
+        "nonce_rate": 9993,
+        "pcb_warmup_temp": 24,
+        "pcb_cooldown_temp": 27,
+        "test_version": 1,
+        "test_standard": 0,
+        "pt2_result": 1,
+        "pt2_count": 1,
+        "param_info_crc": 5
+      }
+    },
+    "held_format1": {
+      "kind": "held_epic_page",
+      "corpus_sample": "A3HB70501|fmt=1|keyver=65",
+      "raw": "01413348423730353031000000000000f6b40d106c9522124bdcbbfac059a95cf611e118ef2f0436aebe133d30e83f85294002c04c64a137921447fc9b91816d97bc177cc0cc84abdfe4aeee3d3b5035ac355970cf5c47ec87585d16a27f340d7837455e7242e31842c74650a7bb43f14898d9a4a5759fa1f6c89386a5b4aa15a3833dcc5c3f6a5db497bacaf5c5d791ed9a25cadee09d16c72df77083f2b3836d8e7cb4f68cb253a22078f5959bacb351415400ca5db15da2db2468ac3f074cdeab2966336a445044a668554c587108bfb3e00f6bfc51a490c89343d905bc263e08bc01c42a60877e7e40ae40178e943813b67078faf483d0000f72aef583e3",
+      "raw_pin": {
+        "bytes": 256,
+        "sha256": "6273e804f2f2ceb0da7719f33c3a32acb41f01a5f881db26710fbb685375fd53"
+      },
+      "expected": {
+        "format_version": 1,
+        "board_name": "A3HB70501",
+        "board_serial_no": "JYZZYSEBEJEJG03N1",
+        "chip_die": "ED",
+        "chip_marking": "A1ZA25AU8I",
+        "chip_bin": 4,
+        "chip_tech": "PA",
+        "ft_version": "F1V02B3C1",
+        "pcb_version": 256,
+        "bom_version": 0,
+        "factory_job": "JYZZ20250501001-Y1",
+        "pt1_result": 1,
+        "pt1_count": 1,
+        "board_info_crc": 236,
+        "default_volt": 13600,
+        "default_clk": 490,
+        "nonce_rate": 9820,
+        "pcb_warmup_temp": 38,
+        "pcb_cooldown_temp": 54,
+        "param_info_crc": 46,
+        "sweep_hashrate": 49073,
+        "sweep_freq_base": 16031,
+        "sweep_freq_step": 15,
+        "sweep_result": 1,
+        "sweep_info_crc": 21
+      }
+    },
+    "unsupported_42621": {
+      "kind": "synthetic_mutation_of_held_page",
+      "base": "held_42601",
+      "changes": "Rename to BHB42621 and recompute identity CRC; NOT a held 42621 page",
+      "raw": "0411471bd2a24219e5e828df3f516acff585dfb262b8912c412e54bc07f61ab31b227e00271dc049192ff3c69e0053f2e71329cd48dcceb347b383eacb2eb97a6cd10feaa0d8bae98981583491cf08c6cb60b13338e9437b0fee53a1fff576ecd01cabf1e9bb23c482538d747518ba7e7b42ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5a",
+      "raw_pin": {
+        "bytes": 256,
+        "sha256": "53df24d71db351cd2586da76981d9595f2018fcfc342f3bf6021dea9acbdf175"
+      },
+      "identity_crc_expected": "Match",
+      "parameters_crc_expected": "Match"
+    },
+    "unsupported_42699": {
+      "kind": "synthetic_mutation_of_held_page",
+      "base": "held_42601",
+      "changes": "Rename to unimplemented BHB42699 and recompute identity CRC",
+      "raw": "0411d17372c6db6661a71588d8b75ad1333f5cc2bb1d446e90485fc6b198bfd33516e4eef83f99b4abf3584df47689eee68135e692ec75b8b05d0b63ef6dac34a59a0bc3f9069709056c3701d8709ba414a3da6ae888e789be3a7ce77b57d200f24eabf1e9bb23c482538d747518ba7e7b42ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5a",
+      "raw_pin": {
+        "bytes": 256,
+        "sha256": "385f619d8eda10ae215022f8227e3e86f6f36ebb2277bb880595cdb1984a1c99"
+      },
+      "identity_crc_expected": "Match",
+      "parameters_crc_expected": "Match"
+    },
+    "empty_serial": {
+      "kind": "synthetic_mutation_of_held_page",
+      "base": "held_42601",
+      "changes": "Zero only identity serial and recompute identity CRC",
+      "raw": "0411e132a37f7880be20eb83f0109086d4d5821f5e726a423f948caf5240937e755643aafe4d6fb1fd1a59dddebce1b334617422d569204c6ef99faf2163c4566e4d887fe3ed5d322891f648e6e07cfcd6316218f1b8731c740eeaa8a736b984fd83abf1e9bb23c482538d747518ba7e7b42ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5a",
+      "raw_pin": {
+        "bytes": 256,
+        "sha256": "3e0d720161f0b4233d6fe60f67b1e40e45df311d3d9ae9b31d66949b0b56f30f"
+      },
+      "identity_crc_expected": "Match",
+      "parameters_crc_expected": "Match"
+    },
+    "foreign_marking": {
+      "kind": "synthetic_mutation_of_held_page",
+      "base": "held_42601",
+      "changes": "Change marking family character from C to G; recompute identity CRC",
+      "raw": "041148bbe7849db23f0e9fb52de70eb02f8849ea56573281cfcda953152cbcc6b0a25a50a23f5cc86cdbc9743de4221acfe2cb93568f2ce9640802658ba481b278a31ffc6481b3571820d581550ea769059b27d159fa39a24e8e787ecb07723a444eabf1e9bb23c482538d747518ba7e7b42ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5a",
+      "raw_pin": {
+        "bytes": 256,
+        "sha256": "2b7b79196b428fa55edadf464ef9c436632a6443f981d5425ae0108349131371"
+      },
+      "identity_crc_expected": "Match",
+      "parameters_crc_expected": "Match"
+    },
+    "unknown_marking": {
+      "kind": "synthetic_mutation_of_held_page",
+      "base": "held_42601",
+      "changes": "Change marking family character from C to Q; recompute identity CRC",
+      "raw": "04110db90349834af0e867fbaded5c05e1fa60fdcb1d12c90d17f156e0c46fc334718e4e303118fa5002df41510244dd989b0bfa82b22fa17125513a01c5f91a43e7883bc99fa6a6d935986aec21cb8bdd9d82dd4c9e8dad2ae1953ae06931232afdabf1e9bb23c482538d747518ba7e7b42ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5a",
+      "raw_pin": {
+        "bytes": 256,
+        "sha256": "939a546afa5eb9cffb7a03556d438900acf7b6d22263a12d293f7bb1c14e09f0"
+      },
+      "identity_crc_expected": "Match",
+      "parameters_crc_expected": "Match"
+    },
+    "short_marking": {
+      "kind": "synthetic_mutation_of_held_page",
+      "base": "held_42601",
+      "changes": "Replace marking with AB and zero pad; recompute identity CRC",
+      "raw": "04116989adc2b1dda71786bf25c67f625023f8e1baefc01de7919028a691623d997dac4229acfb62a62105b1a025fe8e65dc09bab370e0b5a48f8bef87115411d596023373adb33bcf4ec62d314a905100f660bfba7c3d6da6b449a142e525b93d7babf1e9bb23c482538d747518ba7e7b42ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5a",
+      "raw_pin": {
+        "bytes": 256,
+        "sha256": "93917eedce52c46cfcb3d6e0b8d24eed4b6b6abd1e68f6686637925acf6b4890"
+      },
+      "identity_crc_expected": "Match",
+      "parameters_crc_expected": "Match"
+    },
+    "class5": {
+      "kind": "synthetic_mutation_of_held_page",
+      "base": "held_42601",
+      "changes": "Change header class4 to class5 while retaining identity fields and recomputing identity CRC",
+      "raw": "0511b7a5413182e485d43d74db9d17056a315b5002a12c2ef9ef7ef24b797ad5a2c5ed3face9e3b3487fcf7c9f56fe147e9a9c38568000c009670c6a3b084c6b03c126ca8aa14cd1ba43643edf6e522035ea12ac7cd58f66c91ffa0c4ac108bdea4fabf1e9bb23c482538d747518ba7e7b42ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5a",
+      "raw_pin": {
+        "bytes": 256,
+        "sha256": "2f7d4799b7cc582223970bb74c3853e0940ea9ff0a952ef0960664e20615907e"
+      },
+      "identity_crc_expected": "Match",
+      "parameters_crc_expected": "Match"
+    },
+    "identity_crc_mismatch": {
+      "kind": "synthetic_mutation_of_held_page",
+      "base": "held_42601",
+      "changes": "Flip one stored identity CRC bit, preserving every identity field",
+      "raw": "04116bec43d918f0b290e58a9d22bf21752a861698929061fb9f806651c27982110c6386b56a3de37fc6b67acfc6d2698804773acfc272dda0010468ddb7b0b48689d58951605f7b37ac4cbeaaa9b70da91162f0cf905b1c966b2cfdc87c8dc199b1abf1e9bb23c482538d747518ba7e7b42ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5a",
+      "raw_pin": {
+        "bytes": 256,
+        "sha256": "0c8d5944343cbf8c81c9ac5628b7ed2633ba6a0897b73b3bda62eca9380d4a65"
+      },
+      "identity_crc_expected": "Mismatch",
+      "parameters_crc_expected": "Match"
+    },
+    "parameters_crc_mismatch": {
+      "kind": "synthetic_mutation_of_held_page",
+      "base": "held_42601",
+      "changes": "Flip one stored parameters CRC bit, preserving factory V/F",
+      "raw": "041167fd849e3d1c536c812220016e66ba071fed3695d62d2bf8a3a763da6bea1ee62e6fbe7d0ad07e6b764c73ebcb11ede442e7f7e6d717d50bf289bf4875eee52531bf108669a66102aef34131ee7129480602fa1a48f6608926e290e0daf81be350779f4a948bdf9a16234209d9d4a537ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5a",
+      "raw_pin": {
+        "bytes": 256,
+        "sha256": "82a57fa91e9a81e26db10f0dd250541b52392593901ff57686f3ae12fa06ada9"
+      },
+      "identity_crc_expected": "Match",
+      "parameters_crc_expected": "Mismatch"
+    }
+  }
+}

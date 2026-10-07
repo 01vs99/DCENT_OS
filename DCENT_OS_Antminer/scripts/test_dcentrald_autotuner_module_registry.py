@@ -52,6 +52,7 @@ EXPECTED_COUNTS = {
     "state_persistence": 3,
     "telemetry": 9,
     "thermal_comp": 19,
+    "tune_guard": 16,
     "tuner": 55,
     "tuner_stability": 8,
     "vnish_phase_fsm": 14,
@@ -116,7 +117,7 @@ class DcentraldAutotunerModuleRegistryTests(unittest.TestCase):
             {name: row["tests"] for name, row in self.modules.items()},
             EXPECTED_COUNTS,
         )
-        self.assertEqual(sum(EXPECTED_COUNTS.values()), 511)
+        self.assertEqual(sum(EXPECTED_COUNTS.values()), 527)
         self.assertEqual(
             self.registry["private_modules"][0]["tests"],
             2,
@@ -125,10 +126,10 @@ class DcentraldAutotunerModuleRegistryTests(unittest.TestCase):
             self.registry["crate_root_test_prefixes"],
             [{"prefix": "tests", "tests": 6}],
         )
-        self.assertEqual(self.registry["module_scoped_tests"], 511)
+        self.assertEqual(self.registry["module_scoped_tests"], 527)
         self.assertEqual(self.registry["private_module_tests"], 2)
         self.assertEqual(self.registry["crate_root_tests"], 6)
-        self.assertEqual(self.registry["total_tests"], 519)
+        self.assertEqual(self.registry["total_tests"], 535)
 
     def test_feature_profile_is_exact_and_remains_test_only(self) -> None:
         tuner = (AUTOTUNER_ROOT / "src" / "tuner.rs").read_text(encoding="utf-8")
@@ -146,16 +147,16 @@ class DcentraldAutotunerModuleRegistryTests(unittest.TestCase):
                 {
                     "profile": "default",
                     "features": [],
-                    "public_modules": 33,
+                    "public_modules": 34,
                     "extra_public_test_helper_methods": [],
-                    "tests": 519,
+                    "tests": 535,
                 },
                 {
                     "profile": "test_helpers",
                     "features": ["test-helpers"],
-                    "public_modules": 33,
+                    "public_modules": 34,
                     "extra_public_test_helper_methods": sorted(EXPECTED_TEST_HELPERS),
-                    "tests": 519,
+                    "tests": 535,
                     "authority_ceiling": self.registry["feature_profiles"][1][
                         "authority_ceiling"
                     ],
@@ -196,7 +197,7 @@ class DcentraldAutotunerModuleRegistryTests(unittest.TestCase):
                 "actuation_stays_disarmed_unless_both_flags",
             ),
             "bad_chip_supervisor": (
-                "supervisor_disabled_by_default_emits_no_actions",
+                "bad_chip_supervisor_defaults_on_without_granting_actuation",
                 "supervisor_never_emits_fan_control_action",
             ),
             "binary_search": ("try_new_for_chip_refuses_unknown_pll",),

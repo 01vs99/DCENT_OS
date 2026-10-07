@@ -56,9 +56,15 @@ _is_truthy() {
     esac
 }
 
+# WS-A4 (2026-09-01): RELEASE is the DEFAULT image posture. Resolve the
+# canonical posture (scripts/lib/release_posture.sh): an explicitly-set
+# DCENT_RELEASE_IMAGE wins; else DCENT_DEV_IMAGE=1 selects DEV/LAB; else
+# RELEASE. Plain development/bench Cargo builds must opt out explicitly:
+#   DCENT_DEV_IMAGE=1 bash scripts/build-dcentrald.sh <arch>
+. "$SCRIPT_DIR/lib/release_posture.sh"
 RELEASE_CONTEXT=""
-if _is_truthy "${DCENT_RELEASE_IMAGE:-0}"; then
-    RELEASE_CONTEXT="DCENT_RELEASE_IMAGE=${DCENT_RELEASE_IMAGE}"
+if dcent_release_posture_is_release; then
+    RELEASE_CONTEXT="DCENT_RELEASE_IMAGE=$(dcent_release_posture_value) (default posture; DCENT_DEV_IMAGE=1 opts out)"
 elif _is_truthy "${DCENT_REQUIRE_RELEASE_PROVENANCE:-0}"; then
     RELEASE_CONTEXT="DCENT_REQUIRE_RELEASE_PROVENANCE=${DCENT_REQUIRE_RELEASE_PROVENANCE}"
 elif _is_truthy "${DCENT_REQUIRE_RELEASE_KEY:-0}"; then
@@ -112,6 +118,7 @@ fi
 if [ -n "$RELEASE_CONTEXT" ] && [ "$CAPSULE_ENV_COUNT" -eq 0 ]; then
     echo "ERROR: release context indicated ($RELEASE_CONTEXT) without an authenticated release capsule" >&2
     echo "       direct working-tree Cargo builds are development-only" >&2
+    echo "       for a DEV/LAB binary build, opt out explicitly: DCENT_DEV_IMAGE=1 $0 <arch>" >&2
     exit 1
 fi
 
@@ -421,6 +428,23 @@ cleanup_build_resources() {
 trap cleanup_build_resources EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# Resolve the OTA key independently of the stock-firmware manifest pin. This
+# runs before Docker/Cargo and the same value is observed inside the compiler
+# container and checked against the actual retained ELF identity below.
+if [ "$CAPSULE_MODE" -eq 1 ]; then
+    [ -n "${DCENT_RELEASE_PUBKEY_FILE:-}" ] || {
+        echo "ERROR: release compilation requires an independently trusted public-key file" >&2
+        exit 1
+    }
+    OTA_KEY_ARGS=(--pubkey "$(normalize_shell_path "$DCENT_RELEASE_PUBKEY_FILE")")
+    if [ -n "${DCENT_OTA_PUBLIC_KEY_HEX+set}" ]; then
+        OTA_KEY_ARGS+=(--expected "$DCENT_OTA_PUBLIC_KEY_HEX")
+    fi
+    DCENT_OTA_PUBLIC_KEY_HEX="$(python3 "$SCRIPT_DIR/release_build_identity.py" key "${OTA_KEY_ARGS[@]}")"
+    export DCENT_OTA_PUBLIC_KEY_HEX
+    python3 "$SCRIPT_DIR/release_dashboard.py" preflight --source "$SCRIPT_DIR/../dashboard"
+    python3 "$SCRIPT_DIR/release_native_sd.py" preflight
+fi
 # -------- Release manifest-pin fail-fast (BUG-2, 2026-07-09) --------
 # Two-step release contract: DCENT_MANIFEST_PUBLIC_KEY_HEX must be exported
 # for BOTH build steps (this cross-compile AND the build_in_docker.sh package
@@ -698,7 +722,19 @@ if [ "$DOCKER_BIN" = docker.exe ] && command -v wslpath >/dev/null 2>&1 \
     && grep -qi microsoft /proc/version 2>/dev/null; then
     DOCKER_BUILD_CONTEXT="$(wslpath -w "$DCENTRALD_DIR")"
 elif command -v cygpath >/dev/null 2>&1; then
-    DOCKER_BUILD_CONTEXT="$(cygpath -w "$DCENTRALD_DIR")"
+    # Same long-path rule as the mount conversions below: the extended
+    # '\\?\' form is rejected by Docker Desktop; forward-slash form is not.
+    windows_docker_path() {
+        local win_value
+        win_value="$(cygpath -w "$1")"
+        if [[ "$win_value" == '\\?\'* ]]; then
+            win_value="${win_value:4}"
+            printf '%s\n' "${win_value//\\//}"
+        else
+            printf '%s\n' "$win_value"
+        fi
+    }
+    DOCKER_BUILD_CONTEXT="$(windows_docker_path "$DCENTRALD_DIR")"
 fi
 if [ "$BUILDER_IMAGE_REUSED" -eq 0 ]; then
     [ "$CAPSULE_MODE" -ne 1 ] || BUILDER_TAG_CREATED=1
@@ -836,12 +872,30 @@ if [ "$DOCKER_BIN" = docker.exe ] && command -v wslpath >/dev/null 2>&1 \
         DOCKER_RESULT_ROOT="$(wslpath -w "$CAPSULE_RESULT_ROOT_SHELL")"
     fi
 elif command -v cygpath >/dev/null 2>&1; then
-    DOCKER_DCENTRALD_DIR="$(cygpath -w "$DCENTRALD_DIR")"
-    DOCKER_DCENT_SCHEMA_DIR="$(cygpath -w "$DCENT_SCHEMA_DIR")"
-    DOCKER_STOCK_MANIFEST="$(cygpath -w "$STOCK_MANIFEST")"
-    DOCKER_STOCK_MANIFEST_SIGNATURE="$(cygpath -w "$STOCK_MANIFEST_SIGNATURE")"
+    # Windows long-path plumbing (2026-09-01, Lane H): cygpath -w emits the
+    # extended-length '\\?\' prefix once a path exceeds MAX_PATH, and Docker
+    # Desktop rejects that literal prefix as a bind-mount source ("is not a
+    # valid Windows path" — observed on the capsule RESULT_ROOT stage, ~295
+    # chars). Docker's Go runtime handles long forward-slash Windows paths
+    # natively (verified byte-identical round-trip), so re-emit the forward-
+    # slash form whenever the extended prefix appears. Short paths pass
+    # through unchanged (native backslash form).
+    windows_docker_path() {
+        local win_value
+        win_value="$(cygpath -w "$1")"
+        if [[ "$win_value" == '\\?\'* ]]; then
+            win_value="${win_value:4}"
+            printf '%s\n' "${win_value//\\//}"
+        else
+            printf '%s\n' "$win_value"
+        fi
+    }
+    DOCKER_DCENTRALD_DIR="$(windows_docker_path "$DCENTRALD_DIR")"
+    DOCKER_DCENT_SCHEMA_DIR="$(windows_docker_path "$DCENT_SCHEMA_DIR")"
+    DOCKER_STOCK_MANIFEST="$(windows_docker_path "$STOCK_MANIFEST")"
+    DOCKER_STOCK_MANIFEST_SIGNATURE="$(windows_docker_path "$STOCK_MANIFEST_SIGNATURE")"
     if [ "$CAPSULE_MODE" -eq 1 ]; then
-        DOCKER_RESULT_ROOT="$(cygpath -w "$CAPSULE_RESULT_ROOT_SHELL")"
+        DOCKER_RESULT_ROOT="$(windows_docker_path "$CAPSULE_RESULT_ROOT_SHELL")"
     fi
 else
     DOCKER_DCENTRALD_DIR="$DCENTRALD_DIR"
@@ -906,6 +960,9 @@ else
     DOCKER_RUN_IDENTITY_ARGS=()
 fi
 DOCKER_ENV_ARGS+=( -e "DCENT_TARGET_OUTPUT_PREFIX=${TARGET_OUTPUT_PREFIX}" )
+if [ -n "${DCENT_UPDATE_FEED_BASE_URL:-}" ]; then
+    DOCKER_ENV_ARGS+=( -e "DCENT_UPDATE_FEED_BASE_URL=${DCENT_UPDATE_FEED_BASE_URL}" )
+fi
 
 BUILD_RUSTFLAGS="-C link-arg=-s ${ARCH_FLAGS}"
 if [ -n "$PATH_REMAP_FLAGS" ]; then
@@ -917,9 +974,12 @@ MSYS_NO_PATHCONV=1 "$DOCKER_BIN" run --rm \
     "${DOCKER_MOUNT_ARGS[@]}" \
     -e "CARGO_TARGET_${TRIPLE_UPPER}_LINKER=${CROSS_LINKER}" \
     "${DOCKER_ENV_ARGS[@]}" \
+    -e "CARGO_BUILD_JOBS=2" \
+    -e "CARGO_INCREMENTAL=0" \
     -e "RUSTFLAGS=${BUILD_RUSTFLAGS}" \
     -e "DCENT_MANIFEST_PUBLIC_KEY_HEX=${DCENT_MANIFEST_PUBLIC_KEY_HEX:-}" \
     -e "DCENT_MANIFEST_KEY_ID=${DCENT_MANIFEST_KEY_ID:-}" \
+    -e "DCENT_OTA_PUBLIC_KEY_HEX=${DCENT_OTA_PUBLIC_KEY_HEX:-}" \
     -e "DCENT_BUILDER_KIND=docker-cross" \
     -e "DCENT_BUILDER_BASE_REFERENCE=${RUST_BUILDER_BASE}" \
     -e "DCENT_BUILDER_IMAGE_ID=${DOCKER_IMAGE_ID}" \
@@ -977,7 +1037,7 @@ MSYS_NO_PATHCONV=1 "$DOCKER_BIN" run --rm \
         {
             printf "%s\n" "CARGO_BUILD_PROFILE=release"
             env | LC_ALL=C sort | grep -E \
-                "^(AR|CC|CFLAGS|CXXFLAGS|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|RUSTC|RUSTC_WRAPPER|AR_[^=]*|CC_[^=]*|CARGO_BUILD_[^=]*|CARGO_PROFILE_RELEASE_[^=]*|CARGO_TARGET_[^=]*|DCENT_BUILDER_[^=]*|DCENT_MANIFEST_[^=]*)=" \
+                "^(AR|CC|CFLAGS|CXXFLAGS|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_INCREMENTAL|RUSTC|RUSTC_WRAPPER|AR_[^=]*|CC_[^=]*|CARGO_BUILD_[^=]*|CARGO_PROFILE_RELEASE_[^=]*|CARGO_TARGET_[^=]*|DCENT_BUILDER_[^=]*|DCENT_MANIFEST_[^=]*|DCENT_OTA_PUBLIC_KEY_HEX|DCENT_UPDATE_FEED_BASE_URL)=" \
                 || true
         } | LC_ALL=C sort -u \
             > "${inventory_dir}/${DCENT_METADATA_TARGET}.compile-env.txt"
@@ -1009,6 +1069,13 @@ if [ -f "$BINARY" ]; then
     METADATA_FILE="$BUILD_RESULT_ROOT/$TARGET_OUTPUT_PREFIX/release-inventory/${TRIPLE}.metadata.json"
     TOOLCHAIN_CONTEXT="$BUILD_RESULT_ROOT/$TARGET_OUTPUT_PREFIX/release-inventory/${TRIPLE}.toolchain.txt"
     COMPILE_ENVIRONMENT="$BUILD_RESULT_ROOT/$TARGET_OUTPUT_PREFIX/release-inventory/${TRIPLE}.compile-env.txt"
+    if [ "$CAPSULE_MODE" -eq 1 ]; then
+        RELEASE_VERSION="$(cat "$SCRIPT_DIR/../br2_external_dcentos/board/zynq/rootfs-overlay/etc/dcentos-version")"
+        python3 "$SCRIPT_DIR/release_build_identity.py" verify \
+            --binary "$BINARY" --compile-environment "$COMPILE_ENVIRONMENT" \
+            --pubkey "$(normalize_shell_path "$DCENT_RELEASE_PUBKEY_FILE")" \
+            --version "$RELEASE_VERSION"
+    fi
     if [ "$TARGET" = "s19k-tmp" ]; then
         python3 "$S19K_TMP_BUILD_VERIFIER" verify \
             --dcentrald-root "$DCENTRALD_DIR" \
@@ -1027,6 +1094,9 @@ if [ -f "$BINARY" ]; then
             "$TOOLCHAIN_CONTEXT" "$COMPILE_ENVIRONMENT"
     fi
     if [ "$CAPSULE_MODE" -eq 1 ]; then
+        python3 "$SCRIPT_DIR/release_dashboard.py" build \
+            --source "$SCRIPT_DIR/../dashboard" \
+            --output "$BUILD_RESULT_ROOT/dashboard"
         seal_result_stage() {
             python3 "$SCRIPT_DIR/release_result_stage.py" seal \
                 --capability "$DCENT_CAPSULE_RESULT_CAPABILITY" \

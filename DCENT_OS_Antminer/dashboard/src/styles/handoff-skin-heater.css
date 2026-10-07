@@ -1,5 +1,5 @@
 /* ═════════════════════════════════════════════════════════════════════════
-   DCENT_OS — Claude-Design handoff visual recreation · HEATER (VR3)
+   DCENT_OS — Design-system handoff visual recreation · HEATER (VR3)
    Loaded LAST among the per-mode skins in main.tsx (line 25, AFTER
    handoff-skin.css line 20) so it re-skins the production .mode-basic DOM to
    LOOK like the handoff Heater kit — the '.nest-*' rules in

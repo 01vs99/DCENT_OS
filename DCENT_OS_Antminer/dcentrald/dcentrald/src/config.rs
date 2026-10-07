@@ -251,6 +251,7 @@ pub fn build_stratum_config_with_enumerated_chips(
     let (nominal_hashrate_ghs, _source) =
         resolve_stratum_nominal_hashrate(config, enumerated_total_chips);
     StratumConfig {
+        v1_policy: config.pool.v1_policy.clone(),
         pool1: primary_stratum_pool(&config.pool),
         pool2: config.pool.failover1.as_ref().map(failover_stratum_pool),
         pool3: config.pool.failover2.as_ref().map(failover_stratum_pool),
@@ -403,6 +404,11 @@ pub struct DcentraldConfig {
     pub platform: PlatformIdentityConfig,
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_PLATFORM_CLAMP: std::cell::Cell<Option<(bool, bool)>> = const { std::cell::Cell::new(None) };
+}
+
 impl DcentraldConfig {
     /// Load configuration from a TOML file.
     ///
@@ -461,7 +467,8 @@ impl DcentraldConfig {
     }
 
     pub fn mining_start_enabled(&self) -> bool {
-        self.mining.enabled && self.has_configured_pool()
+        self.mining.enabled
+            && (self.has_configured_pool() || crate::firstlight_census::pool_free_start_is_admitted())
     }
 
     /// Exact credential-free policy admitted by the S19k first-install
@@ -529,6 +536,13 @@ impl DcentraldConfig {
 
     /// Validate configuration values.
     pub fn validate(&self) -> Result<()> {
+        let platform = (Self::is_am1_s9_platform(), Self::is_am2_platform());
+        #[cfg(test)]
+        let platform = TEST_PLATFORM_CLAMP.with(|value| value.get().unwrap_or(platform));
+        self.validate_for_platform(platform.0, platform.1)
+    }
+
+    fn validate_for_platform(&self, am1_s9: bool, am2: bool) -> Result<()> {
         if self.thermal.target_temp_c >= self.thermal.hot_temp_c {
             anyhow::bail!(
                 "thermal.target_temp_c ({}) must be less than thermal.hot_temp_c ({})",
@@ -833,18 +847,6 @@ impl DcentraldConfig {
                 "mining.enabled requires both pool.url and pool.worker — configure a pool before enabling mining"
             );
         }
-        if self.mining.enabled {
-            if let Some(model_name) = self
-                .mining
-                .model
-                .as_deref()
-                .and_then(model::td003_management_only_model)
-            {
-                anyhow::bail!(
-                    "mining.enabled is blocked for {model_name}: this platform is an Experimental feature / In development and must boot management-only until its platform promotion gates are complete"
-                );
-            }
-        }
         validate_pool_endpoint_urls(
             "pool",
             &self.pool.url,
@@ -987,6 +989,11 @@ impl DcentraldConfig {
                     "pool.routing_mode='weighted_split' is V1-only in this build; remove SV2 URLs and use protocol='sv1' or omit protocol"
                 );
             }
+        }
+        if !(1..=600).contains(&self.pool.v1_policy.submit_response_timeout_secs)
+            || !(1..=64).contains(&self.pool.v1_policy.max_invalid_jobs)
+        {
+            anyhow::bail!("pool.v1_policy requires submit_response_timeout_secs in 1..600 and max_invalid_jobs in 1..64");
         }
         if let Some(pct) = self.pool.reject_rate_failover_pct {
             if pct > 100 {
@@ -1161,7 +1168,7 @@ impl DcentraldConfig {
         // boundary at the HAL write path too. Validate the S9 config loudly so
         // a typo such as 15000 mV is not silently lowered at runtime.
         if self.mining.voltage_mv > 0
-            && Self::is_am1_s9_platform()
+            && am1_s9
             && self.mining.voltage_mv > AM1_S9_MAX_CHIP_RAIL_MV
         {
             anyhow::bail!(
@@ -1212,7 +1219,7 @@ impl DcentraldConfig {
         // overridden. On non-am2 platforms (S9 am1 at 9.1 V chip-rail, am3-aml
         // / am3-bb / cv1835 at ~13.7 V via different topologies) the existing
         // 5000-20000 mV envelope above still applies.
-        if Self::is_am2_platform() && self.mining.voltage_mv > 14_500 {
+        if am2 && self.mining.voltage_mv > 14_500 {
             anyhow::bail!(
                 "mining.voltage_mv ({}) exceeds am2 chip-rail ceiling 14500 mV. \
                  BHB42xxx hashboards via APW121215a/dsPIC regulators are not \
@@ -1264,7 +1271,7 @@ impl DcentraldConfig {
         // Allow the bosminer-faithful long hold ONLY when the operator explicitly
         // opts in via DCENT_AM2_HB_RESET_LONG_HOLD=1 (so a bare 92000 typo still
         // fails closed). Ceiling 120_000 ms covers the observed ~92 s.
-        let am2_reset_hold_long = std::env::var("DCENT_AM2_HB_RESET_LONG_HOLD")
+        let am2_reset_hold_long = dcentrald_common::lab_env::var("DCENT_AM2_HB_RESET_LONG_HOLD")
             .map(|v| {
                 matches!(
                     v.trim(),
@@ -1402,7 +1409,7 @@ impl DcentraldConfig {
     /// For unit tests, override via the `DCENT_FORCE_AM2_VOLTAGE_CLAMP=1`
     /// environment variable.
     fn is_am2_platform() -> bool {
-        if std::env::var("DCENT_FORCE_AM2_VOLTAGE_CLAMP").as_deref() == Ok("1") {
+        if dcentrald_common::lab_env::var("DCENT_FORCE_AM2_VOLTAGE_CLAMP").as_deref() == Ok("1") {
             return true;
         }
         if let Ok(family) = std::fs::read_to_string("/etc/dcentos/board_family") {
@@ -1423,7 +1430,7 @@ impl DcentraldConfig {
     ///
     /// For unit tests, override via `DCENT_FORCE_AM1_S9_VOLTAGE_CLAMP=1`.
     fn is_am1_s9_platform() -> bool {
-        if std::env::var("DCENT_FORCE_AM1_S9_VOLTAGE_CLAMP").as_deref() == Ok("1") {
+        if dcentrald_common::lab_env::var("DCENT_FORCE_AM1_S9_VOLTAGE_CLAMP").as_deref() == Ok("1") {
             return true;
         }
         if let Ok(target) = std::fs::read_to_string("/etc/dcentos/board_target") {
@@ -1620,6 +1627,9 @@ fn default_mask_logs() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PoolConfig {
+    /// Bounded V1 response/work admission policy and opt-in capacity hints.
+    #[serde(default)]
+    pub v1_policy: dcentrald_stratum::types::V1Policy,
     /// Primary pool URL (e.g., "stratum+tcp://pool.example.com:3333").
     #[serde(default)]
     pub url: String,
@@ -1729,6 +1739,7 @@ pub struct PoolConfig {
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
+            v1_policy: Default::default(),
             url: String::new(),
             worker: default_worker(),
             password: default_pool_password(),
@@ -1793,6 +1804,16 @@ fn default_pool_password() -> String {
 // Mining configuration
 // ---------------------------------------------------------------------------
 
+/// Declared source of AM2 hybrid startup state. This is configuration
+/// intent, not a factory, carrier, controller, rail or mining capability.
+/// Missing values preserve historical environment-selected launch behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Am2BootOrigin {
+    NativeCold,
+    InheritedHandoff,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MiningConfig {
@@ -1826,6 +1847,13 @@ pub struct MiningConfig {
     /// intended clean-image DCENT_OS runtime path.
     #[serde(default = "default_false")]
     pub passthrough: bool,
+
+    /// Explicit AM2 hybrid boot origin. Clean images select native_cold so
+    /// an inherited-rail environment cannot silently replace native startup.
+    /// None preserves existing standalone and handoff configuration files.
+    /// This does not select or authorize a new hardware recipe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub am2_boot_origin: Option<Am2BootOrigin>,
 
     /// Enable ASICBoost version rolling (overt, BIP 310).
     /// Requested mask is `version_rolling_mask`; the pool may negotiate a
@@ -2189,6 +2217,7 @@ impl Default for MiningConfig {
             voltage_mv: default_voltage(),
             suggest_difficulty: default_suggest_difficulty(),
             passthrough: false,
+            am2_boot_origin: None,
             // P0 FIX (2026-03-25, DCENT_Swarm): Default to true — ASICBoost provides
             // ~20-25% more effective hashrate. Pools that don't support it gracefully
             // degrade (mining.configure is optional). Default false cost ~$49/yr per miner.
@@ -2426,7 +2455,7 @@ mod tests {
         profile_nominal_hashrate_ghs, resolve_stratum_nominal_hashrate, stratum_donation_config,
         CurtailmentScheduleConfig, DcentraldConfig, HashOnDisconnectPolicy, MiningConfig,
         NominalHashrateSource, PowerConfig, PsuOverride, WatchdogConfig,
-        MAX_PERSISTED_CONFIG_BYTES,
+        MAX_PERSISTED_CONFIG_BYTES, TEST_PLATFORM_CLAMP,
     };
     use dcentrald_api::NetworkBlockConfig;
     use proptest::prelude::*;
@@ -2616,6 +2645,47 @@ mod tests {
         );
     }
 
+    /// C6 (operator decision 2026-09-01): DCENT_OS ships with ZERO
+    /// mandatory fee. Pin the daemon-side donation posture: the
+    /// all-serde-defaults parse (the no-brick fallback basis) must carry
+    /// NO donation route, and the stratum conversion must preserve that.
+    /// The opt-in path (enabled=true, percent 1-5, pinned D-Central
+    /// pool/worker) must still validate and convert cleanly.
+    #[test]
+    fn donation_default_is_zero_fee_opt_in() {
+        let cfg: DcentraldConfig = toml::from_str("").expect("empty TOML parses");
+        assert!(
+            !cfg.donation.enabled,
+            "donation must default to disabled (0% mandatory-fee posture)"
+        );
+        assert_eq!(
+            cfg.donation.percent, 0.0,
+            "donation percent must default to 0.0"
+        );
+        let converted = stratum_donation_config(&cfg.donation);
+        assert!(!converted.enabled);
+        assert_eq!(converted.percent, 0.0);
+
+        // Opt-in keeps the pinned D-Central route and still validates.
+        let mut opted_in: DcentraldConfig = toml::from_str("").expect("empty TOML parses");
+        opted_in.donation.enabled = true;
+        opted_in.donation.percent = 2.0;
+        opted_in.pool.url = "stratum+tcp://pool.example.com:3333".to_string();
+        opted_in.pool.worker = "worker.1".to_string();
+        opted_in
+            .normalize_legacy_fields()
+            .expect("opted-in donation normalizes");
+        opted_in.validate().expect("opted-in donation validates");
+        assert_eq!(
+            opted_in.donation.pool_url,
+            "stratum+tcp://pool.d-central.tech:3333"
+        );
+        assert_eq!(opted_in.donation.worker, "DungeonMaster");
+        let converted = stratum_donation_config(&opted_in.donation);
+        assert!(converted.enabled);
+        assert_eq!(converted.percent, 2.0);
+    }
+
     #[test]
     fn config_load_is_bounded_regular_file_only_and_absence_is_exact() {
         let dir = std::env::temp_dir().join(format!(
@@ -2762,10 +2832,8 @@ model = "s19jpro"
     }
 
     #[test]
-    fn td003_models_validate_when_management_only() {
-        for model in [
-            "s15", "t15", "s17", "s17pro", "s17+", "t17", "t17+", "t19", "s19xp", "s19jxp",
-        ] {
+    fn models_validate_when_mining_is_disabled() {
+        for model in ["s15", "t15", "s17", "s17pro", "s17+", "t17", "t17+", "t19"] {
             let cfg = mining_config_for_model(model, false);
             cfg.validate().unwrap_or_else(|err| {
                 panic!("{model} management-only config must validate: {err}")
@@ -2778,32 +2846,20 @@ model = "s19jpro"
     }
 
     #[test]
-    fn td003_models_reject_mining_enabled_until_promoted() {
-        for model in [
-            "s15", "t15", "s17", "s17pro", "s17+", "t17", "t17+", "t19", "s19xp", "s19jxp",
-        ] {
+    fn configured_model_start_defers_hardware_authority_to_runtime() {
+        for model in ["s15", "t15", "s17", "s17pro", "s17+", "t17", "t17+", "t19"] {
             let cfg = mining_config_for_model(model, true);
-            let err = cfg
-                .validate()
-                .expect_err("TD-003 model must not validate with mining enabled by default")
-                .to_string();
-            assert!(
-                err.contains("Experimental feature / In development"),
-                "{model} error must use product-grade tier copy: {err}"
-            );
-            assert!(
-                err.contains("management-only"),
-                "{model} error must instruct management-only boot: {err}"
-            );
+            cfg.validate().unwrap_or_else(|err| panic!("{model}: {err}"));
+            assert!(cfg.mining_start_enabled());
         }
     }
 
     #[test]
-    fn td003_gate_does_not_block_proven_or_existing_model_configs() {
+    fn existing_model_configurations_still_validate() {
         for model in ["s9", "s19jproam2", "s19jpro", "s19pro", "s21", "s19k"] {
             let cfg = mining_config_for_model(model, true);
             cfg.validate()
-                .unwrap_or_else(|err| panic!("{model} must not be blocked by TD-003 gate: {err}"));
+                .unwrap_or_else(|err| panic!("{model} configuration must validate: {err}"));
             assert!(
                 cfg.mining_start_enabled(),
                 "{model} mining start flag should keep existing semantics"
@@ -4143,7 +4199,6 @@ hashrate_step_ths = 11.0
             .expect("S19k PSU template fields should validate");
     }
 
-    // -------------------------------------------------------------------
     /// Track 1 hard host parse gate: `dcentrald_s19k.toml` must load through
     /// the STRICT loader with typed identity-only `[platform]`
     /// (`target`/`board_target`) plus FS markers at runtime. Mining stays off.
@@ -4164,7 +4219,11 @@ hashrate_step_ths = 11.0
         assert_eq!(cfg.mining.serial_chip_count, Some(77));
         assert!(!cfg.mining.enabled);
         assert!(!cfg.mining_start_enabled());
-        assert!(!cfg.autotuner.enabled);
+        // C3a (2026-09-01): autotune ships default-ON (operator decision);
+        // the variant envelope guard refuses NotTunable variants — the
+        // s19k serial lane has no tuner runtime yet, so enabled=true is the
+        // config-level statement, not a tuning claim.
+        assert!(cfg.autotuner.enabled);
         assert_eq!(cfg.platform.target(), Some("am3-aml-s19k"));
         assert_eq!(cfg.platform.board_target(), Some("am3-s19k"));
     }
@@ -4189,7 +4248,10 @@ hashrate_step_ths = 11.0
         assert_eq!(cfg.mining.serial_chip_count, Some(77));
         assert!(!cfg.mining.enabled);
         assert!(!cfg.mining_start_enabled());
-        assert!(!cfg.autotuner.enabled);
+        // C3a: autotune default-ON in the shipped overlay (operator
+        // decision 2026-09-01); see the s19k pin above for the honesty
+        // note.
+        assert!(cfg.autotuner.enabled);
         assert_eq!(cfg.platform.target(), Some("am3-aml-s19k"));
         assert_eq!(cfg.platform.board_target(), Some("am3-s19k"));
     }
@@ -4343,49 +4405,18 @@ phantom_safety_flag = true
             .expect("am3-s19kpro overlay dcentrald.toml should validate after parse");
     }
 
-    // Phase 4C / EE Finding 5 #4 — am2 voltage clamp tests (2026-05-15)
-    //
-    // The 14_500 mV ceiling on am2-class boards (Zynq am2 S19 Pro /
-    // S19j Pro on BHB42xxx hashboards via APW121215a + dsPIC regulators)
-    // is enforced in `DcentraldConfig::validate()` via
-    // `is_am2_platform()`. The runtime detection uses files baked by
-    // the am2-s19jpro Buildroot post-build script
-    // (`/etc/dcentos/board_family` = "am2" and
-    // `/etc/dcentos/platform` = "zynq-bm3-am2"); for tests we use the
-    // `DCENT_FORCE_AM2_VOLTAGE_CLAMP=1` env-var override.
-    //
-    // Mutating process-wide env vars across parallel tests is unsound, so
-    // platform-clamp tests acquire a per-module mutex to serialize them.
-    // -------------------------------------------------------------------
-    use std::sync::Mutex;
-    static AM2_CLAMP_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Helper for am2 voltage-clamp tests: takes the env-mutation lock,
-    /// sets the override, runs the closure, then unsets the override.
-    /// Returns whatever the closure returns. Safe across parallel tests.
-    fn with_forced_am2_clamp<R>(f: impl FnOnce() -> R) -> R {
-        let _guard = AM2_CLAMP_ENV_LOCK
-            .lock()
-            .expect("AM2 clamp env lock poisoned");
-        std::env::remove_var("DCENT_FORCE_AM1_S9_VOLTAGE_CLAMP");
-        std::env::set_var("DCENT_FORCE_AM2_VOLTAGE_CLAMP", "1");
-        let result = f();
-        std::env::remove_var("DCENT_FORCE_AM2_VOLTAGE_CLAMP");
-        result
+    // Inject the platform into actual config validation without mutating the
+    // process environment or enabling laboratory behavior in a release test.
+    fn with_platform_clamp<R>(platform: (bool, bool), f: impl FnOnce() -> R) -> R {
+        struct Restore(Option<(bool, bool)>);
+        impl Drop for Restore {
+            fn drop(&mut self) { TEST_PLATFORM_CLAMP.with(|value| value.set(self.0)); }
+        }
+        let _restore = Restore(TEST_PLATFORM_CLAMP.with(|value| value.replace(Some(platform))));
+        f()
     }
-
-    /// Helper for am1-s9 voltage-clamp tests; shares the env lock with the
-    /// am2 helper so process-global platform overrides cannot overlap.
-    fn with_forced_am1_s9_clamp<R>(f: impl FnOnce() -> R) -> R {
-        let _guard = AM2_CLAMP_ENV_LOCK
-            .lock()
-            .expect("platform clamp env lock poisoned");
-        std::env::remove_var("DCENT_FORCE_AM2_VOLTAGE_CLAMP");
-        std::env::set_var("DCENT_FORCE_AM1_S9_VOLTAGE_CLAMP", "1");
-        let result = f();
-        std::env::remove_var("DCENT_FORCE_AM1_S9_VOLTAGE_CLAMP");
-        result
-    }
+    fn with_forced_am2_clamp<R>(f: impl FnOnce() -> R) -> R { with_platform_clamp((false, true), f) }
+    fn with_forced_am1_s9_clamp<R>(f: impl FnOnce() -> R) -> R { with_platform_clamp((true, false), f) }
 
     // SmartSwitch pool-failover toggle (matrix §7 #2 / §6 SmartSwitch row).
     // Pins the default-off config plumbing of `[pool].smart_failover_enabled`
@@ -4577,11 +4608,6 @@ voltage_mv = 13700
         // test serves as a regression-pin: do NOT make the am2 clamp
         // platform-agnostic; S9 (9.1 V chip rail) and am3 (~13.7 V via a
         // different topology) are out of scope and have their own envelopes.
-        let _guard = AM2_CLAMP_ENV_LOCK
-            .lock()
-            .expect("AM2 clamp env lock poisoned");
-        // Ensure the override is OFF for this test.
-        std::env::remove_var("DCENT_FORCE_AM2_VOLTAGE_CLAMP");
 
         // Skip if running on an actual am2 image (board_family file present).
         let on_am2_image = std::fs::read_to_string("/etc/dcentos/board_family")
@@ -4747,8 +4773,8 @@ voltage_mv = 14800
             });
 
             assert!(
-                !config.thermal.supervisor.enabled,
-                "{label} must keep the supervisor dormant by default"
+                config.thermal.supervisor.enabled,
+                "{label} must enable the conservative supervisor by default"
             );
             assert_eq!(
                 config.thermal.supervisor.min_fans, 3,
@@ -6255,11 +6281,9 @@ pub struct ApiConfig {
     #[serde(default, rename = "auth_password", skip_serializing)]
     _legacy_auth_password: Option<String>,
 
-    /// Bind CGMiner API to LAN (0.0.0.0) instead of localhost (127.0.0.1).
-    /// Enable for pyasic/hass-miner remote monitoring. Default false for security.
-    /// SECURITY: CGMiner protocol has NO authentication — LAN exposure allows
-    /// any client to send addpool/switchpool commands and redirect hashrate.
-    #[serde(default)]
+    /// Expose read-only CGMiner monitoring on LAN by default. Remote writes
+    /// require the separate, explicit cgminer_lan_writes opt-in.
+    #[serde(default = "default_true")]
     pub cgminer_bind_lan: bool,
 
     /// Allow MUTATING CGMiner/LuxOS verbs from NON-loopback peers.
@@ -6306,7 +6330,7 @@ impl Default for ApiConfig {
             websocket_tickets: false,
             _legacy_auth_enabled: None,
             _legacy_auth_password: None,
-            cgminer_bind_lan: false,
+            cgminer_bind_lan: true,
             cgminer_lan_writes: false,
             grpc: GrpcApiConfig::default(),
             metrics_require_auth: true,
@@ -6376,17 +6400,17 @@ fn default_true() -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Donation configuration — voluntary 2% default, fully transparent
+// Donation configuration — 0% default (opt-in), fully transparent
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DonationConfig {
-    /// Whether donation is enabled. Default: true.
+    /// Whether donation is enabled. Default: false (0% fee posture).
     #[serde(default = "default_donation_enabled")]
     pub enabled: bool,
 
-    /// Donation percentage (0.0 to 5.0). Default: 2.0.
+    /// Donation percentage (0.0 to 5.0). Default: 0.0.
     #[serde(default = "default_donation_percent")]
     pub percent: f32,
 
@@ -6427,8 +6451,8 @@ pub struct DonationConfig {
 impl Default for DonationConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            percent: 2.0,
+            enabled: false,
+            percent: 0.0,
             pool_url: default_donation_pool(),
             worker: default_donation_worker(),
             password: default_donation_password(),
@@ -6442,10 +6466,10 @@ impl Default for DonationConfig {
 }
 
 fn default_donation_enabled() -> bool {
-    true
+    false
 }
 fn default_donation_percent() -> f32 {
-    2.0
+    0.0
 }
 fn default_donation_pool() -> String {
     String::from("stratum+tcp://pool.d-central.tech:3333")
@@ -7450,4 +7474,22 @@ pub struct StratumProxyConfig {
 
 fn default_proxy_listen() -> String {
     "127.0.0.1:3333".to_string()
+}
+
+#[cfg(test)]
+mod cgminer_lan_default_tests {
+    use super::*;
+    #[test]
+    fn cgminer_monitoring_defaults_and_explicit_local_opt_out_are_consistent() {
+        for config in [ApiConfig::default(), toml::from_str::<ApiConfig>("").unwrap()] {
+            assert!(config.cgminer_bind_lan);
+            assert!(!config.cgminer_lan_writes);
+            assert!(!config.grpc.enabled);
+            assert!(config.grpc.bind.parse::<std::net::IpAddr>().unwrap().is_loopback());
+        }
+        let local: ApiConfig = toml::from_str("cgminer_bind_lan=false").unwrap();
+        assert!(!local.cgminer_bind_lan);
+        assert!(!local.cgminer_lan_writes);
+        assert!(toml::from_str::<ApiConfig>("cgminer_lan_writes='true'").is_err());
+    }
 }

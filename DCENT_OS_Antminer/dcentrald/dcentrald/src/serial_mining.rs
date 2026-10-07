@@ -27,6 +27,16 @@
 //!   ENABLE:      [55 AA 04 15 01 1A] -> voltage on
 //!   HEARTBEAT:   [55 AA 04 16 00 1A] -> keep alive
 //!   RESET/JUMP bootloader-control opcodes are banned on Pic0x89 paths.
+//!
+//! AM1 framed-dsPIC boundary (R02, Lead review pending): the Antminer T9+
+//! framed dsPIC33EP16GS202 controller (`dcentrald_common::am1_dspic_adapter`)
+//! is an FPGA-mediated I²C controller lane, NOT a serial-ASIC route — it must
+//! never be composed here. `am1-t9plus` dispatch fails closed in main.rs
+//! until a Lead-promoted controller lane exists (CaptureFirst: no unit has
+//! ever been contacted; control-board GPIO map and NAND slot layout remain
+//! unconfirmed). The S9/S9i/S9j bare PIC16 law (`55 AA 15 01` / `55 AA 16` at
+//! 0x55-0x57) likewise rides only the standard BM1387 PIC16 admission, never
+//! this module.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{CStr, CString};
@@ -47,6 +57,23 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+
+// Refusal-only observation must survive release builds' lab override boundary.
+fn bm1362_forbidden_post_power_reset_override() -> bool {
+    std::env::var("DCENT_BM1362_SKIP_POST_POWER_RESET")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"))
+        .unwrap_or(false)
+}
+
+mod bm1362_aml_native;
+mod classic_aml_work;
+mod classic_aml_runtime;
+mod bm1366_xp_native;
+pub(crate) mod bm1366_native_no_work;
+mod modern_native_population;
+mod s19k_native_identity;
+mod s21_native_identity;
+use s19k_native_identity::S19kNativeIdentityReceipt;
 
 use crate::s19k_endurance::{
     s19k_endurance_gate_decision, unix_time_ms, S19kEnduranceEvidence, S19kEnduranceGateDecision,
@@ -209,6 +236,9 @@ use dcentrald_asic::serial_chip_address::{
 };
 use dcentrald_asic::uart_trans::{UartTransService, UartWork, DEFAULT_CHAIN_TTYS};
 use dcentrald_asic::voltage_rail_adapters::Pic0x89VoltageRail;
+use dcentrald_common::s19k_braiins_tmp_deploy::{
+    classify_s19k_ephemeral_journal_destination, S19kEphemeralJournalDestination,
+};
 use dcentrald_common::{
     apply_safety_action, bm1397plus_addr_interval, classify_s19k_post_clean_nonce,
     classify_serial_rx_interval, plan_bm1397plus_chain_inactive_burst,
@@ -223,7 +253,7 @@ use dcentrald_common::{
         admit_s19k_bosminer_stock_fastuart_with_host_baud,
         admit_s19k_native_work_tx_after_post_baud, classify_s19k_chip_fastuart_word,
         classify_s19k_post_baud_observation, refuse_chip_heard_at_115200_as_3m_work_proof,
-        refuse_work_tx_if_host_not_3m_after_restore, s19k_bm1366_native_execution_program,
+        refuse_work_tx_if_host_not_3m_after_restore,
         s19k_passthrough_rearm_writes, s19k_track1_classify_rx_baud,
         s19k_track1_classify_rx_baud_with_reg28, s19k_track1_refuse_work_tx_if_gpio437_not_on,
         s19k_track1_retry_restore_baud, s19k_track1_should_probe_fastuart_28_at_115200,
@@ -248,7 +278,7 @@ use dcentrald_common::{
         refuse_one_chipaddress_as_77_chip_complete, S19kBm1366EnumCoverage, S19kRxDiag,
         S19kRxExpectedAfter, BM1366_JOB_ID_MASK, BM1366_UART_RESP_BODY_LEN,
     },
-    s19k_bm1366_wire_b::PUBLIC_FASTUART_REG,
+    s19k_bm1366_wire_b::{s19k_bm1366_native_execution_program, PUBLIC_FASTUART_REG},
     s19k_braiins_chain_discover::{
         admit_braiins_mining_on_ports, admit_s19k_fill_hunt_on_tx_path, admit_s19k_multi_rx_path,
         admit_s19k_multi_rx_tables, admit_s19k_multi_send_work, braiins_ttys_required,
@@ -575,10 +605,7 @@ fn s19k_take_duplicate_rx_share_paths(
     pending: &mut Vec<(S19kSubmittedShareKey, BTreeSet<String>)>,
     key: &S19kSubmittedShareKey,
 ) -> BTreeSet<String> {
-    let Some(position) = pending
-        .iter()
-        .position(|(candidate, _)| candidate == key)
-    else {
+    let Some(position) = pending.iter().position(|(candidate, _)| candidate == key) else {
         return BTreeSet::new();
     };
     pending.remove(position).1
@@ -1603,20 +1630,7 @@ const S19K_NATIVE_MIN_FAN_RPM: u32 = 2_000;
 const S19K_NATIVE_OWNER_EVIDENCE_MAX_AGE: Duration = Duration::from_secs(5);
 
 fn s19k_native_four_fan_rpm_admitted(readings: &[(u8, u32)]) -> bool {
-    if readings.len() != 4 {
-        return false;
-    }
-    let mut seen = [false; 4];
-    for &(channel, rpm) in readings {
-        let Some(slot) = seen.get_mut(usize::from(channel)) else {
-            return false;
-        };
-        if *slot || rpm < S19K_NATIVE_MIN_FAN_RPM {
-            return false;
-        }
-        *slot = true;
-    }
-    seen.into_iter().all(|present| present)
+    dcentrald_silicon_profiles::s19k_nopic_admission::admit_bm1366_airflow(None, readings).is_ok()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1930,11 +1944,14 @@ impl NoPicPsuGuard {
         &mut self,
         fan_max_pwm: u8,
         lifecycle_owner: dcentrald_hal::platform::amlogic::AmlogicPowerThermalLifecycleOwner,
-    ) {
+    ) -> Result<()> {
+        let recipe = lifecycle_owner.gpio437_recipe()?;
+        bind_nopic_teardown_recipe(&NOPIC_TEARDOWN_RECIPE, recipe)?;
         self.state = NoPicPowerState::MayBeEnergized;
         self.lifecycle_owner = Some(lifecycle_owner);
         self.s19k_native_reset_before_cut = false;
         arm_nopic_teardown(fan_max_pwm);
+        Ok(())
     }
 
     fn prepare_s19k_native_enable(
@@ -2140,7 +2157,7 @@ impl Drop for NoPicPsuGuard {
                 let cut = if s19k_native_reset_before_cut {
                     dcentrald_hal::platform::amlogic::disable_s19k_track1_psu_checked()
                 } else {
-                    dcentrald_hal::platform::amlogic::disable_psu_checked()
+                    disable_nopic_retained_psu_checked()
                 };
                 match cut {
                     Ok(_) => {}
@@ -2204,6 +2221,50 @@ fn checked_nopic_emergency_safe_off(guard: &mut NoPicPsuGuard) -> Result<NoPicEm
 /// crash panic hook reads this to cut PSU power. Mirrors the am2 `AM2_TEARDOWN_PARAMS`
 /// pattern (W24-CRASH-1). Stores the home fan cap, already clamped to PWM_SAFETY_MAX.
 static NOPIC_TEARDOWN_ARMED: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+// Published from the retained lifecycle owner before the generic crash arm.
+// A later marker/config change cannot change the abort-time polarity.
+static NOPIC_TEARDOWN_RECIPE: std::sync::OnceLock<
+    dcentrald_common::amlogic_gpio437::Gpio437DriveRecipe,
+> = std::sync::OnceLock::new();
+
+fn bind_nopic_teardown_recipe(
+    cell: &std::sync::OnceLock<dcentrald_common::amlogic_gpio437::Gpio437DriveRecipe>,
+    recipe: dcentrald_common::amlogic_gpio437::Gpio437DriveRecipe,
+) -> Result<()> {
+    if cell.set(recipe).is_err() {
+        anyhow::ensure!(
+            cell.get() == Some(&recipe),
+            "NoPic crash recipe cannot change population target"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn nopic_crash_recipe_is_immutable_and_requires_qualified_target() {
+    use dcentrald_common::amlogic_gpio437::resolve_drive_recipe;
+    let cell = std::sync::OnceLock::new();
+    assert!(resolve_drive_recipe("am3-unresolved").is_err());
+    assert!(cell.get().is_none());
+    let original = resolve_drive_recipe("am3-s21").unwrap();
+    bind_nopic_teardown_recipe(&cell, original).unwrap();
+    bind_nopic_teardown_recipe(&cell, original).unwrap();
+    // Even equal raw levels do not make another target the same authority.
+    let sibling = resolve_drive_recipe("am3-s19xp").unwrap();
+    assert!(bind_nopic_teardown_recipe(&cell, sibling).is_err());
+    assert_eq!(cell.get(), Some(&original));
+}
+
+fn disable_nopic_retained_psu_checked(
+) -> dcentrald_hal::Result<dcentrald_hal::platform::amlogic::PsuSafeOffReceipt> {
+    let recipe = NOPIC_TEARDOWN_RECIPE.get().copied().ok_or_else(|| {
+        dcentrald_hal::HalError::Platform(
+            "NoPic crash cutoff lacks an identity-qualified retained recipe".into(),
+        )
+    })?;
+    dcentrald_hal::platform::amlogic::disable_psu_with_retained_recipe_checked(recipe)
+}
 
 /// Native cold-start is a different process-scoped crash route from generic
 /// S21 NoPic and inherited-rail Track-1. It is armed before the first reset or
@@ -3058,6 +3119,40 @@ fn s19k_ephemeral_trial_parent(path: &Path) -> Result<&Path> {
     Ok(parent)
 }
 
+/// Parent of an endurance acknowledgement publication: the trial's
+/// `endurance_evidence/acks` directory. The trial root is validated by
+/// `s19k_ephemeral_trial_parent`; both intermediate directories must be the
+/// root-owned mode-0700 real directories the daemon created.
+fn s19k_ephemeral_ack_parent(path: &Path) -> Result<&Path> {
+    let acks = path
+        .parent()
+        .context("S19k acknowledgement publication path has no parent")?;
+    let evidence = acks
+        .parent()
+        .context("S19k acknowledgement directory has no parent")?;
+    anyhow::ensure!(
+        acks.file_name().and_then(|name| name.to_str()) == Some("acks")
+            && evidence.file_name().and_then(|name| name.to_str()) == Some("endurance_evidence"),
+        "S19k acknowledgement publication is outside endurance_evidence/acks"
+    );
+    s19k_ephemeral_trial_parent(evidence)?;
+    for (directory, label) in [
+        (evidence, "endurance evidence"),
+        (acks, "endurance acknowledgement"),
+    ] {
+        let metadata = std::fs::symlink_metadata(directory)
+            .with_context(|| format!("S19k cannot inspect {label} directory"))?;
+        anyhow::ensure!(
+            metadata.file_type().is_dir()
+                && !metadata.file_type().is_symlink()
+                && metadata.uid() == 0
+                && metadata.permissions().mode() & 0o777 == 0o700,
+            "S19k {label} directory must be root-owned mode-0700"
+        );
+    }
+    Ok(acks)
+}
+
 /// No-clobber publication primitive used by the shell-owned J0/J2/release
 /// records. The source is a private trial-local scratch file. We fsync its
 /// bytes, hard-link it to the admitted destination, fsync the destination
@@ -3066,48 +3161,45 @@ pub(crate) fn s19k_publish_ephemeral_journal_from_cli(
     source: &str,
     destination: &str,
 ) -> Result<()> {
+    // Name-level admission is the single shared set in dcentrald-common; the
+    // runner contract resolves every publisher call against the same set, so
+    // a receipt the runner publishes but this binary refuses fails at host
+    // test time (2026-09-01: five post-SafeOff receipts were refused live).
+    let publication = classify_s19k_ephemeral_journal_destination(source, destination)
+        .map_err(|reason| anyhow::anyhow!("{reason}"))?;
     let source = PathBuf::from(source);
     let destination = PathBuf::from(destination);
     anyhow::ensure!(
         source.is_absolute() && destination.is_absolute(),
         "S19k journal source/destination must be absolute"
     );
-    let source_parent = s19k_ephemeral_trial_parent(&source)?;
+    let source_parent = match publication {
+        S19kEphemeralJournalDestination::EnduranceAck => s19k_ephemeral_ack_parent(&source)?,
+        S19kEphemeralJournalDestination::TrialJournal
+        | S19kEphemeralJournalDestination::GlobalOwner => s19k_ephemeral_trial_parent(&source)?,
+    };
     let destination_parent = destination
         .parent()
         .context("S19k journal destination has no parent")?;
-    let destination_name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("S19k journal destination basename is not UTF-8")?;
-    let destination_is_trial = destination_parent == source_parent
-        && matches!(
-            destination_name,
-            "runtime_startup_c1_child_identity"
-                | "runtime_startup_j2_child_bound"
-                | "runtime_startup_release"
-                | "runtime_startup_retired_terminal"
-                | "runtime_startup_retire_cleanup_commit"
-                | "runtime_startup_prefix_pre_safeoff"
-                | "runtime_safeoff_terminal_receipt"
-        );
-    let destination_is_global_owner = destination_parent
-        == Path::new("/tmp/dcent-s19k-track1-runtime-lock")
-        && destination_name == "owner";
-    anyhow::ensure!(
-        destination_is_trial || destination_is_global_owner,
-        "S19k journal destination is not an admitted startup authority path"
-    );
-    if destination_is_global_owner {
-        let lock_metadata = std::fs::symlink_metadata(destination_parent)
-            .context("S19k global startup lock directory is absent")?;
-        anyhow::ensure!(
-            lock_metadata.file_type().is_dir()
-                && !lock_metadata.file_type().is_symlink()
-                && lock_metadata.uid() == 0
-                && lock_metadata.permissions().mode() & 0o777 == 0o700,
-            "S19k global startup lock must be root-owned mode-0700"
-        );
+    match publication {
+        S19kEphemeralJournalDestination::GlobalOwner => {
+            let lock_metadata = std::fs::symlink_metadata(destination_parent)
+                .context("S19k global startup lock directory is absent")?;
+            anyhow::ensure!(
+                lock_metadata.file_type().is_dir()
+                    && !lock_metadata.file_type().is_symlink()
+                    && lock_metadata.uid() == 0
+                    && lock_metadata.permissions().mode() & 0o777 == 0o700,
+                "S19k global startup lock must be root-owned mode-0700"
+            );
+        }
+        S19kEphemeralJournalDestination::TrialJournal
+        | S19kEphemeralJournalDestination::EnduranceAck => {
+            anyhow::ensure!(
+                destination_parent == source_parent,
+                "S19k journal destination must share the admitted source directory"
+            );
+        }
     }
     s19k_require_path_absent(&destination, "startup journal destination")?;
     let source_metadata =
@@ -8809,6 +8901,7 @@ impl Drop for Track1HostBaudRestore<'_> {
 /// a failed S19k cut explicitly re-holds PWM100, while generic S21 fan state is
 /// left unchanged. All errors are swallowed (the panic hook must not re-panic).
 pub fn nopic_panic_hook_best_effort_teardown() {
+    classic_aml_runtime::panic_teardown();
     let native_armed = S19K_NATIVE_TEARDOWN_ARMED.load(std::sync::atomic::Ordering::Acquire);
     if native_armed || NOPIC_TEARDOWN_ARMED.get().is_some() {
         let cap_pwm = NOPIC_TEARDOWN_ARMED
@@ -8828,7 +8921,7 @@ pub fn nopic_panic_hook_best_effort_teardown() {
         let cut_succeeded = if s19k_reset_and_raw1 {
             dcentrald_hal::platform::amlogic::disable_s19k_track1_psu_checked().is_ok()
         } else {
-            dcentrald_hal::platform::amlogic::disable_psu_checked().is_ok()
+            disable_nopic_retained_psu_checked().is_ok()
         };
         let explicit_loud_authority = track1_armed
             && S19K_TRACK1_LOUD_FAN_AUTHORIZED.load(std::sync::atomic::Ordering::Acquire);
@@ -9119,7 +9212,7 @@ fn serial_decode_night_pll_queue_frame(frame: &[u8]) -> Option<u32> {
     Some(u32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]))
 }
 
-fn serial_night_pll0_value(chip_id: u16, mhz: u16) -> Option<u32> {
+fn serial_night_pll_solution(chip_id: u16, mhz: u16) -> Option<dcentrald_common::PllSolution> {
     let family = match chip_id {
         0x1362 => dcentrald_common::PllFamily::Bm1362,
         0x1366 => dcentrald_common::PllFamily::Bm1366,
@@ -9128,7 +9221,12 @@ fn serial_night_pll0_value(chip_id: u16, mhz: u16) -> Option<u32> {
         0x1398 => dcentrald_common::PllFamily::Bm1398,
         _ => return None,
     };
-    Some(dcentrald_common::resolve_pll(family, mhz).register_value)
+    Some(dcentrald_common::resolve_pll(family, mhz))
+}
+
+#[cfg(test)]
+fn serial_night_pll0_value(chip_id: u16, mhz: u16) -> Option<u32> {
+    serial_night_pll_solution(chip_id, mhz).map(|solution| solution.register_value)
 }
 
 fn serial_adopt_live_night_frequency(
@@ -9138,6 +9236,7 @@ fn serial_adopt_live_night_frequency(
     thermal_night: &crate::config::NightModeConfig,
     home_rx: &tokio::sync::watch::Receiver<dcentrald_common::night_power::NightFanWindow>,
     chip_id: u16,
+    industrial_policy: Option<IndustrialSerialPllPolicy>,
     work_queue: &Mutex<VecDeque<SerialQueuedTx>>,
     board_temp_c: f32,
     live_mhz_tx: &tokio::sync::watch::Sender<dcentrald_common::night_power::SerialLiveFrequency>,
@@ -9167,13 +9266,24 @@ fn serial_adopt_live_night_frequency(
     ) else {
         return;
     };
-    let Some(pll) = serial_night_pll0_value(chip_id, next) else {
+    let solution = if let Some(policy) = industrial_policy.filter(|policy| policy.is_bm1362_aml()) {
+        bm1362_aml_native::industrial_pll(next, policy).ok().map(
+            |(register_value, actual_freq_mhz)| dcentrald_common::PllSolution {
+                register_value,
+                actual_freq_mhz,
+                family: dcentrald_common::PllFamily::Bm1362,
+            },
+        )
+    } else {
+        serial_night_pll_solution(chip_id, next)
+    };
+    let Some(solution) = solution else {
         return;
     };
     work_queue
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .push_back(SerialQueuedTx::control(serial_night_pll_queue_frame(pll)));
+        .push_back(SerialQueuedTx::pll(solution));
     *operating_freq = next;
     let _ = live_mhz_tx.send(dcentrald_common::night_power::SerialLiveFrequency {
         adopted_mhz: next,
@@ -10197,9 +10307,36 @@ const BM13XX_CMD_RESP_BODY_LEN: usize = 9;
 const BM1362_JOB_ID_INC: u8 = 24;
 /// BM1366: job_id increments by 8, 9-byte response body.
 const BM1366_JOB_ID_INC: u8 = 8;
+/// Preserve S19 XP/BM1366's existing full-header +24 fallback at 1d3c9df9e:
+/// `is_bm1366` excludes XP. This is runtime preservation, not a verified XP law.
+const BM1366_XP_JOB_ID_INC: u8 = 24;
+/// BM1368: ESP-Miner components/asic/bm1368.c:235 uses (id + 24) % 128.
+const BM1368_JOB_ID_INC: u8 = 24;
+/// BM1370: ESP-Miner components/asic/bm1370.c:311 uses (id + 24) % 128.
+const BM1370_JOB_ID_INC: u8 = 24;
 /// BM1398: job_id increments by 4 (lower 2 bits = midstate index), 7-byte response body.
 const BM1398_JOB_ID_INC: u8 = 4;
 const JOB_ID_MASK: u8 = 0x7F;
+
+fn serial_job_id_increment(chip_id: u16, is_bm1366_xp: bool) -> Result<u8> {
+    match (chip_id, is_bm1366_xp) {
+        (0x1362, false) => Ok(BM1362_JOB_ID_INC),
+        (0x1366, false) => Ok(BM1366_JOB_ID_INC),
+        (0x1366, true) => Ok(BM1366_XP_JOB_ID_INC),
+        (0x1368, false) => Ok(BM1368_JOB_ID_INC),
+        (0x1370, false) => Ok(BM1370_JOB_ID_INC),
+        (0x1398, false) => Ok(BM1398_JOB_ID_INC),
+        _ => anyhow::bail!(
+            "unsupported serial job-ID dialect for chip 0x{chip_id:04X} (BM1366 XP: {is_bm1366_xp})"
+        ),
+    }
+}
+
+/// Decode response IDs whose low nibble carries the small-core index.
+/// ESP-Miner components/asic/bm1368.c:284 and bm1370.c:361 use this expression.
+fn serial_small_core_job_id(id_byte: u8) -> u8 {
+    (id_byte & 0xF0) >> 1
+}
 
 const BM1362_RESP_BODY_LEN: usize = 9;
 const BM1398_RESP_BODY_LEN: usize = 7;
@@ -10340,11 +10477,34 @@ fn bm1362_pll_lookup(target_mhz: u16) -> (u32, u16) {
     (s.register_value, s.actual_freq_mhz)
 }
 
+fn modern_s21_profile(
+    target: &str,
+    identity: dcentrald_common::AsicProtocolIdentity,
+) -> Option<dcentrald_hal::platform::amlogic::AmlogicNoPicProfile> {
+    use dcentrald_common::AsicProtocolIdentity;
+    use dcentrald_hal::platform::amlogic::AmlogicNoPicProfile;
+    match (target, identity) {
+        ("am3-s19jproa", AsicProtocolIdentity::Bm1362) => Some(AmlogicNoPicProfile::S19jProA),
+        ("am3-s19jproplus", AsicProtocolIdentity::Bm1362) => Some(AmlogicNoPicProfile::S19jProPlus),
+        ("am3-s21", AsicProtocolIdentity::Bm1368) => Some(AmlogicNoPicProfile::S21),
+        ("am3-s21pro", AsicProtocolIdentity::Bm1370) => Some(AmlogicNoPicProfile::S21Pro),
+        ("am3-s21xp", AsicProtocolIdentity::Bm1370) => Some(AmlogicNoPicProfile::S21Xp),
+        ("am3-s19xp", AsicProtocolIdentity::Bm1366) => Some(AmlogicNoPicProfile::S19Xp),
+        ("am3-s19jxp", AsicProtocolIdentity::Bm1366) => Some(AmlogicNoPicProfile::S19jXp),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IndustrialSerialPllPolicy {
+    S19jProClassicAmlBm1362Native,
+    S19jProABm1362Native,
+    S19jProPlusBm1362Native,
     S21Bm1368ShippedConfig,
     S21ProBm1370ShippedConfig,
     S21XpBm1370ShippedConfig,
+    S19XpBm1366Native,
+    S19jXpBm1366Native,
 }
 
 // DCENT's 2 MHz error ceiling is intentionally tighter than the recovered
@@ -10358,6 +10518,15 @@ impl IndustrialSerialPllPolicy {
         identity: dcentrald_common::AsicProtocolIdentity,
     ) -> Result<Self> {
         match (board_target, identity) {
+            ("am3-s19jpro-aml", dcentrald_common::AsicProtocolIdentity::Bm1362) => {
+                Ok(Self::S19jProClassicAmlBm1362Native)
+            }
+            ("am3-s19jproa", dcentrald_common::AsicProtocolIdentity::Bm1362) => {
+                Ok(Self::S19jProABm1362Native)
+            }
+            ("am3-s19jproplus", dcentrald_common::AsicProtocolIdentity::Bm1362) => {
+                Ok(Self::S19jProPlusBm1362Native)
+            }
             ("am3-s21", dcentrald_common::AsicProtocolIdentity::Bm1368) => {
                 Ok(Self::S21Bm1368ShippedConfig)
             }
@@ -10367,6 +10536,12 @@ impl IndustrialSerialPllPolicy {
             ("am3-s21xp", dcentrald_common::AsicProtocolIdentity::Bm1370) => {
                 Ok(Self::S21XpBm1370ShippedConfig)
             }
+            ("am3-s19xp", dcentrald_common::AsicProtocolIdentity::Bm1366) => {
+                Ok(Self::S19XpBm1366Native)
+            }
+            ("am3-s19jxp", dcentrald_common::AsicProtocolIdentity::Bm1366) => {
+                Ok(Self::S19jXpBm1366Native)
+            }
             _ => anyhow::bail!(
                 "no evidence-backed industrial PLL policy for {board_target}/{identity:?}"
             ),
@@ -10375,13 +10550,32 @@ impl IndustrialSerialPllPolicy {
 
     fn admits_target(self, target_mhz: u16) -> bool {
         match self {
+            // Initial native AML policy uses exact whole-MHz BM1362 table steps.
+            Self::S19jProABm1362Native | Self::S19jProPlusBm1362Native | Self::S19jProClassicAmlBm1362Native => {
+                (400..=500).contains(&target_mhz) && target_mhz % 25 == 0
+            }
             // Shipped DCENT config: disabled tuner 200..=500, target 400.
             Self::S21Bm1368ShippedConfig => (200..=500).contains(&target_mhz),
+            // DCENT default400; held stock upper levels485/515. These bounds
+            // are conservative software policy, not electrical qualification.
+            Self::S19XpBm1366Native => (400..=485).contains(&target_mhz),
+            Self::S19jXpBm1366Native => (300..=515).contains(&target_mhz),
             // Shipped DCENT configs: disabled tuner 400..=585, target 480.
             Self::S21ProBm1370ShippedConfig | Self::S21XpBm1370ShippedConfig => {
                 (400..=585).contains(&target_mhz)
             }
         }
+    }
+
+    fn is_bm1362_aml(self) -> bool {
+        matches!(
+            self,
+            Self::S19jProABm1362Native | Self::S19jProPlusBm1362Native | Self::S19jProClassicAmlBm1362Native
+        )
+    }
+
+    fn is_bm1366_xp(self) -> bool {
+        matches!(self, Self::S19XpBm1366Native | Self::S19jXpBm1366Native)
     }
 
     fn is_bm1368(self) -> bool {
@@ -10504,12 +10698,7 @@ impl Am2Bm1362DirectSerialAdmission {
                 dispatch.identity()
             );
         }
-        if !crate::env_flag("DCENT_ALLOW_AM2_BM1362_SERIAL_WORK") {
-            anyhow::bail!(
-                "AM2 BM1362 direct serial is Experimental and requires DCENT_ALLOW_AM2_BM1362_SERIAL_WORK=1 before hardware construction"
-            );
-        }
-        if crate::env_flag("DCENT_BM1362_SKIP_POST_POWER_RESET") {
+        if bm1362_forbidden_post_power_reset_override() {
             anyhow::bail!(
                 "validated AM2 BM1362 direct serial refuses the hot-start multi-baud reset spray; a fresh reset-to-115200 baseline is mandatory"
             );
@@ -10583,6 +10772,7 @@ pub struct SerialMiner {
     config: DcentraldConfig,
     shutdown: CancellationToken,
     explicit_loud_fan_authority: bool,
+    bm1366_native_no_work: bool,
     s19k_install_custody_safeoff: bool,
     s19k_track1_no_work: bool,
     s19k_track1_bounded_work_proof: bool,
@@ -10625,6 +10815,8 @@ struct ValidatedSerialChainAdmission {
 struct ValidatedSerialAssignedGeometry {
     identity: dcentrald_common::AsicProtocolIdentity,
     observed_chip_count: NonZeroU8,
+    /// Actual PLL MHz from successfully completed native initialization; zero is unknown.
+    applied_frequency_mhz: u16,
     addresses: Vec<u8>,
     /// Shared-contract coverage certificate for the same accept decision
     /// (2026-08-29 rebase). The ordered exact-plan check above is strictly
@@ -10676,9 +10868,15 @@ impl ValidatedSerialAssignedGeometry {
         Ok(Self {
             identity: expected_identity,
             observed_chip_count: configured_chip_count,
+            applied_frequency_mhz: 0,
             addresses: expected_addresses,
             coverage_certificate,
         })
+    }
+
+    fn with_applied_frequency(mut self, mhz: u16) -> Self {
+        self.applied_frequency_mhz = mhz;
+        self
     }
 
     fn observed_chip_count(&self) -> u8 {
@@ -10766,6 +10964,7 @@ impl ValidatedSerialChainAdmission {
         if !matches!(
             dispatch.identity(),
             dcentrald_common::AsicProtocolIdentity::Bm1362
+                | dcentrald_common::AsicProtocolIdentity::Bm1366
                 | dcentrald_common::AsicProtocolIdentity::Bm1368
                 | dcentrald_common::AsicProtocolIdentity::Bm1370
         ) {
@@ -10792,11 +10991,21 @@ impl ValidatedSerialChainAdmission {
             );
         }
         let industrial_pll_policy = match dispatch.identity() {
-            dcentrald_common::AsicProtocolIdentity::Bm1368
+            dcentrald_common::AsicProtocolIdentity::Bm1366
+            | dcentrald_common::AsicProtocolIdentity::Bm1368
             | dcentrald_common::AsicProtocolIdentity::Bm1370 => Some(
                 IndustrialSerialPllPolicy::for_route(dispatch.board_target(), dispatch.identity())?,
             ),
-            dcentrald_common::AsicProtocolIdentity::Bm1362 => None,
+            dcentrald_common::AsicProtocolIdentity::Bm1362 => {
+                modern_s21_profile(dispatch.board_target(), dispatch.identity())
+                    .map(|_| {
+                        IndustrialSerialPllPolicy::for_route(
+                            dispatch.board_target(),
+                            dispatch.identity(),
+                        )
+                    })
+                    .transpose()?
+            }
             _ => unreachable!("identity was restricted above"),
         };
         Ok(Self {
@@ -10815,6 +11024,8 @@ impl ValidatedSerialChainAdmission {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExactSerialRoute {
+    /// Dedicated classic bus0 PIC + bus1 identity + AM3 PSU composition.
+    ClassicAml,
     NoPic,
     /// Native S19k BM1366 has the NoPic watchdog roster but deliberately
     /// remains a distinct route: it owns two logical UARTs and must never
@@ -10898,7 +11109,9 @@ impl SerialSessionToken {
     #[cfg(test)]
     fn from_validated_for_test(admission: &ValidatedSerialChainAdmission) -> Self {
         let descriptor = SerialSessionDescriptor::from_validated(admission);
-        let route = if descriptor.identity == dcentrald_common::AsicProtocolIdentity::Bm1362 {
+        let route = if descriptor.identity == dcentrald_common::AsicProtocolIdentity::Bm1362
+            && descriptor.industrial_pll_policy.is_none()
+        {
             ExactSerialRoute::Am2Bm1362
         } else {
             ExactSerialRoute::NoPic
@@ -10934,6 +11147,15 @@ pub(crate) struct SerialExecutionBarrierReceipt {
 }
 
 impl SerialExecutionBarrierReceipt {
+    pub(crate) fn require_classic_scope(&self, scope: &crate::runtime::safety_watchdog::WatchdogRunScope) -> Result<Instant> {
+        let token = self._receipt.token();
+        anyhow::ensure!(token.route == ExactSerialRoute::ClassicAml
+            && token._run_scope.same_run(scope)
+            && token.descriptor.board_target == "am3-s19jpro-aml"
+            && token.descriptor.identity == dcentrald_common::AsicProtocolIdentity::Bm1362
+            && !self._receipt.fence_poisoned(), "classic serial cutoff belongs to another run/route or a failed commit");
+        Ok(self._receipt.fenced_at())
+    }
     fn from_receipt(receipt: ExecutionFenceReceipt<SerialSessionToken>) -> Self {
         Self { _receipt: receipt }
     }
@@ -10968,13 +11190,27 @@ struct Am2ObservedResetBaseline {
     descriptor: SerialSessionDescriptor,
 }
 
+fn validate_native_cold_window(
+    identity: dcentrald_common::AsicProtocolIdentity,
+    responses: &[Vec<u8>],
+) -> Result<ValidatedSerialChipAddressWindow> {
+    if identity == dcentrald_common::AsicProtocolIdentity::Bm1362 {
+        let cold = validate_unassigned_address_window(responses.iter().map(Vec::as_slice))
+            .map_err(|error| anyhow::anyhow!("BM1362 reset-baseline reply refused: {error:?}"))?;
+        Ok(ValidatedSerialChipAddressWindow::from_bm1362_reset_baseline(cold))
+    } else {
+        validate_serial_chip_address_window(responses.iter().map(Vec::as_slice))
+            .map_err(|error| anyhow::anyhow!("native cold reply refused: {error:?}"))
+    }
+}
+
 impl NoPicSerialObservation {
     fn observe_candidate(&self, probe_baud: u32) -> Result<Option<NoPicAdmittedSerial>> {
         self.inner
             .execution
             .commit("NoPic serial admission observation", || -> Result<_> {
                 let probe = match SerialChainBackend::open(
-                    0,
+                    self.inner.descriptor.active_slot,
                     &self.inner.descriptor.serial_device,
                     probe_baud,
                 ) {
@@ -10984,7 +11220,9 @@ impl NoPicSerialObservation {
                         return Ok(None);
                     }
                 };
-                probe.set_response_len(BM13XX_CMD_RESP_BODY_LEN);
+                probe.set_response_len(if self.inner.descriptor.identity == dcentrald_common::AsicProtocolIdentity::Bm1362 {
+                    BM1362_UNASSIGNED_RESP_BODY_LEN
+                } else { BM13XX_CMD_RESP_BODY_LEN });
                 if let Err(error) = probe.flush_io() {
                     warn!(probe_baud, %error, "Unable to clear stale UART responses before serial admission probe");
                     return Ok(None);
@@ -11001,11 +11239,16 @@ impl NoPicSerialObservation {
                         return Ok(None);
                     }
                 };
-                match validate_serial_chip_address_window(responses.iter().map(Vec::as_slice)) {
+                match validate_native_cold_window(self.inner.descriptor.identity, &responses) {
                     Ok(window)
                         if window.identity() == self.inner.descriptor.identity
                             && usize::from(window.observed_frames().get())
-                                <= usize::from(self.inner.descriptor.configured_chip_count) =>
+                                <= usize::from(self.inner.descriptor.configured_chip_count)
+                            && modern_s21_profile(&self.inner.descriptor.board_target, self.inner.descriptor.identity)
+                                .is_none_or(|profile| profile.modern_s21_geometry().is_some_and(|(_, count)|
+                                    window.observed_frames().get() == count
+                                        && self.inner.descriptor.configured_chip_count == count
+                                        && window.shape() == SerialAddressWindowShape::RepeatedUnassignedZero)) =>
                     {
                         info!(
                             probe_baud,
@@ -11145,10 +11388,12 @@ mod serial_route_domains {
     /// production constructor: only that joined owner can issue this token.
     /// `expected_chips_per_uart` is a required post-open target, not evidence
     /// of 77 chips on any selected route; fresh CRC-valid geometry is
-    /// established only by cold init.
+    /// established only by cold init. `board_target` names the admitted
+    /// per-platform BM1366 serial profile the value came from (B8).
     struct S19kNativePreSerialAdmission {
         run_scope: crate::runtime::safety_watchdog::WatchdogRunScope,
         mapped_routes: Vec<dcentrald_hal::platform::amlogic::S19kNativeLogicalChainRoute>,
+        board_target: &'static str,
         expected_chips_per_uart: u8,
         _identity_sha256: String,
         _model_sha256: String,
@@ -11160,7 +11405,7 @@ mod serial_route_domains {
     pub(super) struct S19kNativeColdStartOwner {
         pre_serial: Option<S19kNativePreSerialAdmission>,
         _dispatch: crate::SerialRuntimeDispatchAdmission,
-        _identity: S19kLiveIdentityReceipt,
+        _identity: S19kNativeIdentityReceipt,
         _pre_cooling: S19kNativeCoolingAdmission,
         _powered_cooling: S19kNativeCoolingAdmission,
         _post_cooling: S19kNativeCoolingAdmission,
@@ -11177,7 +11422,7 @@ mod serial_route_domains {
             domains: &SerialRouteDomains,
             dispatch: crate::SerialRuntimeDispatchAdmission,
             platform: &dcentrald_hal::platform::amlogic::S19kNativePopulationAdmission,
-            identity: S19kLiveIdentityReceipt,
+            identity: S19kNativeIdentityReceipt,
             pre_cooling: S19kNativeCoolingAdmission,
             powered_cooling: S19kNativeCoolingAdmission,
             post_cooling: S19kNativeCoolingAdmission,
@@ -11196,11 +11441,35 @@ mod serial_route_domains {
                 .as_ref()
                 .context("native cold-start watchdog scope disappeared before owner join")?
                 .clone();
+            // B8 (2026-09-02): the am3-s19k literal re-check became the
+            // per-platform BM1366 serial profile lookup
+            // (`dcentrald_common::bm1366_serial_platform`). Only a
+            // dispatch-admitted profile can join the native cold-start
+            // owner — am3-s19k today, admission semantics unchanged. The
+            // profile's geometry is additionally cross-checked against the
+            // HAL native expected constant so the common table and the HAL
+            // cannot drift apart silently.
+            let platform_profile =
+                dcentrald_common::bm1366_serial_platform::bm1366_dispatch_admitted_serial_platform(
+                    platform.board_target(),
+                )
+                .map_err(|gate| {
+                    anyhow::anyhow!(
+                        "BM1366 native cold-start platform {} is not dispatch-admitted: {gate}",
+                        platform.board_target()
+                    )
+                })?;
             anyhow::ensure!(
                 dispatch.identity() == dcentrald_common::AsicProtocolIdentity::Bm1366
                     && dispatch.board_target() == platform.board_target()
-                    && platform.board_target() == "am3-s19k",
+                    && dispatch.board_target() == platform_profile.board_target,
                 "native cold-start identity/board-target admission mismatch"
+            );
+            anyhow::ensure!(
+                platform_profile.expected_chips_per_uart
+                    == dcentrald_hal::platform::amlogic::S19K_NATIVE_EXPECTED_CHIPS_PER_UART,
+                "BM1366 serial platform profile for {} disagrees with the HAL native expected chips per UART",
+                platform_profile.board_target
             );
             anyhow::ensure!(
                 identity.board_count == identity.profile.board_count()
@@ -11246,8 +11515,8 @@ mod serial_route_domains {
             let pre_serial = S19kNativePreSerialAdmission {
                 run_scope,
                 mapped_routes,
-                expected_chips_per_uart:
-                    dcentrald_hal::platform::amlogic::S19K_NATIVE_EXPECTED_CHIPS_PER_UART,
+                board_target: platform_profile.board_target,
+                expected_chips_per_uart: platform_profile.expected_chips_per_uart,
                 _identity_sha256: identity.sha256.clone(),
                 _model_sha256: identity.model_sha256.clone(),
             };
@@ -11543,6 +11812,7 @@ mod serial_route_domains {
                     dcentrald_hal::platform::HardwareMutationGateOwner::new_pending(),
                 )),
                 reset: match route {
+                    ExactSerialRoute::ClassicAml => unreachable!("classic uses its own runtime owner"),
                     ExactSerialRoute::NoPic
                     | ExactSerialRoute::S19kNative
                     | ExactSerialRoute::S19kTrack1 => Am2ResetLifecycle::NotApplicable,
@@ -11614,6 +11884,7 @@ mod serial_route_domains {
             route: ExactSerialRoute,
         ) -> Result<Self> {
             match route {
+                ExactSerialRoute::ClassicAml => anyhow::bail!("classic uses its own watchdog route scope"),
                 ExactSerialRoute::NoPic => Self::claim_nopic(watchdog),
                 ExactSerialRoute::S19kNative => Self::claim_s19k_native(watchdog),
                 ExactSerialRoute::S19kTrack1 => Self::claim_s19k_track1(
@@ -11779,9 +12050,24 @@ mod serial_route_domains {
                 route_scope.same_run(&admission.run_scope),
                 "S19k native pre-serial admission belongs to another watchdog run"
             );
+            // B8 (2026-09-02): the promotion geometry pin re-derives the
+            // dispatch-admitted platform profile from the admission's own
+            // board target instead of the 77 literal. For am3-s19k the
+            // profile still pins 77, so admitted behavior is identical; a
+            // foreign, stale, or non-admitted admission fails closed exactly
+            // as before (defense in depth below: the S19k-exact bosminer
+            // 77-address init program refuses every other geometry).
+            let platform_profile =
+                dcentrald_common::bm1366_serial_platform::bm1366_dispatch_admitted_serial_platform(
+                    admission.board_target,
+                )
+                .map_err(|gate| {
+                    anyhow::anyhow!("S19k native execution platform refused: {gate}")
+                })?;
             anyhow::ensure!(
-                admission.expected_chips_per_uart == 77,
-                "S19k native execution requires exact 77-chip geometry on every required UART"
+                admission.expected_chips_per_uart == platform_profile.expected_chips_per_uart,
+                "S19k native execution requires the admitted platform's exact {}-chip geometry on every required UART",
+                platform_profile.expected_chips_per_uart
             );
             anyhow::ensure!(
                 !admission.mapped_routes.is_empty(),
@@ -11798,7 +12084,7 @@ mod serial_route_domains {
                 .collect::<Vec<_>>();
 
             let descriptor = SerialSessionDescriptor {
-                board_target: "am3-s19k",
+                board_target: platform_profile.board_target,
                 identity: dcentrald_common::AsicProtocolIdentity::Bm1366,
                 // 0xFF means aggregate logical UART scope. It never asserts a
                 // physical board-slot mapping beyond the joined population.
@@ -11883,12 +12169,8 @@ mod serial_route_domains {
                 "NoPic observation endpoint does not match platform admission"
             );
             anyhow::ensure!(
-                matches!(
-                    dispatch.identity(),
-                    dcentrald_common::AsicProtocolIdentity::Bm1368
-                        | dcentrald_common::AsicProtocolIdentity::Bm1370
-                ),
-                "NoPic observation requires BM1368/BM1370 identity"
+                modern_s21_profile(dispatch.board_target(), dispatch.identity()).is_some(),
+                "NoPic observation requires an exact native model and ASIC identity"
             );
             anyhow::ensure!(
                 configured_chip_count > 0,
@@ -12394,6 +12676,7 @@ mod serial_route_domains {
             &mut self,
         ) -> Result<dcentrald_hal::platform::HardwareMutationGate> {
             match self.route {
+                ExactSerialRoute::ClassicAml => anyhow::bail!("classic owns its separate pending API gate"),
                 ExactSerialRoute::NoPic | ExactSerialRoute::S19kNative => {
                     let owner = match &mut self.api {
                         ApiMutationLifecycle::Pending(owner) => owner
@@ -14299,6 +14582,10 @@ fn classify_serial_terminal_result(
     topology: SerialActorTopology,
     terminal_error: Option<anyhow::Error>,
     terminal_closeout: Option<WatchdogCloseoutReceipt>,
+    software_closeout_run: std::result::Result<
+        dcentrald_common::mutation_disposition::SoftwareCloseoutRun,
+        String,
+    >,
 ) -> Result<()> {
     match (topology.is_exact(), terminal_error, terminal_closeout) {
         (true, Some(error), Some(closeout)) => Err(terminal_safe_off_error(error, closeout)),
@@ -14306,7 +14593,9 @@ fn classify_serial_terminal_result(
             "exact serial terminal closeout",
             format!("{error:#}; positive watchdog closeout receipt unavailable"),
         )),
-        (true, None, Some(_closeout)) => Ok(()),
+        (true, None, Some(closeout)) => {
+            crate::daemon::publish_orderly_software_closeout(software_closeout_run, &closeout)
+        }
         (true, None, None) => Err(watchdog_reset_pending_error(
             "exact serial terminal closeout",
             "positive watchdog closeout receipt unavailable",
@@ -14395,6 +14684,7 @@ struct ValidatedSerialBackend {
     backend: SerialChainBackend,
     execution: SerialExecutionCommitPort,
     am2_energized_cancellation: Option<Am2EnergizedSerialCancellation>,
+    classic_aml_cancellation: Option<CancellationToken>,
 }
 
 impl ValidatedSerialBackend {
@@ -14403,11 +14693,17 @@ impl ValidatedSerialBackend {
             backend,
             execution,
             am2_energized_cancellation: None,
+            classic_aml_cancellation: None,
         }
     }
 
     fn with_am2_energized_cancellation(mut self, shutdown: CancellationToken) -> Self {
         self.am2_energized_cancellation = Some(Am2EnergizedSerialCancellation { shutdown });
+        self
+    }
+
+    fn with_classic_aml_cancellation(mut self, shutdown: CancellationToken) -> Self {
+        self.classic_aml_cancellation = Some(shutdown);
         self
     }
 
@@ -14426,6 +14722,10 @@ impl ValidatedSerialBackend {
                 if let Some(cancellation) = self.am2_energized_cancellation.as_ref() {
                     cancellation.require_active(operation)?;
                 }
+                anyhow::ensure!(
+                    !self.classic_aml_cancellation.as_ref().is_some_and(CancellationToken::is_cancelled),
+                    "classic AML shutdown requested before {operation} commit"
+                );
                 mutation()
             })
             .map_err(anyhow::Error::from)
@@ -14457,6 +14757,12 @@ impl ValidatedSerialBackend {
         })
     }
 
+    fn flush_rx(&self) -> Result<()> {
+        self.commit("serial stale RX flush", || {
+            self.backend.flush_rx().map_err(anyhow::Error::from)
+        })
+    }
+
     fn read_all_responses(&self, max_wait_ms: u64) -> Result<Vec<Vec<u8>>> {
         self.commit("serial response window read", || {
             self.backend
@@ -14467,15 +14773,33 @@ impl ValidatedSerialBackend {
 
     /// Issue a fresh, execution-fenced GetAddress transaction and turn only
     /// its complete CRC-clean exact-family response window into evidence.
-    /// BM13xx has no request nonce, so flushing immediately before the
-    /// required query is the strongest transport-local anti-staleness bound.
+    /// BM13xx has no request nonce, so clear stale RX immediately before the
+    /// query. Preserve TX: TCIOFLUSH here discarded the XP HCN151c/A4 writes
+    /// before the physical UART had transmitted them (checkpoint13 PTY).
+    fn query_cold_chip_address_window(
+        &self,
+        expected_identity: dcentrald_common::AsicProtocolIdentity,
+        phase: &str,
+    ) -> Result<ValidatedSerialChipAddressWindow> {
+        if expected_identity != dcentrald_common::AsicProtocolIdentity::Bm1362 {
+            return self.query_chip_address_window(expected_identity, phase);
+        }
+        self.set_response_len(BM1362_UNASSIGNED_RESP_BODY_LEN);
+        self.flush_rx()?;
+        self.send_get_address_bm1397plus()?;
+        std::thread::sleep(Duration::from_millis(200));
+        let responses = self.read_all_responses(500)?;
+        validate_native_cold_window(expected_identity, &responses)
+            .with_context(|| format!("{phase}: short reset-baseline validation"))
+    }
+
     fn query_chip_address_window(
         &self,
         expected_identity: dcentrald_common::AsicProtocolIdentity,
         phase: &str,
     ) -> Result<ValidatedSerialChipAddressWindow> {
         self.set_response_len(BM13XX_CMD_RESP_BODY_LEN);
-        self.flush_io()
+        self.flush_rx()
             .with_context(|| format!("{phase}: failed to clear stale serial responses"))?;
         self.send_get_address_bm1397plus()
             .with_context(|| format!("{phase}: GetAddress query did not commit"))?;
@@ -14623,6 +14947,7 @@ impl ValidatedS19kBm1366NativeMultiBackend {
             next: AtomicUsize::new(0),
             last_rx: AtomicUsize::new(0),
             pending_rx: Mutex::new(VecDeque::new()),
+            s21_full_unit: None,
         }))
     }
 }
@@ -14639,11 +14964,51 @@ struct MultiTtyTransport {
     /// retained multi-UART set commits through this move-only port; terminal
     /// route revocation therefore closes fresh I/O before actor join.
     execution: SerialExecutionCommitPort,
-    /// True only after mapped native cold init proved 77 chips on every route.
+    /// True only after exact native cold init proved its per-board geometry on every selected route.
     native_exact_mapping: bool,
     next: AtomicUsize,
     last_rx: AtomicUsize,
     pending_rx: Mutex<VecDeque<(usize, Vec<u8>)>>,
+    /// R13 lane: exact base-S21 (am3-s21) full-unit BM1368 admission plus
+    /// its per-route nonce ledger. Only the exact-S21 native arm carries a
+    /// value; every other profile (including S19k Track-1) carries `None`
+    /// and behaves identically to before.
+    s21_full_unit: Option<dcentrald_common::bm1368_s21_board_profiles::S21FullUnitAccounting>,
+}
+
+impl MultiTtyTransport {
+    fn admit_rx_tables(&self) -> std::result::Result<(), &'static str> {
+        if self.native_exact_mapping {
+            if !(1..=3).contains(&self.backends.len())
+                || self.backends.len() != self.paths.len()
+                || self.backends.len() != self.tx_required.len()
+                || self.tx_required.iter().any(|required| !required)
+            {
+                return Err("native multi-UART population/table mismatch");
+            }
+            for index in 0..self.paths.len() {
+                if self.paths[..index].contains(&self.paths[index]) {
+                    return Err("native multi-UART duplicate route");
+                }
+            }
+            Ok(())
+        } else {
+            admit_s19k_multi_rx_tables(self.backends.len(), self.paths.len())
+        }
+    }
+
+    fn admit_tx_completion(&self, succeeded: usize) -> std::result::Result<(), &'static str> {
+        if self.native_exact_mapping {
+            self.admit_rx_tables()?;
+            if succeeded == self.backends.len() {
+                Ok(())
+            } else {
+                Err("native multi-UART work did not reach every selected board")
+            }
+        } else {
+            admit_s19k_multi_send_work(succeeded, self.backends.len())
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -15053,13 +15418,23 @@ struct S19kPendingDispatch {
 struct SerialQueuedTx {
     frame: Vec<u8>,
     s19k_pending: Option<S19kPendingDispatch>,
+    applied_frequency_mhz: Option<u16>,
 }
 
 impl SerialQueuedTx {
+    fn pll(solution: dcentrald_common::PllSolution) -> Self {
+        Self {
+            frame: serial_night_pll_queue_frame(solution.register_value),
+            s19k_pending: None,
+            applied_frequency_mhz: Some(solution.actual_freq_mhz),
+        }
+    }
+
     fn control(frame: Vec<u8>) -> Self {
         Self {
             frame,
             s19k_pending: None,
+            applied_frequency_mhz: None,
         }
     }
 
@@ -15067,6 +15442,7 @@ impl SerialQueuedTx {
         Self {
             frame,
             s19k_pending: Some(pending),
+            applied_frequency_mhz: None,
         }
     }
 }
@@ -15360,6 +15736,26 @@ impl SerialWorkTransport {
     // is filtered by `s19k_multi_send_work_tx_required` and the aggregate is
     // checked by `admit_s19k_multi_send_work` before it can be complete.
     fn write_reg_broadcast(&self, register: u8, value: u32) -> Result<()> {
+        let identity = match self {
+            Self::Legacy(_) => None,
+            Self::Multi(multi) => Some(
+                multi
+                    .execution
+                    .identity_snapshot()
+                    .context("serial register identity is poisoned")?,
+            ),
+            Self::Validated(backend) => Some(
+                backend
+                    .execution
+                    .identity_snapshot()
+                    .context("serial register identity is poisoned")?,
+            ),
+        };
+        let hcn = identity
+            .as_ref()
+            .map(|token| bm1362_aml_native::runtime_hcn(&token.descriptor, register, value))
+            .transpose()?
+            .flatten();
         match self {
             Self::Legacy(backend) => {
                 Ok(backend.send_write_reg_broadcast_bm1397plus(register, value)?)
@@ -15379,7 +15775,12 @@ impl SerialWorkTransport {
                             if !*tx_required {
                                 continue;
                             }
-                            match backend.send_write_reg_broadcast_bm1397plus(register, value) {
+                            let result = backend.send_write_reg_broadcast_bm1397plus(register, value)
+                                .and_then(|()| match hcn {
+                                    Some(hcn) => backend.send_write_reg_broadcast_bm1397plus(0x10,hcn),
+                                    None => Ok(()),
+                                });
+                            match result {
                                 Ok(()) => ok = ok.saturating_add(1),
                                 Err(error) => last_err = Some(error.into()),
                             }
@@ -15396,16 +15797,18 @@ impl SerialWorkTransport {
                                 )
                             }));
                         }
-                        if let Err(policy) = admit_s19k_multi_send_work(ok, multi.backends.len()) {
+                        if let Err(policy) = multi.admit_tx_completion(ok) {
                             return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("{policy}")));
                         }
                         Ok(())
                     })
                     .map_err(anyhow::Error::from)
             }
-            Self::Validated(backend) => {
-                backend.send_write_reg_broadcast_bm1397plus(register, value)
-            }
+            Self::Validated(backend) => backend.commit("native serial register and HCN update", || {
+                backend.backend.send_write_reg_broadcast_bm1397plus(register,value)?;
+                if let Some(hcn) = hcn { backend.backend.send_write_reg_broadcast_bm1397plus(0x10,hcn)?; }
+                Ok(())
+            }),
         }
     }
 
@@ -15455,7 +15858,8 @@ impl SerialWorkTransport {
                 anyhow::anyhow!("S19k work committed on {ok}/{required} admitted TX paths")
             }))
         } else {
-            admit_s19k_multi_send_work(ok, multi.backends.len())
+            multi
+                .admit_tx_completion(ok)
                 .err()
                 .map(|policy| anyhow::anyhow!("{policy}"))
         };
@@ -15551,7 +15955,7 @@ impl SerialWorkTransport {
                 .execution
                 .commit("S19k Track-1 multi-UART RX", || {
                     let n = multi.backends.len();
-                    if let Err(policy) = admit_s19k_multi_rx_tables(n, multi.paths.len()) {
+                    if let Err(policy) = multi.admit_rx_tables() {
                         return Err(anyhow::anyhow!("{policy}"));
                     }
                     {
@@ -15563,6 +15967,13 @@ impl SerialWorkTransport {
                             multi
                                 .last_rx
                                 .store(idx.saturating_add(1), Ordering::Release);
+                            if let Some(accounting) = multi.s21_full_unit.as_ref() {
+                                accounting.credit_route_frame(idx).map_err(|error| {
+                                    anyhow::anyhow!(
+                                        "S21 per-route accounting refused route {idx}: {error:?}"
+                                    )
+                                })?;
+                            }
                             return Ok(Some(data));
                         }
                     }
@@ -15607,6 +16018,13 @@ impl SerialWorkTransport {
                     multi
                         .last_rx
                         .store(idx.saturating_add(1), Ordering::Release);
+                    if let Some(accounting) = multi.s21_full_unit.as_ref() {
+                        accounting.credit_route_frame(idx).map_err(|error| {
+                            anyhow::anyhow!(
+                                "S21 per-route accounting refused route {idx}: {error:?}"
+                            )
+                        })?;
+                    }
                     Ok(Some(data))
                 })
                 .map_err(anyhow::Error::from),
@@ -15724,7 +16142,7 @@ impl SerialActorBackend for SerialWorkTransport {
                                 )
                             }));
                         }
-                        if let Err(policy) = admit_s19k_multi_send_work(ok, multi.backends.len()) {
+                        if let Err(policy) = multi.admit_tx_completion(ok) {
                             return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("{policy}")));
                         }
                         Ok(())
@@ -15753,6 +16171,7 @@ fn run_serial_io_actor<B: SerialActorBackend>(
     min_tx_interval: Option<Duration>,
     pause_rearm_until_tx: Arc<AtomicU64>,
     last_rx_parser: Arc<AtomicU8>,
+    applied_capacity_frequency: Option<Arc<std::sync::atomic::AtomicU16>>,
 ) -> SerialActorExit {
     info!(
         tx_burst_per_loop,
@@ -15799,6 +16218,10 @@ fn run_serial_io_actor<B: SerialActorBackend>(
                 serial
                     .actor_write_reg_broadcast(SERIAL_NIGHT_PLL0_REG, pll)
                     .context("serial night PLL0 write failed")?;
+                if let Some(actual) = &applied_capacity_frequency {
+                    // Unlabelled successful writes invalidate the old estimate.
+                    actual.store(queued.applied_frequency_mhz.unwrap_or(0), Ordering::Release);
+                }
                 last_tx = Some(Instant::now());
                 *total_tx = total_tx.saturating_add(1);
                 progress.fetch_add(1, Ordering::Release);
@@ -16141,6 +16564,20 @@ fn admit_serial_driver_execution(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Native BM1398 identity-joined admission (Lane-F, 2026-09-01)
+// ---------------------------------------------------------------------------
+//
+// Implements the two-source join of
+//  §3.4,
+// mirroring the BM1366 opt-in shape: a default-OFF request flag defers (never
+// replaces) the baseline refusal; the deferred adjudication requires the
+// declared identity, the Ring-2 operator acknowledgment, AND an independently
+// decoded hashboard identity that EXACTLY equals BM1398; and even a complete
+// join fail-closes at the retained energize intercept until a live bench unit
+// exists. Every arm is terminal today — this section can construct
+// recognition, never hardware authority.
+
 /// Acquire a blocking runtime owner's mutex without allowing lock contention
 /// to hide cancellation. Poison preserves access to the retained owner for
 /// fail-safe handling; ordinary contention is polled in short cancellable
@@ -16174,7 +16611,7 @@ impl SerialMiner {
 
     fn s19k_native_cold_start_opt_in() -> bool {
         Self::s19k_native_cold_start_opt_in_from(
-            std::env::var(Self::S19K_NATIVE_COLD_START_ENV)
+            dcentrald_common::lab_env::var(Self::S19K_NATIVE_COLD_START_ENV)
                 .ok()
                 .as_deref(),
         )
@@ -16184,10 +16621,32 @@ impl SerialMiner {
         matches!(raw, Some("1"))
     }
 
+    fn s19k_native_cold_start_requested(&self) -> bool {
+        Self::s19k_native_request_from_dispatch(
+            self.runtime_dispatch_admission.as_ref(),
+            Self::s19k_native_cold_start_opt_in(),
+        )
+    }
+
+    /// Normal configured beta startup already has an exact serial dispatch.
+    /// The legacy flag remains a diagnostic request, never an owner issuer.
+    /// Both requests still traverse fresh EEPROM, cooling and power admission.
+    fn s19k_native_request_from_dispatch(
+        dispatch: Option<&crate::SerialRuntimeDispatchAdmission>,
+        diagnostic_request: bool,
+    ) -> bool {
+        diagnostic_request
+            || dispatch.is_some_and(|admission| {
+                admission.board_target() == "am3-s19k"
+                    && admission.identity() == dcentrald_common::AsicProtocolIdentity::Bm1366
+            })
+    }
+
     pub fn new(
         config: DcentraldConfig,
         shutdown: CancellationToken,
         explicit_loud_fan_authority: bool,
+        bm1366_native_no_work: bool,
         s19k_install_custody_safeoff: bool,
         s19k_track1_no_work: bool,
         s19k_track1_bounded_work_proof: bool,
@@ -16260,14 +16719,24 @@ impl SerialMiner {
             }
         );
         let runtime_dispatch_admission = runtime_dispatch_admission
-            .require_serial_asic_protocol(identity)
+            .require_serial_asic_protocol_for_scope(identity, s19k_install_custody_safeoff)
             .map_err(anyhow::Error::msg)?;
+        bm1366_native_no_work::admit(
+            bm1366_native_no_work,
+            runtime_dispatch_admission.board_target(),
+            identity,
+            config.mining.passthrough,
+        )?;
         let serial_device = config
             .mining
             .serial_device
             .as_deref()
             .unwrap_or("/dev/ttyS2");
+        let bm1362_aml = resolved_chip_id == 0x1362
+            && (modern_s21_profile(runtime_dispatch_admission.board_target(), identity).is_some()
+                || runtime_dispatch_admission.board_target() == "am3-s19jpro-aml");
         let (runtime_dispatch_admission, am2_bm1362_route_admission) = if resolved_chip_id == 0x1362
+            && !bm1362_aml
         {
             if config.mining.passthrough {
                 anyhow::bail!(
@@ -16293,15 +16762,16 @@ impl SerialMiner {
             }
             (Some(runtime_dispatch_admission), None)
         };
-        let experimental = crate::experimental::ExperimentalConfig::load();
-        let asic_driver_admission = admit_serial_driver_execution(
-            resolved_chip_id,
-            &experimental.executable_asic_chip_ids,
-        )?;
+        // The image-bound dispatch was consumed above and its exact chip
+        // identity was checked against this configured family. No TOML file
+        // grants execution to another experimental driver.
+        let asic_driver_admission =
+            admit_serial_driver_execution(resolved_chip_id, &[resolved_chip_id])?;
         Ok(Self {
             config,
             shutdown,
             explicit_loud_fan_authority,
+            bm1366_native_no_work,
             s19k_install_custody_safeoff,
             s19k_track1_no_work,
             s19k_track1_bounded_work_proof,
@@ -16513,23 +16983,26 @@ impl SerialMiner {
     }
 
     fn bm1362_stop_after_pre_pll_probe_enabled() -> bool {
-        std::env::var_os("DCENT_BM1362_STOP_AFTER_PRE_PLL_PROBE").is_some()
+        dcentrald_common::lab_env::var_os("DCENT_BM1362_STOP_AFTER_PRE_PLL_PROBE").is_some()
     }
 
     fn bm1362_early_115200_probe_enabled() -> bool {
-        std::env::var_os("DCENT_BM1362_EARLY_115200_PROBE").is_some()
+        dcentrald_common::lab_env::var_os("DCENT_BM1362_EARLY_115200_PROBE").is_some()
     }
 
     fn bm1362_allow_stale_enable_reply_enabled() -> bool {
-        std::env::var_os("DCENT_BM1362_ALLOW_STALE_ENABLE_REPLY").is_some()
+        dcentrald_common::lab_env::var_os("DCENT_BM1362_ALLOW_STALE_ENABLE_REPLY").is_some()
     }
 
     fn bm1362_uart_relay_lab_enabled() -> bool {
-        std::env::var_os("DCENT_BM1362_ENABLE_UART_RELAY_LAB").is_some()
+        dcentrald_common::lab_env::var_os("DCENT_BM1362_ENABLE_UART_RELAY_LAB").is_some()
+            || dcentrald_common::runtime_hardware_recipe::am2_default(
+                dcentrald_common::runtime_hardware_recipe::Am2HardwareFlag::Bm1362UartRelay,
+            )
     }
 
     fn am3_bb_uart_trans_lab_enabled() -> bool {
-        std::env::var_os("DCENT_AM3_BB_ENABLE_UART_TRANS_LAB").is_some()
+        dcentrald_common::lab_env::var_os("DCENT_AM3_BB_ENABLE_UART_TRANS_LAB").is_some()
     }
 
     fn maybe_write_bm1362_uart_relay(
@@ -17000,7 +17473,7 @@ impl SerialMiner {
         if let Some(slot) = Self::am2_slot_from_serial_device(serial_device) {
             let phys_idx = slot + 1;
             if dcentrald_hal::glitch_monitor::chain_glitch_status_offset(phys_idx).is_some() {
-                let braiins_glitch_uio: u8 = std::env::var("DCENT_BRAIINS_GLITCH_UIO")
+                let braiins_glitch_uio: u8 = dcentrald_common::lab_env::var("DCENT_BRAIINS_GLITCH_UIO")
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(18);
@@ -17272,7 +17745,10 @@ impl SerialMiner {
             .context("BM1362 init second final serial flush failed")?;
         info!("Serial RX flushed after init");
 
-        Ok((serial, assigned_geometry))
+        Ok((
+            serial,
+            assigned_geometry.with_applied_frequency(final_freq_mhz),
+        ))
     }
 
     /// Address-assignment interval for a linear `256 / chip_count` ladder.
@@ -17552,7 +18028,7 @@ impl SerialMiner {
         let _ = serial.flush_io();
         info!("Serial RX flushed after init");
 
-        Ok((serial, assigned_geometry))
+        Ok((serial, assigned_geometry.with_applied_frequency(final_freq)))
     }
 
     /// Execute one command from the effect-free common S19k program through
@@ -17761,6 +18237,7 @@ impl SerialMiner {
             identity: dcentrald_common::AsicProtocolIdentity::Bm1366,
             observed_chip_count: NonZeroU8::new(chip_count)
                 .context("native BM1366 final geometry unexpectedly became zero")?,
+            applied_frequency_mhz: native_program.actual_frequency_mhz,
             addresses: final_coverage.addresses.clone(),
             // Shared-contract certificate: the fresh final GetAddress
             // observation is certified against the switched-baud admission's
@@ -17927,6 +18404,14 @@ impl SerialMiner {
         )?;
         std::thread::sleep(Duration::from_millis(100));
         serial.send_write_reg_broadcast_bm1397plus(0x10, BM1370_HASH_COUNTING)?;
+        if let Ok(assessment) = dcentrald_common::bm1370_work_geometry::assess_bm1370_window(
+            pll_reg,
+            u16::from(chip_count),
+            BM1370_HASH_COUNTING,
+        ) {
+            info!(?assessment,
+                "BM1370 work-window research: existing HCN retained; offset/domain plan requires board evidence");
+        }
         std::thread::sleep(Duration::from_millis(10));
         serial.send_write_reg_broadcast_bm1397plus(0xA4, BM1370_VERSION_MASK_VALUE)?;
         std::thread::sleep(Duration::from_millis(10));
@@ -17949,7 +18434,10 @@ impl SerialMiner {
         let _ = serial.flush_io();
         std::thread::sleep(Duration::from_millis(50));
         let _ = serial.flush_io();
-        Ok((serial, assigned_geometry))
+        Ok((
+            serial,
+            assigned_geometry.with_applied_frequency(actual_freq),
+        ))
     }
 
     /// BM1398 ASIC init via serial (S19 Pro).
@@ -18094,12 +18582,107 @@ impl SerialMiner {
         Ok(serial)
     }
 
-    /// Execute one capability-joined serial session. Native S19k remains
-    /// strict default-off, but the request flag only reaches fresh identity,
-    /// cooling, watchdog, reset, power, and terminal-owner admission; it can
-    /// never directly construct UART or ASIC mutation authority.
+    /// Complete the exact modern AML population using the primary's retained
+    /// execution owner. Every selected UART independently proves cold identity
+    /// and complete assigned geometry. Failure returns to the joined caller,
+    /// which cuts the shared rail and fences every retained UART.
+    fn init_s21_selected_sibling_chains(
+        primary: ValidatedSerialBackend,
+        primary_geometry: &ValidatedSerialAssignedGeometry,
+        population: &dcentrald_hal::platform::amlogic::AmlogicNoPicAdmission,
+        management: &dcentrald_hal::platform::amlogic::AmlogicPowerThermalService,
+        target_freq: u16,
+        policy: IndustrialSerialPllPolicy,
+        response_body_len: usize,
+        shutdown: &CancellationToken,
+    ) -> Result<SerialWorkTransport> {
+        let (identity, chip_count) = population
+            .profile()
+            .modern_s21_geometry()
+            .context("sibling startup lacks exact modern S21 profile")?;
+        let routes = population.s21_routes()?;
+        anyhow::ensure!(
+            primary_geometry.identity == identity
+                && primary_geometry.observed_chip_count() == chip_count,
+            "S21 primary route lacks complete selected-profile geometry"
+        );
+        let (first_slot, first_path) = routes.first().copied().context("empty S21 route set")?;
+        anyhow::ensure!(
+            first_slot == population.active_slot()
+                && first_path == population.serial_device()
+                && primary.backend.chain_id() == first_slot,
+            "S21 primary backend does not carry the selected physical route"
+        );
+        // R13 full-unit generalization: on the exact base-S21 (BM1368) arm,
+        // the fresh per-route exact-108 populations mint the full-unit
+        // admission and open the per-route nonce ledger carried by the work
+        // transport. BM1370 Pro/XP and every other profile carry `None`.
+        let s21_full_unit = if identity == dcentrald_common::AsicProtocolIdentity::Bm1368 {
+            let populations: Vec<
+                dcentrald_common::bm1368_s21_board_profiles::ChainPopulation,
+            > = routes
+                .iter()
+                .map(|&(slot, _)| dcentrald_common::bm1368_s21_board_profiles::ChainPopulation {
+                    chain: slot,
+                    observed_chips: u16::from(chip_count),
+                })
+                .collect();
+            let unit = dcentrald_common::bm1368_s21_board_profiles::admit_unit_population(
+                dcentrald_common::bm1368_s21_board_profiles::S21,
+                &populations,
+            )
+            .map_err(|error| {
+                anyhow::anyhow!("S21 full-unit population admission refused: {error:?}")
+            })?;
+            let route_slots: Vec<u8> = routes.iter().map(|&(slot, _)| slot).collect();
+            let chips_per_unit = unit.profile.chips_per_unit();
+            let accounting =
+                dcentrald_common::bm1368_s21_board_profiles::S21FullUnitAccounting::new(
+                    unit, &route_slots,
+                )
+                .map_err(|error| {
+                    anyhow::anyhow!("S21 per-route accounting refuses route order: {error:?}")
+                })?;
+            info!(
+                routes = ?route_slots,
+                chips_per_unit,
+                "S21 full-unit BM1368 admission opened per-route nonce accounting"
+            );
+            Some(accounting)
+        } else {
+            None
+        };
+        modern_native_population::initialize(
+            primary,
+            primary_geometry,
+            &routes,
+            identity,
+            chip_count,
+            target_freq,
+            policy,
+            response_body_len,
+            shutdown,
+            s21_full_unit,
+            || management.service_psu_heartbeat().map_err(anyhow::Error::from),
+            |slot, path| SerialChainBackend::open(slot, path, 115_200).map_err(anyhow::Error::from),
+        )
+    }
+
+    /// Execute one capability-joined serial session. Configured native S19k
+    /// startup reaches fresh identity, cooling, watchdog, reset, power and
+    /// terminal-owner admission without requiring a separate shell flag.
     pub async fn run(&mut self) -> Result<()> {
-        let serial_device = self
+        let software_closeout_run = self
+            .runtime_dispatch_admission
+            .as_ref()
+            .or_else(|| self.am2_bm1362_route_admission.as_ref().map(|route| &route.dispatch))
+            .ok_or_else(|| "serial closeout has no exact runtime admission".to_owned())
+            .and_then(|admission| {
+                dcentrald_common::mutation_disposition::capture_software_closeout_run(
+                    admission.board_target(),
+                )
+            });
+        let mut serial_device = self
             .config
             .mining
             .serial_device
@@ -18141,6 +18724,13 @@ impl SerialMiner {
                 hour,
             )
         };
+        if self.runtime_dispatch_admission.as_ref().is_some_and(|admission|
+            admission.board_target() == "am3-s19jpro-aml") {
+            let admission = self.runtime_dispatch_admission.take()
+                .context("classic AML dispatch already consumed")?;
+            return classic_aml_runtime::run(self.config.clone(), self.shutdown.clone(),
+                admission, target_freq).await;
+        }
         let passthrough = self.config.mining.passthrough;
         let s19k_install_custody_safeoff = self.s19k_install_custody_safeoff;
         let s19k_track1_no_work = self.s19k_track1_no_work;
@@ -18156,13 +18746,60 @@ impl SerialMiner {
         // catalog chip ID; chip count is geometry and never selects a driver.
         let is_bm1398 = resolved_chip_id == 0x1398;
         let is_bm1368 = resolved_chip_id == 0x1368;
-        let is_bm1366 = resolved_chip_id == 0x1366;
+        let is_bm1366_family = resolved_chip_id == 0x1366;
+        let is_bm1366_xp = is_bm1366_family
+            && self
+                .runtime_dispatch_admission
+                .as_ref()
+                .is_some_and(|admission| {
+                    matches!(admission.board_target(), "am3-s19xp" | "am3-s19jxp")
+                        && admission.identity() == dcentrald_common::AsicProtocolIdentity::Bm1366
+                });
+        // The legacy BM1366 branches implement S19k's54-byte Braiins work
+        // dialect and77-chip lifecycle. Exact XP uses BM1366 silicon with
+        // the independently held84-byte full-header work/nonce protocol.
+        let is_bm1366 = is_bm1366_family && !is_bm1366_xp;
         let is_bm1370 = resolved_chip_id == 0x1370;
-        let is_bm1362 = resolved_chip_id == 0x1362;
+        let is_bm1362_family = resolved_chip_id == 0x1362;
+        let is_bm1362_aml = is_bm1362_family
+            && self
+                .runtime_dispatch_admission
+                .as_ref()
+                .is_some_and(|admission| {
+                    modern_s21_profile(admission.board_target(), admission.identity()).is_some()
+                });
+        // Keep the established AM2 PIC lifecycle on its separate authority.
+        let is_bm1362 = is_bm1362_family && !is_bm1362_aml;
+        // Native NBP1901 uses the observed bm13xx FPGA FIFO ABI and one
+        // retained PIC/APW/thermal owner. Hand off before generic serial
+        // discovery or hardware construction; configuration requests startup,
+        // while the native executor proves the physical identity and replies.
+        if is_bm1398 && !passthrough {
+            let admission = self
+                .runtime_dispatch_admission
+                .take()
+                .context("BM1398 native runtime dispatch was already consumed")?;
+            anyhow::ensure!(
+                admission.identity() == dcentrald_common::AsicProtocolIdentity::Bm1398
+                    && crate::s19_bm1398_native_mining::platform::Bm1398Platform::from_admission(
+                        admission.board_target(),
+                        admission.identity(),
+                    )
+                    .is_ok(),
+                "BM1398 native runtime requires exact family admission (am2-s19pro/am2-s19/am2-t19/am2-s19a with BM1398 identity)"
+            );
+            return crate::s19_bm1398_native_mining::run(
+                self.config.clone(),
+                self.shutdown.clone(),
+                None,
+                admission,
+            )
+            .await;
+        }
         let braiins_bm1366_passthrough_handoff = passthrough && is_bm1366;
-        if is_bm1366 && !passthrough && !Self::s19k_native_cold_start_opt_in() {
+        if is_bm1366 && !passthrough && !self.s19k_native_cold_start_requested() {
             anyhow::bail!(
-                "native BM1366 cold-start is default-off; set {}=1 to request the evidence-joined path (the flag alone grants no hardware authority)",
+                "native BM1366 requires an admitted am3-s19k serial configuration; {}=1 is a diagnostic request only (the flag alone grants no hardware authority)",
                 Self::S19K_NATIVE_COLD_START_ENV
             );
         }
@@ -18184,18 +18821,8 @@ impl SerialMiner {
                 "S19k Track-1 inherited-rails mining requires explicit --allow-loud authority for PWM 100; refusing before stock-process handoff"
             );
         }
-        if is_bm1398 && !passthrough {
-            anyhow::bail!(
-                "NOT IMPLEMENTED: native BM1398 mining lacks an exact physical hashboard/controller identity; BHB42 EEPROM preamble [04,11] identifies BM1362 and must not authorize BM1398 voltage or ASIC mutation"
-            );
-        }
-        // Experimental native BM1366 is an operator-set, default-OFF opt-in.
-        // With the environment variable unset this reads exactly as it always
-        // has: same condition, same position, same message, and no observation
-        // of any kind. Setting the opt-in does NOT grant anything â€” it only
-        // defers the refusal to the two-source admission further down, which
-        // additionally requires an independently decoded hashboard identity
-        // that exactly equals BM1366. Both refusals are terminal.
+        // Native BM1366 now uses the retained service-owned complete EEPROM
+        // decoder before energizing; declaration alone remains insufficient.
         // Optional EEPROM-backed PIC detection may perform bounded read-only
         // sysfs I/O. Unsupported native identities must be refused before even
         // that observation so rejection is side-effect-free and deterministic.
@@ -18203,12 +18830,29 @@ impl SerialMiner {
         // EEPROM hint: it performs neither reset nor ASIC work and returns
         // before UART construction. Exact S19k identity is still freshly
         // recaptured at the authenticated handoff boundary below.
-        let nopic = if s19k_install_custody_safeoff {
+        let nopic = if s19k_install_custody_safeoff || is_bm1362_aml || is_bm1366_xp {
             true
         } else {
             is_nopic(&self.config)?
         };
         let mut runtime_dispatch_admission = self.runtime_dispatch_admission.take();
+        let modern_profile = runtime_dispatch_admission.as_ref().and_then(|admission| {
+            modern_s21_profile(admission.board_target(), admission.identity())
+        });
+        let exact_modern_s21 = modern_profile.is_some();
+        if let Some(profile) = modern_profile {
+            let (_, expected) = profile
+                .modern_s21_geometry()
+                .context("missing modern S21 geometry")?;
+            anyhow::ensure!(
+                chip_count == expected,
+                "{profile:?} requires {expected} chips per selected board, configured {chip_count}"
+            );
+        }
+        anyhow::ensure!(
+            !(is_bm1362_aml || is_bm1366_xp || is_bm1368 || is_bm1370) || exact_modern_s21,
+            "native modern ASIC requires an exact supported S21/Pro/XP controller profile"
+        );
         let mut am2_bm1362_route_admission = self.am2_bm1362_route_admission.take();
         if is_bm1362 != am2_bm1362_route_admission.is_some() {
             anyhow::bail!(
@@ -18222,29 +18866,55 @@ impl SerialMiner {
         // any observation, power, UART, or ASIC mutation. Resolve and validate
         // the entire industrial PLL contract here, then compare the token
         // carried by response-bound admission before initialization.
-        let preflight_industrial_pll_policy = if is_bm1368 || is_bm1370 {
-            let dispatch = runtime_dispatch_admission
-                .as_ref()
-                .context("industrial PLL preflight lost serial dispatch admission")?;
-            let policy =
-                IndustrialSerialPllPolicy::for_route(dispatch.board_target(), dispatch.identity())?;
-            if is_bm1368 {
-                let _ = bm1368_industrial_pll_search(target_freq, policy)?;
+        let preflight_industrial_pll_policy =
+            if is_bm1362_aml || is_bm1366_xp || is_bm1368 || is_bm1370 {
+                let dispatch = runtime_dispatch_admission
+                    .as_ref()
+                    .context("industrial PLL preflight lost serial dispatch admission")?;
+                let policy = IndustrialSerialPllPolicy::for_route(
+                    dispatch.board_target(),
+                    dispatch.identity(),
+                )?;
+                if is_bm1362_aml {
+                    let _ = bm1362_aml_native::industrial_pll(target_freq, policy)?;
+                } else if is_bm1366_xp {
+                    let _ = bm1366_xp_native::industrial_pll(target_freq, policy)?;
+                } else if is_bm1368 {
+                    let _ = bm1368_industrial_pll_search(target_freq, policy)?;
+                } else {
+                    let _ = bm1370_industrial_pll_search(target_freq, policy)?;
+                }
+                Some(policy)
             } else {
-                let _ = bm1370_industrial_pll_search(target_freq, policy)?;
-            }
-            Some(policy)
-        } else {
-            None
-        };
+                None
+            };
         let mut am2_never_energized = None;
         let mut validated_serial_geometry: Option<ValidatedSerialAssignedGeometry> = None;
-        if passthrough && (is_bm1368 || is_bm1370) {
+        if passthrough && (is_bm1362_aml || is_bm1366_xp || is_bm1368 || is_bm1370) {
             anyhow::bail!(
                 "BM1368/BM1370 preserve-state passthrough has no native route-admission contract; refusing to bless external initialization as validated serial execution"
             );
         }
-        let native_nopic_power_owner = !passthrough && (is_bm1366 || is_bm1368 || is_bm1370);
+        let native_nopic_power_owner =
+            !passthrough && (is_bm1362_aml || is_bm1366_family || is_bm1368 || is_bm1370);
+        if native_nopic_power_owner && is_bm1366_family {
+            use dcentrald_silicon_profiles::s19k_nopic_admission::{
+                bm1366_cooling_rule, Bm1366CoolingRule,
+            };
+            let dispatch = runtime_dispatch_admission.as_ref()
+                .context("BM1366 cooling rule lost exact dispatch")?;
+            let board = dcentrald_common::board_desc::BoardDesc::lookup(dispatch.board_target())
+                .context("BM1366 cooling rule lost registered board")?;
+            anyhow::ensure!(
+                bm1366_cooling_rule(board.cooling_medium) == Bm1366CoolingRule::FourFans,
+                "native BM1366 air executor requires the fan cooling rule; liquid cooling requires its external-loop owner"
+            );
+            if is_bm1366 {
+                // Validate the complete command plan before any hardware I/O.
+                s19k_bm1366_native_execution_program(chip_count, target_freq)
+                    .map_err(anyhow::Error::msg)?;
+            }
+        }
         let serial_actor_topology = SerialActorTopology::admit(
             native_nopic_power_owner,
             braiins_bm1366_passthrough_handoff,
@@ -18270,7 +18940,7 @@ impl SerialMiner {
         let mut s19k_native_mapped: Option<
             Arc<dcentrald_hal::platform::amlogic::S19kNativePopulationAdmission>,
         > = None;
-        let mut s19k_native_identity: Option<S19kLiveIdentityReceipt> = None;
+        let mut s19k_native_identity: Option<S19kNativeIdentityReceipt> = None;
         let mut s19k_native_pre_cooling: Option<S19kNativeCoolingAdmission> = None;
         let mut s19k_native_pre_thermal: Option<S19kNativeThermalAdmission> = None;
         let mut _s19k_native_cold_start_owner: Option<
@@ -18343,16 +19013,10 @@ impl SerialMiner {
         }
 
         if is_bm1370 {
-            warn!("BM1370 serial mining path is experimental â€” job-id behavior and live validation still pending");
+            warn!("BM1370 serial mining path is experimental - live hardware validation still pending");
         }
 
-        let job_id_increment: u8 = if is_bm1398 {
-            BM1398_JOB_ID_INC
-        } else if is_bm1366 {
-            BM1366_JOB_ID_INC
-        } else {
-            BM1362_JOB_ID_INC
-        };
+        let job_id_increment = serial_job_id_increment(resolved_chip_id, is_bm1366_xp)?;
         let resp_body_len: usize = if is_bm1398 {
             BM1398_RESP_BODY_LEN
         } else if is_bm1366 {
@@ -18368,7 +19032,7 @@ impl SerialMiner {
                 "=== S19 PRO SERIAL MINING (BM1398, {} chips) ===",
                 chip_count
             );
-        } else if is_bm1366 {
+        } else if is_bm1366_family {
             info!(
                 "=== BM1366 SERIAL MINING (experimental, {} chips) ===",
                 chip_count
@@ -18514,34 +19178,35 @@ impl SerialMiner {
         }
         if native_nopic_power_owner {
             if is_bm1366 {
-                let identity = s19k_capture_and_require_bound_live_identity()
-                    .context("native S19k fresh receipt-bound hardware identity refused")?;
                 let aggregate =
                     dcentrald_hal::platform::amlogic::S19kNativeAggregateAdmission::detect()
                         .context("native S19k aggregate identity/UART/plug admission failed")?;
-                anyhow::ensure!(
-                    aggregate.populated_slots() == identity.profile.eeprom_presence(),
-                    "native S19k plug topology does not match the fresh model/EEPROM population"
-                );
                 let mapped = aggregate
                     .into_population()
                     .context("native S19k profile-aware logical-chain admission failed")?;
-                amlogic_power_thermal =
-                    Some(mapped.spawn_power_thermal_service().context(
-                        "Failed to establish generation-bound S19k /dev/i2c-1 ownership",
-                    )?);
+                let (mapped, service, identity) =
+                    tokio::task::spawn_blocking(move || -> Result<_> {
+                        let service = mapped.spawn_power_thermal_service().context(
+                            "Failed to establish generation-bound S19k /dev/i2c-1 ownership",
+                        )?;
+                        let identity = s19k_native_identity::capture(&mapped, &service)
+                            .context("native S19k service-owned EEPROM identity refused")?;
+                        Ok((mapped, service, identity))
+                    })
+                    .await
+                    .context("native S19k identity worker failed")??;
+                info!(profile = identity.profile.as_str(), boards = identity.board_count,
+                    identity_sha256 = %identity.sha256,
+                    "Native S19k identity decoded from retained EEPROM reads");
+                amlogic_power_thermal = Some(service);
                 s19k_native_identity = Some(identity);
                 s19k_native_mapped = Some(Arc::new(mapped));
             } else {
-                amlogic_admission = Some(
-                    dcentrald_hal::platform::amlogic::AmlogicNoPicAdmission::detect(
-                        dcentrald_hal::platform::amlogic::AmlogicNoPicProfile::S21,
-                        &serial_device,
-                    )
-                    .context(
-                        "Amlogic control-board identity did not admit native NoPic ownership",
-                    )?,
-                );
+                let profile = modern_profile.context("missing exact modern S21 profile")?;
+                let admitted = dcentrald_hal::platform::amlogic::AmlogicNoPicAdmission::detect_modern_s21_population(profile)
+                    .context("modern S21 cold population admission")?;
+                serial_device = admitted.serial_device().to_owned();
+                amlogic_admission = Some(admitted);
                 let admission = amlogic_admission
                     .as_ref()
                     .context("Amlogic NoPic admission disappeared before owner construction")?;
@@ -18550,14 +19215,38 @@ impl SerialMiner {
                         .spawn_power_thermal_service()
                         .context("Failed to establish retained Amlogic /dev/i2c-1 ownership")?,
                 );
+                if exact_modern_s21 {
+                    s21_native_identity::capture(
+                        admission,
+                        amlogic_power_thermal
+                            .as_ref()
+                            .context("S21 management owner disappeared")?,
+                    )
+                    .context("S21 fresh factory identity before power")?;
+                }
             }
+        }
+
+        // The kernel device/driver join, not a process or loaded-module name,
+        // determines whether these endpoints belong to the native AML UART
+        // path. Exclusive UART handles remain owned by the existing executor.
+        if native_nopic_power_owner && is_bm1366_family {
+            let native_uart_paths = if let Some(mapped) = s19k_native_mapped.as_ref() {
+                mapped.logical_chain_routes().iter().map(|route| route.uart)
+                    .collect::<Vec<_>>().join(",")
+            } else {
+                amlogic_admission.as_ref().context("BM1366 UART owner lost exact population")?
+                    .s21_routes()?.iter().map(|(_, path)| *path).collect::<Vec<_>>().join(",")
+            };
+            dcentrald_common::s19k_bm1366_wire_b::probe_native_amlogic_uart_owner(&native_uart_paths)
+                .map_err(anyhow::Error::msg)?;
         }
 
         // Cooling ownership and a checked startup command are prerequisites
         // for native NoPic power. This narrow constructor performs no platform
         // re-detection or raw I2C probe after the serialized services exist.
         let (effective_fan_min_pwm, effective_fan_max_pwm): (u8, u8) = if native_nopic_power_owner {
-            let accept_degraded_tach = std::env::var("DCENT_AM3_AML_ACCEPT_DEGRADED_TACH")
+            let accept_degraded_tach = dcentrald_common::lab_env::var("DCENT_AM3_AML_ACCEPT_DEGRADED_TACH")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
             let mut profile = dcentrald_thermal::profiles::ThermalProfile {
@@ -19371,7 +20060,7 @@ impl SerialMiner {
                 Self::drain_serial_passthrough_backlog(&s, 5000);
                 let track1_baud = s19k_track1_classify_rx_baud(
                     s.baud(),
-                    std::env::var("DCENT_S19K_CHIP_FASTUART").ok().as_deref(),
+                    dcentrald_common::lab_env::var("DCENT_S19K_CHIP_FASTUART").ok().as_deref(),
                 );
                 if let Err(error) = track1_baud {
                     warn!(
@@ -19446,7 +20135,7 @@ impl SerialMiner {
                                         let fu_kind = classify_s19k_chip_fastuart_word(observed_28);
                                         let fu_baud = s19k_track1_classify_rx_baud_with_reg28(
                                             s.baud(),
-                                            std::env::var("DCENT_S19K_CHIP_FASTUART")
+                                            dcentrald_common::lab_env::var("DCENT_S19K_CHIP_FASTUART")
                                                 .ok()
                                                 .as_deref(),
                                             observed_28,
@@ -19484,7 +20173,7 @@ impl SerialMiner {
                                 rx_diag,
                                 fu_diag,
                                 s.baud(),
-                                std::env::var(S19K_TRACK1_RETRY_115200_ENV).ok().as_deref(),
+                                dcentrald_common::lab_env::var(S19K_TRACK1_RETRY_115200_ENV).ok().as_deref(),
                             ) {
                                 Ok(true) => {
                                     if let Err(error) = s.set_baud(S19K_78_DMESG_HOLD_BAUD) {
@@ -19712,7 +20401,7 @@ impl SerialMiner {
                         _ => {}
                     }
                 }
-                let uart_eeprom_text = std::env::var("DCENT_S19K_UART_EEPROM")
+                let uart_eeprom_text = dcentrald_common::lab_env::var("DCENT_S19K_UART_EEPROM")
                     .ok()
                     .and_then(|p| std::fs::read_to_string(p).ok());
                 let uart_eeprom_parsed = uart_eeprom_text
@@ -19742,10 +20431,10 @@ impl SerialMiner {
                     "S19k triple-port topology observe"
                 );
                 // Host i2c-1 AT24 names chassis only. Optional files; never a tty bind.
-                let detect = std::env::var("DCENT_S19K_I2CDETECT")
+                let detect = dcentrald_common::lab_env::var("DCENT_S19K_I2CDETECT")
                     .ok()
                     .and_then(|p| std::fs::read_to_string(p).ok());
-                let parse = std::env::var("DCENT_S19K_EEPROM_PARSE")
+                let parse = dcentrald_common::lab_env::var("DCENT_S19K_EEPROM_PARSE")
                     .ok()
                     .and_then(|p| std::fs::read_to_string(p).ok());
                 if let Some(detect) = detect.as_deref() {
@@ -20166,6 +20855,7 @@ impl SerialMiner {
                     next: AtomicUsize::new(0),
                     last_rx: AtomicUsize::new(0),
                     pending_rx: Mutex::new(VecDeque::new()),
+                    s21_full_unit: None,
                 }))
             }
             .await;
@@ -20208,29 +20898,11 @@ impl SerialMiner {
             Self::drain_serial_passthrough_backlog(&s, 5000);
             SerialWorkTransport::Legacy(s)
         } else if is_bm1398 {
-            // Refusal backstop, not a driver arm: the authoritative refusal is
-            // the identity bail at the top of run(). This arm is reachable
-            // only if that bail is ever bypassed (e.g. via a config/model
-            // string defect). The rail is still cold here â€” this arm only
-            // selects a transport, and no energizing call has run on this
-            // path. (Some energizing calls appear EARLIER in the function,
-            // at the AM2 fan-admission and watchdog-arm steps; they are
-            // simply unreachable on this path, which resolves a Legacy
-            // topology. Do not restate this as "every energizing call sits
-            // in later arms" â€” that is false.)
-            //
-            // Bailing rather than panicking does NOT keep the session alive.
-            // The crate ships panic = "abort", and an untyped bail is just as
-            // terminal: failure_disposition() returns Some only for
-            // SerialNeverEnergizedError / SerialTerminalSafeOffError, so an
-            // untyped error yields None, and main.rs refuses stable
-            // management-only operation on None and returns Err. Both paths
-            // end the process and arm the session crash latch.
-            //
-            // What the bail actually buys: a typed, logged, attributable
-            // error instead of an opaque abort, destructors run on the way
-            // out, and refusal semantics uniform with the identity bails.
-            anyhow::bail!("non-passthrough BM1398 is refused before hardware construction");
+            // All native BM1398 requests hand off to the exact FIFO owner
+            // above. Its service reads/validates every full factory page
+            // before energizing and joins the live chip census before work.
+            // Generic serial transport cannot substitute for that owner.
+            anyhow::bail!("BM1398 requires its exact native FIFO owner");
         } else if is_bm1366 {
             let native_bringup_result: Result<(
                 SerialWorkTransport,
@@ -20301,8 +20973,9 @@ impl SerialMiner {
                     !self.shutdown.is_cancelled(),
                     "shutdown raced native S19k reset assertion; refusing GPIO437/APW enable"
                 );
+                let voltage = f64::from(self.config.mining.voltage_mv) / 1000.0;
                 let enable_receipt =
-                    tokio::task::spawn_blocking(move || psu_enable_operation.enable_psu())
+                    tokio::task::spawn_blocking(move || psu_enable_operation.enable_psu_at_voltage(voltage))
                         .await
                         .context("native S19k APW enable worker failed")??;
                 nopic_psu_guard.mark_enabled();
@@ -20438,23 +21111,14 @@ impl SerialMiner {
                     return Err(failure_with_closeout(error, closeout));
                 }
             }
-        } else if is_bm1368 || is_bm1370 {
-            // ---- Exact route-bound BM1368/BM1370 NoPic initialization ----
-            // Voltage architecture (verified 2026-04-12 via ftrace + fixture RE + live probe):
-            //   - TAS5782M DACs (bus 0, addr 0x49/0x4A/0x4B) are kernel-managed from DTB
-            //   - APW PSU enabled via GPIO 437 plus APW I2C/PMBus preboot sequence at 0x1f
-            //   - Bosminer never writes to TAS5782M â€” voltage DACs stay kernel-managed
-            //   - No PMBus device at 0x58 on either I2C bus (confirmed 2026-04-12);
-            //     the native cold-boot APW path is bus 1 addr 0x1f
-            info!("Phase 1: PSU enable (NoPic model, TAS5782M kernel-managed)");
-
-            // Wave J Lane A: NoPic PSU enable is GPIO-437-only (the voltage is
-            // kernel-managed TAS5782M; there is NO smart-PSU probe to skip), so a
-            // 120V non-smart PSU already works here. When [power.psu_override] is
-            // set we honor it for telemetry: record the declared model + its
-            // efficiency, and log the disposition so the override is never silently
-            // ignored (fail-loud honesty). The GPIO 437 enable below is correct for
-            // any PSU and is unchanged.
+        } else if is_bm1362_aml || is_bm1366_xp || is_bm1368 || is_bm1370 {
+            // Exact modern AM3 runtime: one retained GPIO476/477 APW owner
+            // programs voltage only after its measured firmware selects the
+            // matching production dialect. GPIO437 is0=ON,1=OFF. The separate
+            // protected management service owns EEPROM and LM75 observations.
+            info!("Phase 1: retained production PSU version, voltage and watchdog initialization");
+            // An explicit PSU override remains telemetry only; it cannot
+            // bypass measured PSU identity, acknowledged writes or containment.
             if crate::s19j_hybrid_mining::psu_override_active(
                 self.config.power.psu_override.as_ref(),
             ) {
@@ -20469,9 +21133,7 @@ impl SerialMiner {
                     rail_v = ovr.voltage_v,
                     efficiency =
                         ?crate::runtime::efficiency::psu_efficiency_for_model_name(&ovr.model),
-                    "NoPic (am3-aml): PSU OVERRIDE honored as INFORMATIONAL â€” PSU enable is \
-                     GPIO-437-only + kernel-managed TAS5782M voltage, so there is no smart-PSU \
-                     probe to bypass; declared model + efficiency recorded for telemetry"
+                    "AM3 PSU override recorded for telemetry; measured production PSU admission remains required"
                 );
             }
 
@@ -20493,7 +21155,7 @@ impl SerialMiner {
             let management_lifecycle = power_thermal
                 .take_lifecycle_owner()
                 .context("NoPic power route could not transfer bus-1 lifecycle ownership")?;
-            nopic_psu_guard.prepare_enable(effective_fan_max_pwm, management_lifecycle);
+            nopic_psu_guard.prepare_enable(effective_fan_max_pwm, management_lifecycle)?;
             let psu_enable_operation = power_thermal
                 .take_psu_enable_operation()
                 .context("NoPic power route could not mint its one-shot PSU enable operation")?;
@@ -20552,14 +21214,18 @@ impl SerialMiner {
                 return Err(failure_with_closeout(error, closeout));
             }
 
-            // Enable PSU via GPIO 437 (PWR_EN, active HIGH: 1=ON, 0=OFF â€”
-            // Q10, polarity CORRECTED 2026-05-21; see amlogic/mod.rs enable_psu_gpio
-            // + the psu_enable_is_active_high_437 test). Do NOT re-read this as the
-            // old "PSU_nEN active LOW" â€” that inverted reading was the original
-            // polarity bug. (prod-readiness hunt-2 #H2.) Arm the shutdown guard
-            // immediately so a failed init does not leave boards powered.
-            let enable_result =
-                tokio::task::spawn_blocking(move || psu_enable_operation.enable_psu()).await;
+            // Exact S21 production PSU_nEN is active low. The retained HAL
+            // owner identifies its actual PSU version and programs the selected
+            // rail using the matching production law, then starts its watchdog.
+            let selected_rail_v = self.config.mining.voltage_mv as f64 / 1000.0;
+            let enable_result = tokio::task::spawn_blocking(move || {
+                if exact_modern_s21 {
+                    psu_enable_operation.enable_psu_at_voltage(selected_rail_v)
+                } else {
+                    psu_enable_operation.enable_psu()
+                }
+            })
+            .await;
             let enable_receipt = match enable_result {
                 Ok(Ok(receipt)) => receipt,
                 Ok(Err(error)) => {
@@ -20709,13 +21375,25 @@ impl SerialMiner {
                 );
             }
 
-            // Phase 1b: NO GPIO board reset on S21 NoPic!
-            // GPIO 454-456 reset kills TAS5782M DAC voltage â†’ ASICs lose power.
-            // Instead: skip reset, send GetAddress to verify chips are alive.
-            info!("Phase 1b: Skipping GPIO board reset (NoPic â€” reset kills voltage)");
+            if exact_modern_s21 {
+                let release = amlogic_admission
+                    .as_ref()
+                    .context("S21 reset release lost population")?
+                    .release_s21_resets(power_thermal, &enable_receipt);
+                if let Err(error) = release {
+                    let closeout = closeout_native_nopic_failure(
+                        &mut nopic_watchdog,
+                        &mut serial_route_domains,
+                        &mut nopic_psu_guard,
+                        &mut runtime_threads,
+                        None,
+                    )
+                    .await;
+                    return Err(failure_with_closeout(error.into(), closeout));
+                }
+                info!("S21 selected cold hashboard resets released; absent slots remain asserted");
+            }
 
-            // Diagnostic: probe chips at multiple bauds to find if they're alive.
-            // Try the common live-state fast baud first, then back down.
             let observation_result = (|| -> Result<NoPicSerialObservation> {
                 let dispatch = runtime_dispatch_admission
                     .as_ref()
@@ -20743,7 +21421,11 @@ impl SerialMiner {
                 }
             };
             let mut admitted_serial: Option<NoPicAdmittedSerial> = None;
-            for probe_baud in [3_000_000u32, 1_000_000, 115_200] {
+            for probe_baud in if exact_modern_s21 {
+                vec![115_200u32]
+            } else {
+                vec![3_000_000u32, 1_000_000, 115_200]
+            } {
                 info!("Phase 1c: Probing chips at {} baud...", probe_baud);
                 match nopic_observation.observe_candidate(probe_baud) {
                     Ok(Some(admitted)) => {
@@ -20870,7 +21552,25 @@ impl SerialMiner {
                     return Err(error);
                 }
             };
-            let init_result = if is_bm1370 {
+            let init_result = if is_bm1362_aml {
+                Self::init_bm1362_aml_chain(
+                    validated_backend,
+                    &serial_device,
+                    configured_baud,
+                    chip_count,
+                    target_freq,
+                    industrial_pll_policy,
+                )
+            } else if is_bm1366_xp {
+                Self::init_bm1366_xp_chain(
+                    validated_backend,
+                    &serial_device,
+                    configured_baud,
+                    chip_count,
+                    target_freq,
+                    industrial_pll_policy,
+                )
+            } else if is_bm1370 {
                 info!(
                     "Phase 2: Full BM1370 ASIC init ({} configured chips)",
                     chip_count
@@ -20912,8 +21612,39 @@ impl SerialMiner {
                 }
             };
             validated_backend.set_response_len(resp_body_len);
+            let transport_result = if exact_modern_s21 {
+                let population = amlogic_admission
+                    .as_ref()
+                    .context("S21 multi-UART init lost population")?;
+                Self::init_s21_selected_sibling_chains(
+                    validated_backend,
+                    &assigned_geometry,
+                    population,
+                    power_thermal,
+                    target_freq,
+                    industrial_pll_policy,
+                    resp_body_len,
+                    &self.shutdown,
+                )
+            } else {
+                Ok(SerialWorkTransport::Validated(validated_backend))
+            };
+            let transport = match transport_result {
+                Ok(transport) => transport,
+                Err(error) => {
+                    let closeout = closeout_native_nopic_failure(
+                        &mut nopic_watchdog,
+                        &mut serial_route_domains,
+                        &mut nopic_psu_guard,
+                        &mut runtime_threads,
+                        None,
+                    )
+                    .await;
+                    return Err(failure_with_closeout(error, closeout));
+                }
+            };
             validated_serial_geometry = Some(assigned_geometry);
-            SerialWorkTransport::Validated(validated_backend)
+            transport
         } else {
             // ---- BM1362 (S19j Pro): PIC init + BM1362-specific init ----
             let bm1362_bringup_result: Result<SerialWorkTransport> = async {
@@ -21396,6 +22127,16 @@ impl SerialMiner {
         // worker the sole sender so panic/early loss is observable immediately.
         drop(am2_apw_heartbeat_exit_tx.take());
 
+        // Configured and passthrough geometry cannot mint dynamic capacity.
+        let capacity_initial_frequency = validated_serial_geometry
+            .as_ref()
+            .filter(|_| validated_serial_route)
+            .map(|geometry| geometry.applied_frequency_mhz)
+            .unwrap_or(0);
+        let applied_capacity_frequency = Arc::new(std::sync::atomic::AtomicU16::new(
+            capacity_initial_frequency,
+        ));
+
         let published_chip_count = match (validated_serial_route, validated_serial_geometry.take())
         {
             (true, Some(geometry)) => geometry.observed_chip_count(),
@@ -21446,6 +22187,22 @@ impl SerialMiner {
                 anyhow::bail!("validated serial geometry escaped into a legacy route")
             }
             (false, None) => chip_count,
+        };
+        let capacity_chip_count = match &serial {
+            SerialWorkTransport::Validated(_) if validated_serial_route => {
+                u32::from(published_chip_count)
+            }
+            SerialWorkTransport::Multi(multi)
+                if validated_serial_route && multi.native_exact_mapping =>
+            {
+                u32::from(published_chip_count)
+                    * multi
+                        .tx_required
+                        .iter()
+                        .filter(|required| **required)
+                        .count() as u32
+            }
+            _ => 0,
         };
         // Track-1 has per-logical-UART response evidence but no proven
         // tty-to-physical-board mapping or aggregate responding-chip total.
@@ -21566,6 +22323,20 @@ impl SerialMiner {
             am2_startup_temp_c = Some(startup_thermal.temp_c);
             am2_startup_temp_source = Some(startup_thermal.chain_temp_source().to_string());
             am2_thermal_supervisor = Some(supervisor);
+        }
+
+        // Successful native initialization is the end of this explicit
+        // diagnostic. Revoke the same mutation domains and complete checked
+        // cutoff/quiet fans/watchdog teardown before creating any pool or
+        // work sender. Closeout failure is returned, never converted to OK.
+        if self.bm1366_native_no_work {
+            return bm1366_native_no_work::finish(closeout_native_nopic_failure(
+                &mut nopic_watchdog,
+                &mut serial_route_domains,
+                &mut nopic_psu_guard,
+                &mut runtime_threads,
+                None,
+            )).await;
         }
 
         let (am2_pic_heartbeat_exit_tx, mut am2_pic_heartbeat_exit_rx) =
@@ -21756,8 +22527,14 @@ impl SerialMiner {
             (!braiins_bm1366_passthrough_handoff && published_chip_count > 0)
                 .then_some(u32::from(published_chip_count)),
         );
-        let stratum_router = dcentrald_stratum::StratumRouter::new(stratum_config)
+        let (capacity_publisher, capacity_rx) = crate::active_capacity::CapacityPublisher::new(
+            self.config.pool.v1_policy.dynamic_difficulty,
+        );
+        let mut stratum_router = dcentrald_stratum::StratumRouter::new(stratum_config)
             .with_job_declaration_status_rx(jd_status_rx.clone());
+        if let Some(rx) = capacity_rx {
+            stratum_router = stratum_router.with_capacity_rx(rx);
+        }
         let recent_share_history = Arc::new(Mutex::new(Vec::new()));
         tokio::spawn(async move {
             stratum_router.run(job_tx, share_rx, status_tx).await;
@@ -22343,6 +23120,9 @@ impl SerialMiner {
                 let committed_work_epoch = Arc::clone(&am2_committed_work_epoch);
                 let pause_rearm_until_tx_io = Arc::clone(&pause_rearm_until_tx);
                 let last_rx_parser_io = Arc::clone(&last_rx_parser);
+                let capacity_frequency_io = capacity_publisher
+                    .enabled()
+                    .then(|| Arc::clone(&applied_capacity_frequency));
                 std::thread::Builder::new()
                     .name("s19j-serial-io".to_string())
                     .spawn(move || {
@@ -22362,6 +23142,7 @@ impl SerialMiner {
                             min_tx_interval,
                             pause_rearm_until_tx_io,
                             last_rx_parser_io,
+                            capacity_frequency_io,
                         );
                         let _ = actor_exit_tx.send(exit);
                         info!("Serial I/O thread exited");
@@ -22651,7 +23432,7 @@ impl SerialMiner {
             chip_count,
             if is_bm1398 {
                 "BM1398"
-            } else if is_bm1366 {
+            } else if is_bm1366_family {
                 "BM1366"
             } else if is_bm1370 {
                 "BM1370"
@@ -22690,19 +23471,19 @@ impl SerialMiner {
         let mut clean_funnel = S19kCleanFunnel::default();
         let experimental_post_clean_inactive_env = is_bm1366
             && s19k_experimental_post_clean_chain_inactive_enabled_from_env(
-                std::env::var("DCENT_S19K_EXPERIMENTAL_POST_CLEAN_CHAIN_INACTIVE")
+                dcentrald_common::lab_env::var("DCENT_S19K_EXPERIMENTAL_POST_CLEAN_CHAIN_INACTIVE")
                     .ok()
                     .as_deref(),
             );
         let experimental_post_clean_flip_env = is_bm1366
             && s19k_experimental_post_clean_flip_enabled_from_env(
-                std::env::var("DCENT_S19K_EXPERIMENTAL_POST_CLEAN_JOB_FLIP")
+                dcentrald_common::lab_env::var("DCENT_S19K_EXPERIMENTAL_POST_CLEAN_JOB_FLIP")
                     .ok()
                     .as_deref(),
             );
         let experimental_wrap4_early_env = is_bm1366
             && s19k_experimental_wrap4_early_clean_enabled_from_env(
-                std::env::var("DCENT_S19K_EXPERIMENTAL_WRAP4_EARLY_CLEAN")
+                dcentrald_common::lab_env::var("DCENT_S19K_EXPERIMENTAL_WRAP4_EARLY_CLEAN")
                     .ok()
                     .as_deref(),
             );
@@ -22748,11 +23529,11 @@ impl SerialMiner {
                 Err(_) => None,
             };
 
-        let dispatch_ms = if is_bm1362 {
+        let dispatch_ms = if is_bm1362_family {
             BM1362_DISPATCH_INTERVAL_MS
-        } else if is_bm1366 {
+        } else if is_bm1366_family {
             (2000u64 / chip_count.max(1) as u64).max(10)
-        } else if is_bm1368 || is_bm1370 {
+        } else if is_bm1362_aml || is_bm1366_xp || is_bm1368 || is_bm1370 {
             BM1368_DISPATCH_INTERVAL_MS
         } else {
             50
@@ -22776,7 +23557,8 @@ impl SerialMiner {
         let mut am2_pool_disconnect_safety = Am2PoolDisconnectSafety::default();
 
         // Thermal management for NoPic/Amlogic platforms
-        let mut thermal_timer = tokio::time::interval(Duration::from_secs(2));
+        let mut thermal_timer =
+            tokio::time::interval(dcentrald_hal::platform::amlogic::s21_psu::HEARTBEAT_INTERVAL);
         let mut s19k_track1_thermal_timer = tokio::time::interval(Duration::from_secs(2));
         let mut am2_thermal_timer = tokio::time::interval(Duration::from_secs(2));
         // The pre-energize cooling owner computed this retained ceiling once;
@@ -23332,6 +24114,7 @@ impl SerialMiner {
             timezone_offset_hours: thermal_night_mode.timezone_offset_hours,
         });
 
+        let mut capacity_timer = tokio::time::interval(Duration::from_secs(1));
         let mut last_serial_actor_progress = serial_actor_progress.load(Ordering::Acquire);
         let mut last_am2_pic_heartbeat_progress =
             am2_pic_heartbeat_progress.load(Ordering::Acquire);
@@ -23434,6 +24217,15 @@ impl SerialMiner {
             }
             tokio::select! {
                 biased;
+
+                _ = capacity_timer.tick(), if capacity_publisher.enabled() => {
+                    capacity_publisher.publish(
+                        dispatch_life.is_admitted() && !self.shutdown.is_cancelled()
+                            && validated_serial_route && capacity_initial_frequency > 0,
+                        resolved_chip_id,
+                        &[(capacity_chip_count, applied_capacity_frequency.load(Ordering::Acquire))],
+                    );
+                }
 
                 exit = am2_apw_heartbeat_exit_rx.recv(), if am2_apw_heartbeat_required => {
                     match exit {
@@ -24012,13 +24804,14 @@ impl SerialMiner {
                     // concurrently on the blocking pool so the Tokio worker can
                     // continue processing shutdown and network tasks.
                     let temperature_worker = tokio::task::spawn_blocking(move || {
-                        thermal_owner.read_board_temperatures(
+                        thermal_owner.service_psu_heartbeat()?;
+                        Ok::<_, dcentrald_hal::HalError>(thermal_owner.read_board_temperatures(
                             Instant::now() + Duration::from_millis(750),
-                        )
+                        ))
                     });
                     let fan_worker = sample_fan_tach(fan_sampler);
                     let (temperature_result, fan_result) = tokio::join!(temperature_worker, fan_worker);
-                    let temperature_snapshot = match temperature_result {
+                    let temperature_snapshot = match temperature_result.map_err(anyhow::Error::from).and_then(|result| result.map_err(anyhow::Error::from)) {
                         Ok(snapshot) => snapshot,
                         Err(join_error) => {
                             error!(%join_error, "Amlogic thermal polling worker failed; cutting hash power");
@@ -24132,6 +24925,7 @@ impl SerialMiner {
                                 &thermal_night_mode,
                                 &home_night_fan_rx,
                                 resolved_chip_id,
+                                preflight_industrial_pll_policy,
                                 &*work_queue,
                                 latest_temp_c,
                                 &serial_live_mhz_tx,
@@ -24220,6 +25014,7 @@ impl SerialMiner {
                                 &thermal_night_mode,
                                 &home_night_fan_rx,
                                 resolved_chip_id,
+                                preflight_industrial_pll_policy,
                                 &*work_queue,
                                 latest_temp_c,
                                 &serial_live_mhz_tx,
@@ -24447,6 +25242,7 @@ impl SerialMiner {
                         &thermal_night_mode,
                         &home_night_fan_rx,
                         resolved_chip_id,
+                        preflight_industrial_pll_policy,
                         &*work_queue,
                         latest_temp_c,
                         &serial_live_mhz_tx,
@@ -24816,22 +25612,7 @@ impl SerialMiner {
                             )
                             .to_vec()
                         } else {
-                            // BM1362 full-header work format (existing)
-                            let mut payload = [0u8; 82];
-                            payload[0] = asic_job_id;
-                            payload[1] = 0x01; // num_midstates
-                            payload[6..10].copy_from_slice(&work.nbits.to_le_bytes());
-                            payload[10..14].copy_from_slice(&work.ntime.to_le_bytes());
-                            let mr = reverse_32bit_words(&work.merkle_root);
-                            payload[14..46].copy_from_slice(&mr);
-                            let pbh = reverse_32bit_words(&work.prev_block_hash);
-                            payload[46..78].copy_from_slice(&pbh);
-                            payload[78..82].copy_from_slice(&work.version.to_le_bytes());
-                            let mut frame = Vec::with_capacity(84);
-                            frame.push(0x21);
-                            frame.push(0x56); // length: 86
-                            frame.extend_from_slice(&payload);
-                            frame
+                            serial_full_header_work(asic_job_id, work.version, work.nbits, work.ntime, &work.merkle_root, &work.prev_block_hash)
                         };
 
                         let work_entry = WorkEntry {
@@ -25091,9 +25872,22 @@ impl SerialMiner {
                                     }
                                 }
                             }
-                            if commit.pending.ownership_epoch != s19k_dispatch_epoch {
+                            // 2026-09-04 attempt-2 post-mortem: a genuine second
+                            // Bitcoin block (clean_jobs) advanced the ownership
+                            // epoch between the actor's dispatch and its commit
+                            // event landing here, and the unconditional terminal
+                            // fence killed a fully-committed bounded run 62 s in.
+                            // The physical commit is a fact of the epoch it was
+                            // dispatched under: account it as evidence and retire
+                            // it, never revive its job state. A stale commit
+                            // stays terminal whenever pool hashing authority is
+                            // absent — a post-revocation physical commit is
+                            // exactly the cutoff case the revocation arm polices.
+                            let stale_commit_epoch =
+                                commit.pending.ownership_epoch != s19k_dispatch_epoch;
+                            if stale_commit_epoch && !*pool_hashing_allowed_rx.borrow() {
                                 terminal_safety_error = Some(anyhow::anyhow!(
-                                    "S19k physical TX committed in stale ownership epoch {} (current {}); refusing to revive stale job state; receipt={:?}",
+                                    "S19k physical TX committed in stale ownership epoch {} (current {}) while pool hashing authority is absent; refusing to revive stale job state; receipt={:?}",
                                     commit.pending.ownership_epoch,
                                     s19k_dispatch_epoch,
                                     commit.receipt.paths,
@@ -25120,10 +25914,12 @@ impl SerialMiner {
                                 }
                                 info!(
                                     schema = "dcentos.s19k-bounded-work-proof/v1",
-                                    event = if commit.receipt.all_required_committed() {
-                                        "tx-all-required-committed"
-                                    } else {
+                                    event = if !commit.receipt.all_required_committed() {
                                         "tx-partial-terminal"
+                                    } else if stale_commit_epoch {
+                                        "tx-stale-epoch-retired"
+                                    } else {
+                                        "tx-all-required-committed"
                                     },
                                     ownership_epoch = commit.pending.ownership_epoch,
                                     commit_sequence = commit.pending.commit_sequence,
@@ -25144,13 +25940,45 @@ impl SerialMiner {
                                 ));
                                 break;
                             }
-                            if commit.pending.commit_sequence != total_work {
+                            // The sequence gate guards the CURRENT epoch's
+                            // attribution chain only: a clean_jobs transition
+                            // resets s19k_enqueued_work_count while already-
+                            // drained TXs still carry stamps from the old
+                            // continuation. Stale commits are validated by
+                            // epoch + physical receipt instead, and must not
+                            // advance total_work — the reset already forgave
+                            // their sequence, and the first post-clean commit
+                            // reuses that sequence number.
+                            if !stale_commit_epoch
+                                && commit.pending.commit_sequence != total_work
+                            {
                                 terminal_safety_error = Some(anyhow::anyhow!(
                                     "S19k physical commit sequence {} did not match next committed epoch {}; refusing wrap/clean attribution drift",
                                     commit.pending.commit_sequence,
                                     total_work,
                                 ));
                                 break;
+                            }
+                            if stale_commit_epoch {
+                                let stale_wire = commit.pending.wire.clone();
+                                if let Err(error) =
+                                    retired_s19k_tx.push_retired_generation(stale_wire)
+                                {
+                                    terminal_safety_error = Some(anyhow::anyhow!(
+                                        "S19k stale-epoch physical commit retire insert failed; receipt={:?}: {error}",
+                                        commit.receipt.paths,
+                                    ));
+                                    break;
+                                }
+                                info!(
+                                    job_id = %commit.pending.entry.job_id,
+                                    stale_epoch = commit.pending.ownership_epoch,
+                                    current_epoch = s19k_dispatch_epoch,
+                                    commit_sequence = commit.pending.commit_sequence,
+                                    paths = ?commit.receipt.paths,
+                                    "S19k stale-epoch physical commit accounted and retired without job-state revival"
+                                );
+                                continue;
                             }
                             total_work = total_work.saturating_add(1);
                             s19k_enqueued_work_count =
@@ -25398,7 +26226,7 @@ impl SerialMiner {
                         }
                     } else {
                         (
-                            (id_byte & 0xF0) >> 1,
+                            serial_small_core_job_id(id_byte),
                             resp[4],
                             u16::from_be_bytes([resp[6], resp[7]]),
                             resp[8],
@@ -25898,6 +26726,15 @@ impl SerialMiner {
                             );
                             continue;
                         }
+                        if !serial_pool_version_admitted(&entry, rolled_version, is_bm1398, is_bm1366) {
+                            debug!(
+                                base_version = format_args!("0x{:08X}", entry.version),
+                                rolled_version = format_args!("0x{:08X}", rolled_version),
+                                version_mask = format_args!("0x{:08X}", entry.version_mask),
+                                "CPU-valid serial header cannot be expressed under this pool job's version mask"
+                            );
+                            continue;
+                        }
                         let distinct_midstates = if is_bm1398 {
                             entry.version_mask != 0
                         } else {
@@ -25922,7 +26759,6 @@ impl SerialMiner {
                             // that path bounded-proof credit.
                             if is_bm1366 && s19k_track1_bounded_work_proof {
                                 if let Some(duplicate_path) = s19k_rx_path {
-                                    let duplicate_vdelta = rolled_version ^ entry.version;
                                     let duplicate_key = S19kSubmittedShareKey {
                                         work_generation: entry.work_generation,
                                         worker_name: self.config.pool.worker.clone(),
@@ -25930,11 +26766,7 @@ impl SerialMiner {
                                         extranonce2: entry.extranonce2.clone(),
                                         ntime: format!("{:08x}", entry.ntime),
                                         nonce: format!("{:08x}", nonce),
-                                        version_bits: if duplicate_vdelta != 0 {
-                                            Some(format!("{:08x}", duplicate_vdelta))
-                                        } else {
-                                            None
-                                        },
+                                        version_bits: dcentrald_stratum::work::bip310_version_bits(rolled_version, entry.version_mask),
                                         version: rolled_version,
                                     };
                                     match s19k_track1_duplicate_rx_share_credit(
@@ -25995,7 +26827,6 @@ impl SerialMiner {
                             continue;
                         }
 
-                        let vdelta = rolled_version ^ entry.version;
                         let achieved_difficulty = serial_achieved_difficulty_from_header(&header);
                         let share = dcentrald_stratum::types::ValidShare {
                             work_generation: entry.work_generation,
@@ -26004,7 +26835,7 @@ impl SerialMiner {
                             extranonce2: entry.extranonce2.clone(),
                             ntime: format!("{:08x}", entry.ntime),
                             nonce: format!("{:08x}", nonce),
-                            version_bits: if vdelta != 0 { Some(format!("{:08x}", vdelta)) } else { None },
+                            version_bits: dcentrald_stratum::work::bip310_version_bits(rolled_version, entry.version_mask),
                             version: rolled_version,
                             achieved_difficulty,
                         };
@@ -27366,6 +28197,7 @@ impl SerialMiner {
             serial_actor_topology,
             terminal_safety_error,
             terminal_watchdog_closeout,
+            software_closeout_run,
         );
         if terminal_result.is_ok() {
             if let Some(guard) = s19k_track1_run_closeout.as_mut() {
@@ -27432,38 +28264,47 @@ fn serial_rolled_version(
         ));
     }
 
-    // BIP320 reconstruction is unconditional for BM1362-family chips â€”
-    // they roll the BIP320 16-bit field regardless of whether the pool
-    // negotiated `mining.configure`. The .135 Amlogic S21 pre-fix run
-    // (2026-04-11, 0.023% accept rate) was THIS branch silently dropping
-    // ~99.9% of valid hashing work whenever the pool didn't negotiate the
-    // mask. The 2026-05-15 .109 XIL milestone confirmed the chip-side
-    // behavior. See:
-    //
-    //
-    //   -  F1.
-    let (rolled_version, vbits_delta) =
+    // Reconstruct the actual full header independently of pool permission.
+    // The returned BIP320 field is the complete shifted field, not XOR-to-base.
+    // Keep every candidate for CPU validation and existing liveness accounting;
+    // pool admission below separately checks both set and cleared base bits.
+    let (rolled_version, _) =
         dcentrald_asic::bm1362::bip320_reconstruct_rolled_version(entry.version, version_bits_raw);
-
-    if entry.version_mask == 0 {
-        // Pool didn't negotiate version-rolling. The chip rolled anyway â€”
-        // submit the rolled-version share. validate_full_header upstream is
-        // the SOLE gate; pools that understand BIP320 will accept (Public
-        // Pool does), pools that don't will reject post-submit.
-        return Some(rolled_version);
-    }
-
-    if vbits_delta & !entry.version_mask != 0 {
-        // BM1362/other: drop unsanctioned bits. BM1366 always rolls
-        // BIP320 0x1FFF_E000 (ESP-Miner + share parser). validate_full_header
-        // is the only gate — a narrower pool mask must not eat first shares.
-        if is_bm1366 {
-            return Some(rolled_version);
-        }
-        return None;
-    }
-
     Some(rolled_version)
+}
+
+/// A full-header share must preserve every bit outside the job's rolling mask.
+/// With mask zero V1 emits only five fields, so it can express only the base.
+/// V2 templates likewise use zero when the channel forbids version rolling.
+/// BM1398 midstates and the exact S19k packed-version route retain their own
+/// existing semantics; no ASIC reconstruction or physical admission changes.
+fn serial_pool_version_admitted(
+    entry: &WorkEntry,
+    rolled_version: u32,
+    is_bm1398: bool,
+    is_bm1366: bool,
+) -> bool {
+    is_bm1398 || is_bm1366 || ((rolled_version ^ entry.version) & !entry.version_mask) == 0
+}
+
+/// Full-header UART job used by BM1362/BM1368/BM1370. ASIC word order
+/// differs from the Bitcoin header; keep the codec shared with native tests.
+fn serial_full_header_work(
+    job_id: u8,
+    version: u32,
+    nbits: u32,
+    ntime: u32,
+    merkle: &[u8; 32],
+    previous: &[u8; 32],
+) -> Vec<u8> {
+    let mut frame = vec![0u8; 84];
+    frame[..4].copy_from_slice(&[0x21, 0x56, job_id, 1]);
+    frame[8..12].copy_from_slice(&nbits.to_le_bytes());
+    frame[12..16].copy_from_slice(&ntime.to_le_bytes());
+    frame[16..48].copy_from_slice(&reverse_32bit_words(merkle));
+    frame[48..80].copy_from_slice(&reverse_32bit_words(previous));
+    frame[80..84].copy_from_slice(&version.to_le_bytes());
+    frame
 }
 
 /// G22: thin-wrap stratum pure SSOT (engines keep distinct WorkEntry types).
@@ -27504,6 +28345,11 @@ fn serial_next_asic_job_id(asic_job_id: u8, job_id_increment: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod modern_native_population_tests {
+        use super::*;
+        include!("serial_mining/modern_native_population_tests.rs");
+    }
 
     static S19K_GUARDED_UNLINK_TEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -27742,6 +28588,24 @@ mod tests {
     }
 
     #[test]
+    fn s19k_native_configured_dispatch_needs_no_extra_environment_flag() {
+        use dcentrald_common::AsicProtocolIdentity;
+        let native = serial_route_admission("am3-s19k", AsicProtocolIdentity::Bm1366);
+        assert!(SerialMiner::s19k_native_request_from_dispatch(
+            Some(&native),
+            false
+        ));
+        let other = serial_route_admission("am3-s21", AsicProtocolIdentity::Bm1368);
+        assert!(!SerialMiner::s19k_native_request_from_dispatch(
+            Some(&other),
+            false
+        ));
+        assert!(!SerialMiner::s19k_native_request_from_dispatch(None, false));
+        // Diagnostic requests still cannot mint the private cold-start owner.
+        assert!(SerialMiner::s19k_native_request_from_dispatch(None, true));
+    }
+
+    #[test]
     fn s19k_native_mapping_and_panic_closeout_are_not_generic_nopic() {
         let source = include_str!("serial_mining.rs");
         let promotion = source
@@ -27766,7 +28630,7 @@ mod tests {
         let raw1 = panic.find("disable_s19k_track1_psu_checked").unwrap();
         assert!(resets < raw1);
         assert!(panic.contains("native_armed || track1_armed"));
-        assert!(panic.contains("disable_psu_checked().is_ok()"));
+        assert!(panic.contains("disable_nopic_retained_psu_checked().is_ok()"));
 
         let drop_body = source
             .split_once("impl Drop for NoPicPsuGuard")
@@ -29081,7 +29945,11 @@ mod tests {
             .find("SerialChainBackend::open_passthrough_bm1366")
             .expect("first Track-1 UART open");
         let first_track1_fallible_observation = run
-            .find("let nopic = is_nopic(&self.config)?;")
+            // Re-anchored 2026-09-01 (Lane-F): production drifted to the
+            // install-custody branch form in 25ea0e9b1, so the historical
+            // `let nopic = is_nopic(&self.config)?;` literal only self-matched
+            // test bodies. Same statement, same ordering intent.
+            .find("let nopic = if s19k_install_custody_safeoff || is_bm1362_aml || is_bm1366_xp {")
             .expect("first Track-1 fallible hardware observation");
         assert!(guard_owner < guard_prepare && guard_prepare < first_track1_fallible_observation);
         assert!(guard_prepare < first_track1_uart_open);
@@ -29660,6 +30528,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn active_capacity_frequency_requires_completed_serial_pll_write() {
+        for fail in [false, true] {
+            let shutdown = CancellationToken::new();
+            let mut backend = FakeSerialActorBackend::new(vec![Ok(None)], shutdown.clone());
+            backend.fail_reg_write = fail;
+            backend.cancel_after_reads = Some(1);
+            let actual = Arc::new(std::sync::atomic::AtomicU16::new(525));
+            let solution = serial_night_pll_solution(0x1368, 400).unwrap();
+            let queue = Arc::new(Mutex::new(VecDeque::from([SerialQueuedTx::pll(solution)])));
+            assert_eq!(
+                actual.load(Ordering::Acquire),
+                525,
+                "queueing is not a commit"
+            );
+            let (events, _rx) = mpsc::channel(4);
+            let exit = run_serial_io_actor(
+                backend,
+                queue,
+                events,
+                shutdown,
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU64::new(0)),
+                false,
+                false,
+                1,
+                true,
+                1,
+                None,
+                None,
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU8::new(0xFF)),
+                Some(actual.clone()),
+            );
+            if fail {
+                assert!(matches!(exit, SerialActorExit::Failed(_)));
+                assert_eq!(actual.load(Ordering::Acquire), 525);
+            } else {
+                assert_eq!(actual.load(Ordering::Acquire), solution.actual_freq_mhz);
+            }
+        }
+    }
+
     fn serial_route_admission(
         board_target: &'static str,
         identity: dcentrald_common::AsicProtocolIdentity,
@@ -29677,7 +30588,9 @@ mod tests {
 
     fn chip_address_body(chip_id: u16, address: u8) -> [u8; BM13XX_CMD_RESP_BODY_LEN] {
         let [high, low] = chip_id.to_be_bytes();
-        let mut body = [high, low, 0, address, address, 0, 0, 0, 0];
+        // Recorded BM1362 ChipAddress encodes the128-core family as3.
+        let cores = if chip_id == 0x1362 { 3 } else { 0 };
+        let mut body = [high, low, cores, address, address, 0, 0, 0, 0];
         body[8] = dcentrald_asic::protocol::bm13xx_command_response_crc5(&body[..8]);
         body
     }
@@ -29689,6 +30602,956 @@ mod tests {
             .map(|address| chip_address_body(chip_id, address))
             .collect::<Vec<_>>();
         validate_serial_chip_address_window(bodies.iter().map(|body| &body[..])).unwrap()
+    }
+
+    #[test]
+    fn s21_native_selected_uart_work_and_genesis_nonce_round_trip() {
+        use std::io::{Read, Write};
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let merkle = [
+            0x3b, 0xa3, 0xed, 0xfd, 0x7a, 0x7b, 0x12, 0xb2, 0x7a, 0xc7, 0x2c, 0x3e, 0x67, 0x76,
+            0x8f, 0x61, 0x7f, 0xc8, 0x1b, 0xc3, 0x88, 0x8a, 0x51, 0x32, 0x3a, 0x9f, 0xb8, 0xaa,
+            0x4b, 0x1e, 0x5e, 0x4a,
+        ];
+        let mut entry = sample_entry(1, 0);
+        entry.job_id = "s21-genesis".into();
+        entry.prev_block_hash = [0; 32];
+        entry.merkle_root = merkle;
+        entry.ntime = 1231006505;
+        entry.nbits = 0x1d00ffff;
+        entry.share_target = dcentrald_stratum::work::difficulty_to_target(1.0);
+        let work = serial_full_header_work(
+            0,
+            entry.version,
+            entry.nbits,
+            entry.ntime,
+            &entry.merkle_root,
+            &entry.prev_block_hash,
+        );
+        // Each exact profile combines recorded factory bytes with the actual
+        // local UART transport and an independently known winning Bitcoin nonce.
+        for (target, identity, chip_id, count, page) in [
+            (
+                "am3-s21",
+                dcentrald_common::AsicProtocolIdentity::Bm1368,
+                0x1368,
+                108,
+                &include_bytes!("serial_mining/fixtures/s21-bhb68606.bin")[..],
+            ),
+            (
+                "am3-s21pro",
+                dcentrald_common::AsicProtocolIdentity::Bm1370,
+                0x1370,
+                65,
+                &include_bytes!("serial_mining/fixtures/bm1370-a3hb70601.bin")[..],
+            ),
+            (
+                "am3-s21xp",
+                dcentrald_common::AsicProtocolIdentity::Bm1370,
+                0x1370,
+                91,
+                &include_bytes!("serial_mining/fixtures/bm1370-a3hb70501.bin")[..],
+            ),
+            (
+                "am3-s19xp",
+                dcentrald_common::AsicProtocolIdentity::Bm1366,
+                0x1366,
+                110,
+                &include_bytes!("serial_mining/fixtures/bm1366-bhb56801-class5.bin")[..],
+            ),
+            (
+                "am3-s19jxp",
+                dcentrald_common::AsicProtocolIdentity::Bm1366,
+                0x1366,
+                110,
+                &include_bytes!("serial_mining/fixtures/bm1366-bhb56804.bin")[..],
+            ),
+        ] {
+            // Includes each singleton: no inherited Track-1 required-pair policy.
+            for population in [
+                [true, false, false],
+                [false, true, false],
+                [false, false, true],
+                [true, true, true],
+            ] {
+                let routes: Vec<_> = dcentrald_hal::platform::amlogic::S21_UARTS
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(slot, _)| population[*slot])
+                    .collect();
+                let profile = modern_s21_profile(target, identity).unwrap();
+                let pages = population.map(|present| present.then(|| page.to_vec()));
+                if identity == dcentrald_common::AsicProtocolIdentity::Bm1366 {
+                    s21_native_identity::validate_bm1366_xp_pages(profile, population, &pages)
+                        .unwrap();
+                } else if identity == dcentrald_common::AsicProtocolIdentity::Bm1368 {
+                    s21_native_identity::validate_pages(population, &pages).unwrap();
+                } else {
+                    s21_native_identity::validate_bm1370_pages(profile, population, &pages)
+                        .unwrap();
+                }
+                let admission = ValidatedSerialChainAdmission::bind_route(
+                    serial_route_admission(target, identity),
+                    routes[0].0 as u8,
+                    routes[0].1,
+                    115_200,
+                    count,
+                    serial_window(chip_id, &vec![0; count as usize]),
+                )
+                .unwrap();
+                let (execution, terminal) =
+                    execution_fence_domain(SerialSessionToken::from_validated_for_test(&admission));
+                let mut peers = Vec::new();
+                let mut backends = Vec::new();
+                for &(slot, _) in &routes {
+                    let (mut master, mut slave) = (-1, -1);
+                    // SAFETY: openpty writes two new descriptors, optional pointer
+                    // arguments are null. This exercises only local pseudo-UARTs.
+                    assert_eq!(
+                        unsafe {
+                            libc::openpty(
+                                &mut master,
+                                &mut slave,
+                                std::ptr::null_mut(),
+                                std::ptr::null(),
+                                std::ptr::null(),
+                            )
+                        },
+                        0
+                    );
+                    // SAFETY: each newly returned descriptor is consumed once.
+                    let master = unsafe { std::fs::File::from_raw_fd(master) };
+                    // SAFETY: separately returned slave descriptor, consumed once.
+                    let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+                    let backend = SerialChainBackend::open(
+                        slot as u8,
+                        &format!("/proc/self/fd/{}", slave.as_raw_fd()),
+                        115_200,
+                    )
+                    .unwrap();
+                    backend.set_response_len(BM1362_RESP_BODY_LEN);
+                    backend.set_nonblocking().unwrap();
+                    peers.push((master, slave));
+                    backends.push(backend);
+                }
+                let transport = SerialWorkTransport::Multi(MultiTtyTransport {
+                    paths: routes.iter().map(|(_, path)| *path).collect(),
+                    tx_required: vec![true; backends.len()],
+                    backends,
+                    execution,
+                    native_exact_mapping: true,
+                    next: AtomicUsize::new(0),
+                    last_rx: AtomicUsize::new(0),
+                    pending_rx: Mutex::new(VecDeque::new()),
+                    s21_full_unit: None,
+                });
+                let sent = transport.send_work_with_receipt(&work);
+                assert!(sent.error.is_none());
+                assert!(sent.receipt.all_required_committed());
+                assert_eq!(sent.receipt.paths.len(), routes.len());
+                for (master, _) in &mut peers {
+                    let mut poll = libc::pollfd {
+                        fd: master.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: one initialized poll descriptor; bounded local wait.
+                    assert_eq!(unsafe { libc::poll(&mut poll, 1, 1_000) }, 1);
+                    let mut observed = vec![0; work.len() + 4];
+                    master.read_exact(&mut observed).unwrap();
+                    assert_eq!(&observed[..2], &[0x55, 0xaa]);
+                    assert_eq!(&observed[2..86], &work);
+                    assert_eq!(
+                        &observed[86..],
+                        &dcentrald_hal::serial_chain::crc16_public(&work).to_be_bytes()
+                    );
+                    let mut body = [0u8; 9];
+                    body[..4].copy_from_slice(&2083236893u32.to_le_bytes());
+                    // Independent winning-genesis nonce response, job0, version0, CRC5 remainder0.
+                    body[8] = 0x90;
+                    assert_eq!(dcentrald_asic::protocol::crc5(&body), 0);
+                    let mut wire = vec![0xaa, 0x55];
+                    wire.extend_from_slice(&body);
+                    master.write_all(&wire).unwrap();
+                }
+                let mut observed_paths = std::collections::BTreeSet::new();
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while observed_paths.len() < routes.len() && Instant::now() < deadline {
+                    if let Some(body) = transport.read_nonce_response().unwrap() {
+                        let nonce = u32::from_le_bytes(body[..4].try_into().unwrap());
+                        let header = serial_build_header(&entry, 1, nonce);
+                        assert!(dcentrald_stratum::share_pipeline::validate_full_header(
+                            &header,
+                            &entry.share_target
+                        ));
+                        assert_eq!(
+                            serial_full_header_hash_be(&header),
+                            [
+                                0, 0, 0, 0, 0, 0x19, 0xd6, 0x68, 0x9c, 0x08, 0x5a, 0xe1, 0x65,
+                                0x83, 0x1e, 0x93, 0x4f, 0xf7, 0x63, 0xae, 0x46, 0xa2, 0xa6, 0xc1,
+                                0x72, 0xb3, 0xf1, 0xb6, 0x0a, 0x8c, 0xe2, 0x6f,
+                            ]
+                        );
+                        observed_paths.insert(transport.last_rx_path().unwrap());
+                    } else {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+                assert_eq!(
+                    observed_paths,
+                    routes.iter().map(|(_, path)| *path).collect()
+                );
+                let _fenced = terminal.revoke();
+                assert!(transport.send_work_with_receipt(&work).error.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn bm1370_native_actual_init_work_and_known_nonce_on_pro_and_xp_ptys() {
+        use dcentrald_common::AsicProtocolIdentity;
+        use std::io::{Read, Write};
+        use std::os::fd::{AsRawFd, FromRawFd};
+        for (target, count, fixture) in [
+            (
+                "am3-s21pro",
+                65u8,
+                &include_bytes!("serial_mining/fixtures/bm1370-a3hb70601.bin")[..],
+            ),
+            (
+                "am3-s21xp",
+                91u8,
+                &include_bytes!("serial_mining/fixtures/bm1370-a3hb70501.bin")[..],
+            ),
+        ] {
+            let profile = modern_s21_profile(target, AsicProtocolIdentity::Bm1370).unwrap();
+            s21_native_identity::validate_bm1370_pages(
+                profile,
+                [true, false, false],
+                &[Some(fixture.to_vec()), None, None],
+            )
+            .unwrap();
+            let admission = ValidatedSerialChainAdmission::bind_route(
+                serial_route_admission(target, AsicProtocolIdentity::Bm1370),
+                0,
+                "/dev/ttyS3",
+                115_200,
+                count,
+                serial_window(0x1370, &vec![0; count as usize]),
+            )
+            .unwrap();
+            let (execution, terminal) =
+                execution_fence_domain(SerialSessionToken::from_validated_for_test(&admission));
+            let (mut master, mut slave) = (-1, -1);
+            // SAFETY: openpty initializes both local descriptors; optional pointers are null.
+            assert_eq!(
+                unsafe {
+                    libc::openpty(
+                        &mut master,
+                        &mut slave,
+                        std::ptr::null_mut(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                    )
+                },
+                0
+            );
+            // SAFETY: consume each newly returned descriptor exactly once.
+            let master = unsafe { std::fs::File::from_raw_fd(master) };
+            // SAFETY: separate newly returned slave descriptor.
+            let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+            let path = format!("/proc/self/fd/{}", slave.as_raw_fd());
+            let backend = SerialChainBackend::open(0, &path, 115_200).unwrap();
+            let serial = ValidatedSerialBackend::new(backend, execution);
+            let mut entry = sample_entry(1, 0);
+            entry.prev_block_hash = [0; 32];
+            entry.merkle_root = [
+                0x3b, 0xa3, 0xed, 0xfd, 0x7a, 0x7b, 0x12, 0xb2, 0x7a, 0xc7, 0x2c, 0x3e, 0x67, 0x76,
+                0x8f, 0x61, 0x7f, 0xc8, 0x1b, 0xc3, 0x88, 0x8a, 0x51, 0x32, 0x3a, 0x9f, 0xb8, 0xaa,
+                0x4b, 0x1e, 0x5e, 0x4a,
+            ];
+            entry.ntime = 1231006505;
+            entry.nbits = 0x1d00ffff;
+            entry.share_target = dcentrald_stratum::work::difficulty_to_target(1.0);
+            let work = serial_full_header_work(
+                0,
+                1,
+                entry.nbits,
+                entry.ntime,
+                &entry.merkle_root,
+                &entry.prev_block_hash,
+            );
+            let expected_work = work.clone();
+            let peer = std::thread::spawn(move || {
+                let mut master = master;
+                let mut assigned = Vec::new();
+                let mut registers = Vec::new();
+                let mut queries = 0;
+                loop {
+                    let mut poll = libc::pollfd {
+                        fd: master.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: one initialized local poll descriptor; bounded failure wait.
+                    assert_eq!(
+                        unsafe { libc::poll(&mut poll, 1, 5_000) },
+                        1,
+                        "native initializer stopped issuing commands"
+                    );
+                    let mut prefix = [0; 4];
+                    master.read_exact(&mut prefix).unwrap();
+                    assert_eq!(&prefix[..2], &[0x55, 0xaa]);
+                    if prefix[2] == 0x21 {
+                        let mut frame = vec![0; expected_work.len() + 2];
+                        frame[..2].copy_from_slice(&prefix[2..]);
+                        master.read_exact(&mut frame[2..]).unwrap();
+                        assert_eq!(&frame[..expected_work.len()], expected_work.as_slice());
+                        assert_eq!(
+                            &frame[expected_work.len()..],
+                            &dcentrald_hal::serial_chain::crc16_public(&expected_work)
+                                .to_be_bytes()
+                        );
+                        assert_eq!(queries, 2);
+                        let mut reply = vec![0xaa, 0x55];
+                        reply.extend_from_slice(&[0x1d, 0xac, 0x2b, 0x7c, 0, 0, 0, 0, 0x90]);
+                        master.write_all(&reply).unwrap();
+                        return (master, assigned, registers);
+                    }
+                    let mut command = vec![0; prefix[3] as usize];
+                    command[..2].copy_from_slice(&prefix[2..]);
+                    master.read_exact(&mut command[2..]).unwrap();
+                    match command[0] {
+                        0x40 => assigned.push(command[2]),
+                        0x51 | 0x41 => {
+                            assert_eq!(command.len(), 9);
+                            registers.push((
+                                command[0],
+                                command[2],
+                                command[3],
+                                u32::from_be_bytes(command[4..8].try_into().unwrap()),
+                            ));
+                        }
+                        0x53 => assert_eq!(command[2..4], [0, 0]),
+                        0x52 => {
+                            queries += 1;
+                            let addresses = if assigned.is_empty() {
+                                vec![0; count as usize]
+                            } else {
+                                assigned.clone()
+                            };
+                            assert_eq!(addresses.len(), count as usize);
+                            for address in addresses {
+                                let mut frame = vec![0xaa, 0x55];
+                                frame.extend_from_slice(&chip_address_body(0x1370, address));
+                                master.write_all(&frame).unwrap();
+                            }
+                        }
+                        other => panic!("unexpected BM1370 init opcode {other:02x}"),
+                    }
+                }
+            });
+            let policy =
+                IndustrialSerialPllPolicy::for_route(target, AsicProtocolIdentity::Bm1370).unwrap();
+            let (serial, geometry) =
+                SerialMiner::init_bm1370_chain(serial, &path, 115_200, count, 480, policy).unwrap();
+            assert_eq!(geometry.observed_chip_count(), count);
+            serial.backend.set_nonblocking().unwrap();
+            serial.send_work(&work).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let body = loop {
+                if let Some(body) = serial.read_nonce_response().unwrap() {
+                    break body;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "no known nonce after initialized work"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            let nonce = u32::from_le_bytes(body[..4].try_into().unwrap());
+            assert_eq!(nonce, 2083236893);
+            assert!(dcentrald_stratum::share_pipeline::validate_full_header(
+                &serial_build_header(&entry, 1, nonce),
+                &entry.share_target
+            ));
+            let (_master, assigned, registers) = peer.join().unwrap();
+            assert_eq!(
+                assigned,
+                (0..count)
+                    .map(|i| i * (256u16 / u16::from(count)) as u8)
+                    .collect::<Vec<_>>()
+            );
+            // Independent literals from held ESP-Miner's S21Pro dump comments.
+            assert!(registers.contains(&(0x51, 0, 0x18, 0xf000c100)));
+            assert!(registers.contains(&(0x51, 0, 0x58, 0x00011111)));
+            for address in assigned {
+                assert!(registers.contains(&(0x41, address, 0x3c, 0x80008b00)));
+                assert!(registers.contains(&(0x41, address, 0x3c, 0x8000800c)));
+                assert!(registers.contains(&(0x41, address, 0x3c, 0x800082aa)));
+            }
+            assert!(registers.windows(4).any(|w| w
+                == [
+                    (0x51, 0, 0xb9, 0x4480),
+                    (0x51, 0, 0x54, 2),
+                    (0x51, 0, 0xb9, 0x4480),
+                    (0x51, 0, 0x3c, 0x80008dee)
+                ]));
+            let _fenced = terminal.revoke();
+            assert!(serial.send_work(&work).is_err());
+        }
+    }
+
+    #[test]
+    fn bm1366_xp_native_actual_init_work_and_known_nonce_on_xp_and_jxp_ptys() {
+        use dcentrald_common::AsicProtocolIdentity;
+        use std::io::{Read, Write};
+        use std::os::fd::{AsRawFd, FromRawFd};
+        for (target, count, fixture) in [
+            (
+                "am3-s19xp",
+                110u8,
+                &include_bytes!("serial_mining/fixtures/bm1366-bhb56801-class5.bin")[..],
+            ),
+            (
+                "am3-s19jxp",
+                110u8,
+                &include_bytes!("serial_mining/fixtures/bm1366-bhb56804.bin")[..],
+            ),
+        ] {
+            let profile = modern_s21_profile(target, AsicProtocolIdentity::Bm1366).unwrap();
+            s21_native_identity::validate_bm1366_xp_pages(
+                profile,
+                [true, false, false],
+                &[Some(fixture.to_vec()), None, None],
+            )
+            .unwrap();
+            let admission = ValidatedSerialChainAdmission::bind_route(
+                serial_route_admission(target, AsicProtocolIdentity::Bm1366),
+                0,
+                "/dev/ttyS3",
+                115_200,
+                count,
+                serial_window(0x1366, &vec![0; count as usize]),
+            )
+            .unwrap();
+            let (execution, terminal) =
+                execution_fence_domain(SerialSessionToken::from_validated_for_test(&admission));
+            let (mut master, mut slave) = (-1, -1);
+            // SAFETY: openpty initializes both local descriptors; optional pointers are null.
+            assert_eq!(
+                unsafe {
+                    libc::openpty(
+                        &mut master,
+                        &mut slave,
+                        std::ptr::null_mut(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                    )
+                },
+                0
+            );
+            // SAFETY: consume each newly returned descriptor exactly once.
+            let master = unsafe { std::fs::File::from_raw_fd(master) };
+            // SAFETY: separate newly returned slave descriptor.
+            let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+            let path = format!("/proc/self/fd/{}", slave.as_raw_fd());
+            let backend = SerialChainBackend::open(0, &path, 115_200).unwrap();
+            let serial = ValidatedSerialBackend::new(backend, execution);
+            let mut entry = sample_entry(1, 0);
+            entry.prev_block_hash = [0; 32];
+            entry.merkle_root = [
+                0x3b, 0xa3, 0xed, 0xfd, 0x7a, 0x7b, 0x12, 0xb2, 0x7a, 0xc7, 0x2c, 0x3e, 0x67, 0x76,
+                0x8f, 0x61, 0x7f, 0xc8, 0x1b, 0xc3, 0x88, 0x8a, 0x51, 0x32, 0x3a, 0x9f, 0xb8, 0xaa,
+                0x4b, 0x1e, 0x5e, 0x4a,
+            ];
+            entry.ntime = 1231006505;
+            entry.nbits = 0x1d00ffff;
+            entry.share_target = dcentrald_stratum::work::difficulty_to_target(1.0);
+            let work = serial_full_header_work(
+                0,
+                1,
+                entry.nbits,
+                entry.ntime,
+                &entry.merkle_root,
+                &entry.prev_block_hash,
+            );
+            let expected_work = work.clone();
+            let peer = std::thread::spawn(move || {
+                let mut master = master;
+                let mut assigned = Vec::new();
+                let mut registers = Vec::new();
+                let mut queries = 0;
+                loop {
+                    let mut poll = libc::pollfd {
+                        fd: master.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: one initialized local poll descriptor; bounded failure wait.
+                    assert_eq!(
+                        unsafe { libc::poll(&mut poll, 1, 5_000) },
+                        1,
+                        "native initializer stopped issuing commands"
+                    );
+                    let mut prefix = [0; 4];
+                    master.read_exact(&mut prefix).unwrap();
+                    assert_eq!(&prefix[..2], &[0x55, 0xaa]);
+                    if prefix[2] == 0x21 {
+                        let mut frame = vec![0; expected_work.len() + 2];
+                        frame[..2].copy_from_slice(&prefix[2..]);
+                        master.read_exact(&mut frame[2..]).unwrap();
+                        assert_eq!(&frame[..expected_work.len()], expected_work.as_slice());
+                        assert_eq!(
+                            &frame[expected_work.len()..],
+                            &dcentrald_hal::serial_chain::crc16_public(&expected_work)
+                                .to_be_bytes()
+                        );
+                        assert_eq!(queries, 2);
+                        let mut reply = vec![0xaa, 0x55];
+                        reply.extend_from_slice(&[0x1d, 0xac, 0x2b, 0x7c, 0, 0, 0, 0, 0x90]);
+                        master.write_all(&reply).unwrap();
+                        return (master, assigned, registers);
+                    }
+                    let mut command = vec![0; prefix[3] as usize];
+                    command[..2].copy_from_slice(&prefix[2..]);
+                    master.read_exact(&mut command[2..]).unwrap();
+                    match command[0] {
+                        0x40 => assigned.push(command[2]),
+                        0x51 | 0x41 => {
+                            assert_eq!(command.len(), 9);
+                            registers.push((
+                                command[0],
+                                command[2],
+                                command[3],
+                                u32::from_be_bytes(command[4..8].try_into().unwrap()),
+                            ));
+                        }
+                        0x53 => assert_eq!(command[2..4], [0, 0]),
+                        0x52 => {
+                            queries += 1;
+                            let addresses = if assigned.is_empty() {
+                                vec![0; count as usize]
+                            } else {
+                                assigned.clone()
+                            };
+                            assert_eq!(addresses.len(), count as usize);
+                            for address in addresses {
+                                let mut frame = vec![0xaa, 0x55];
+                                frame.extend_from_slice(&chip_address_body(0x1366, address));
+                                master.write_all(&frame).unwrap();
+                            }
+                        }
+                        other => panic!("unexpected BM1366 init opcode {other:02x}"),
+                    }
+                }
+            });
+            let policy =
+                IndustrialSerialPllPolicy::for_route(target, AsicProtocolIdentity::Bm1366).unwrap();
+            let (serial, geometry) =
+                SerialMiner::init_bm1366_xp_chain(serial, &path, 115_200, count, 400, policy)
+                    .unwrap();
+            assert_eq!(geometry.observed_chip_count(), count);
+            serial.backend.set_nonblocking().unwrap();
+            serial.send_work(&work).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let body = loop {
+                if let Some(body) = serial.read_nonce_response().unwrap() {
+                    break body;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "no known nonce after initialized work"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            let nonce = u32::from_le_bytes(body[..4].try_into().unwrap());
+            assert_eq!(nonce, 2083236893);
+            assert!(dcentrald_stratum::share_pipeline::validate_full_header(
+                &serial_build_header(&entry, 1, nonce),
+                &entry.share_target
+            ));
+            let (_master, assigned, registers) = peer.join().unwrap();
+            assert_eq!(
+                assigned,
+                (0..count)
+                    .map(|i| i * (256u16 / u16::from(count)) as u8)
+                    .collect::<Vec<_>>()
+            );
+            // Independent literal bytes from held ESP-Miner BM1366 S19XP dump.
+            assert!(registers.contains(&(0x51, 0, 0x18, 0xff0fc100)));
+            assert!(registers.contains(&(0x51, 0, 0x58, 0x02111111)));
+            assert!(registers.contains(&(0x41, 0, 0x2c, 0x007c0003)));
+            assert!(registers.contains(&(0x51, 0, 0x10, 0x151c)));
+            assert!(!registers.iter().any(|(_, _, reg, _)| *reg == 0x28));
+            assert!(!registers
+                .iter()
+                .any(|(_, _, reg, value)| *reg == 0x10 && *value == 0x115a));
+            for address in assigned {
+                assert!(registers.contains(&(0x41, address, 0xa8, 0x000701f0)));
+                assert!(registers.contains(&(0x41, address, 0x18, 0xf000c100)));
+                assert!(registers.contains(&(0x41, address, 0x3c, 0x80008540)));
+                assert!(registers.contains(&(0x41, address, 0x3c, 0x80008020)));
+                assert!(registers.contains(&(0x41, address, 0x3c, 0x800082aa)));
+            }
+            let _fenced = terminal.revoke();
+            assert!(serial.send_work(&work).is_err());
+        }
+    }
+
+    #[test]
+    fn bm1362_aml_native_actual_init_work_and_known_nonce_on_a_and_plus_ptys() {
+        use dcentrald_common::AsicProtocolIdentity;
+        use std::io::{Read, Write};
+        use std::os::fd::{AsRawFd, FromRawFd};
+        for (target, count, fixture) in [
+            (
+                "am3-s19jproa",
+                126u8,
+                &include_bytes!("serial_mining/fixtures/bm1362-bhb42603.bin")[..],
+            ),
+            (
+                "am3-s19jproplus",
+                120u8,
+                &include_bytes!("serial_mining/fixtures/bm1362-bhb42612.bin")[..],
+            ),
+        ] {
+            let profile = modern_s21_profile(target, AsicProtocolIdentity::Bm1362).unwrap();
+            s21_native_identity::validate_bm1362_aml_pages(
+                profile,
+                [true, false, false],
+                &[Some(fixture.to_vec()), None, None],
+            )
+            .unwrap();
+            let admission = ValidatedSerialChainAdmission::bind_route(
+                serial_route_admission(target, AsicProtocolIdentity::Bm1362),
+                0,
+                "/dev/ttyS3",
+                115_200,
+                count,
+                validate_native_cold_window(
+                    AsicProtocolIdentity::Bm1362,
+                    &vec![vec![0x13, 0x62, 3, 0, 0, 0, 0x0d]; count as usize],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let (execution, terminal) =
+                execution_fence_domain(SerialSessionToken::from_validated_for_test(&admission));
+            let (mut master, mut slave) = (-1, -1);
+            // SAFETY: openpty initializes both local descriptors; optional pointers are null.
+            assert_eq!(
+                unsafe {
+                    libc::openpty(
+                        &mut master,
+                        &mut slave,
+                        std::ptr::null_mut(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                    )
+                },
+                0
+            );
+            // SAFETY: consume each newly returned descriptor exactly once.
+            let master = unsafe { std::fs::File::from_raw_fd(master) };
+            // SAFETY: separate newly returned slave descriptor.
+            let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+            let path = format!("/proc/self/fd/{}", slave.as_raw_fd());
+            let backend = SerialChainBackend::open(0, &path, 115_200).unwrap();
+            let serial = ValidatedSerialBackend::new(backend, execution);
+            let mut entry = sample_entry(1, 0);
+            entry.prev_block_hash = [0; 32];
+            entry.merkle_root = [
+                0x3b, 0xa3, 0xed, 0xfd, 0x7a, 0x7b, 0x12, 0xb2, 0x7a, 0xc7, 0x2c, 0x3e, 0x67, 0x76,
+                0x8f, 0x61, 0x7f, 0xc8, 0x1b, 0xc3, 0x88, 0x8a, 0x51, 0x32, 0x3a, 0x9f, 0xb8, 0xaa,
+                0x4b, 0x1e, 0x5e, 0x4a,
+            ];
+            entry.ntime = 1231006505;
+            entry.nbits = 0x1d00ffff;
+            entry.share_target = dcentrald_stratum::work::difficulty_to_target(1.0);
+            let work = serial_full_header_work(
+                0,
+                1,
+                entry.nbits,
+                entry.ntime,
+                &entry.merkle_root,
+                &entry.prev_block_hash,
+            );
+            let expected_work = work.clone();
+            let peer = std::thread::spawn(move || {
+                let mut master = master;
+                let mut assigned = Vec::new();
+                let mut registers = Vec::new();
+                let mut queries = 0;
+                loop {
+                    let mut poll = libc::pollfd {
+                        fd: master.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: one initialized local poll descriptor; bounded failure wait.
+                    assert_eq!(
+                        unsafe { libc::poll(&mut poll, 1, 5_000) },
+                        1,
+                        "native initializer stopped issuing commands"
+                    );
+                    let mut prefix = [0; 4];
+                    master.read_exact(&mut prefix).unwrap();
+                    assert_eq!(&prefix[..2], &[0x55, 0xaa]);
+                    if prefix[2] == 0x21 {
+                        let mut frame = vec![0; expected_work.len() + 2];
+                        frame[..2].copy_from_slice(&prefix[2..]);
+                        master.read_exact(&mut frame[2..]).unwrap();
+                        assert_eq!(&frame[..expected_work.len()], expected_work.as_slice());
+                        assert_eq!(
+                            &frame[expected_work.len()..],
+                            &dcentrald_hal::serial_chain::crc16_public(&expected_work)
+                                .to_be_bytes()
+                        );
+                        assert_eq!(queries, 2);
+                        let mut reply = vec![0xaa, 0x55];
+                        reply.extend_from_slice(&[0x1d, 0xac, 0x2b, 0x7c, 0, 0, 0, 0, 0x90]);
+                        master.write_all(&reply).unwrap();
+                        return (master, assigned, registers);
+                    }
+                    let mut command = vec![0; prefix[3] as usize];
+                    command[..2].copy_from_slice(&prefix[2..]);
+                    master.read_exact(&mut command[2..]).unwrap();
+                    match command[0] {
+                        0x40 => assigned.push(command[2]),
+                        0x51 | 0x41 => {
+                            assert_eq!(command.len(), 9);
+                            registers.push((
+                                command[0],
+                                command[2],
+                                command[3],
+                                u32::from_be_bytes(command[4..8].try_into().unwrap()),
+                            ));
+                        }
+                        0x53 => assert_eq!(command[2..4], [0, 0]),
+                        0x52 => {
+                            queries += 1;
+                            let addresses = if assigned.is_empty() {
+                                vec![0; count as usize]
+                            } else {
+                                assigned.clone()
+                            };
+                            assert_eq!(addresses.len(), count as usize);
+                            for address in addresses {
+                                let mut frame = vec![0xaa, 0x55];
+                                if assigned.is_empty() {
+                                    frame.extend_from_slice(&[0x13, 0x62, 3, 0, 0, 0, 0x0d]);
+                                } else {
+                                    frame.extend_from_slice(&chip_address_body(0x1362, address));
+                                }
+                                master.write_all(&frame).unwrap();
+                            }
+                        }
+                        other => panic!("unexpected BM1362 AML init opcode {other:02x}"),
+                    }
+                }
+            });
+            let policy =
+                IndustrialSerialPllPolicy::for_route(target, AsicProtocolIdentity::Bm1362).unwrap();
+            let (serial, geometry) =
+                SerialMiner::init_bm1362_aml_chain(serial, &path, 115_200, count, 400, policy)
+                    .unwrap();
+            assert_eq!(geometry.observed_chip_count(), count);
+            serial.backend.set_nonblocking().unwrap();
+            serial.send_work(&work).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let body = loop {
+                if let Some(body) = serial.read_nonce_response().unwrap() {
+                    break body;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "no known nonce after initialized work"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            let nonce = u32::from_le_bytes(body[..4].try_into().unwrap());
+            assert_eq!(nonce, 2083236893);
+            assert!(dcentrald_stratum::share_pipeline::validate_full_header(
+                &serial_build_header(&entry, 1, nonce),
+                &entry.share_target
+            ));
+            let (_master, assigned, registers) = peer.join().unwrap();
+            assert_eq!(
+                assigned,
+                (0..count)
+                    .map(|i| i * (256u16 / u16::from(count)) as u8)
+                    .collect::<Vec<_>>()
+            );
+            // Compare actual UART writes against independently executed original
+            // AArch64 serializers. Our additional PLL/ticket writes are outside
+            // those three original method scopes and checked separately below.
+            let oracle: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../../../"
+            )).unwrap();
+            let expected: Vec<(u8, u8, u8, u32)> = oracle["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|run| run["chips"].as_u64() == Some(u64::from(count)))
+                .flat_map(|run| run["writes"].as_array().unwrap())
+                .map(|write| {
+                    (
+                        if write["target_mode"].as_u64() == Some(0) {
+                            0x51
+                        } else {
+                            0x41
+                        },
+                        write["address"].as_u64().unwrap() as u8,
+                        write["register"].as_u64().unwrap() as u8,
+                        u32::from_str_radix(write["bytes"].as_str().unwrap(), 16).unwrap(),
+                    )
+                })
+                .collect();
+            let actual: Vec<_> = registers
+                .iter()
+                .copied()
+                .filter(|(_, _, reg, _)| !matches!(*reg, 0x70 | 0x08 | 0x14))
+                .collect();
+            assert_eq!(
+                actual, expected,
+                "exact held BM1362 serializer order and bytes for {target}"
+            );
+            assert!(registers.contains(&(0x51, 0, 0x70, 0)));
+            assert!(registers.contains(&(0x51, 0, 0x08, 0x50a0_0141)));
+            assert!(registers.contains(&(0x51, 0, 0x14, 0xff)));
+            assert!(!registers.iter().any(|(_, _, reg, _)| *reg == 0x28));
+            let _fenced = terminal.revoke();
+            assert!(serial.send_work(&work).is_err());
+        }
+    }
+
+    #[test]
+    fn bm1362_aml_runtime_clock_and_hcn_share_all_three_uart_fences() {
+        use dcentrald_common::AsicProtocolIdentity;
+        use std::io::Read;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        for (target, count, hcn) in [
+            ("am3-s19jproa", 126, 5917u32),
+            ("am3-s19jproplus", 120, 6213u32),
+        ] {
+            let cold = validate_native_cold_window(
+                AsicProtocolIdentity::Bm1362,
+                &vec![vec![0x13, 0x62, 3, 0, 0, 0, 0x0d]; count as usize],
+            )
+            .unwrap();
+            let admission = ValidatedSerialChainAdmission::bind_route(
+                serial_route_admission(target, AsicProtocolIdentity::Bm1362),
+                0,
+                "/dev/ttyS3",
+                115_200,
+                count,
+                cold,
+            )
+            .unwrap();
+            let (execution, terminal) =
+                execution_fence_domain(SerialSessionToken::from_validated_for_test(&admission));
+            assert_eq!(
+                execution.identity_snapshot().unwrap().route,
+                ExactSerialRoute::NoPic
+            );
+            let mut readers = Vec::new();
+            let mut slaves = Vec::new();
+            let mut backends = Vec::new();
+            for slot in 0..3 {
+                let (mut master, mut slave) = (-1, -1);
+                // SAFETY: openpty initializes two local descriptors; optional arguments are null.
+                assert_eq!(
+                    unsafe {
+                        libc::openpty(
+                            &mut master,
+                            &mut slave,
+                            std::ptr::null_mut(),
+                            std::ptr::null(),
+                            std::ptr::null(),
+                        )
+                    },
+                    0
+                );
+                // SAFETY: each newly returned descriptor is consumed once by its own File.
+                readers.push(unsafe { std::fs::File::from_raw_fd(master) });
+                // SAFETY: the separate newly returned slave descriptor is consumed once.
+                let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+                let path = format!("/proc/self/fd/{}", slave.as_raw_fd());
+                backends.push(SerialChainBackend::open(slot, &path, 115_200).unwrap());
+                slaves.push(slave);
+            }
+            let transport = SerialWorkTransport::Multi(MultiTtyTransport {
+                backends,
+                paths: vec!["/dev/ttyS3", "/dev/ttyS2", "/dev/ttyS1"],
+                tx_required: vec![true; 3],
+                execution,
+                native_exact_mapping: true,
+                next: AtomicUsize::new(0),
+                last_rx: AtomicUsize::new(0),
+                pending_rx: Mutex::new(VecDeque::new()),
+                s21_full_unit: None,
+            });
+            assert!(transport.write_reg_broadcast(0x08, 0x50d2_0141).is_err()); //525MHz outside this profile.
+            transport.write_reg_broadcast(0x08, 0x50b4_0141).unwrap(); //450MHz.
+            for reader in &mut readers {
+                let mut poll = libc::pollfd {
+                    fd: reader.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: one local initialized pollfd and bounded500ms wait.
+                assert_eq!(unsafe { libc::poll(&mut poll, 1, 500) }, 1);
+                let mut bytes = [0u8; 22];
+                reader.read_exact(&mut bytes).unwrap();
+                for (frame, register, value) in
+                    [(&bytes[..11], 0x08, 0x50b4_0141), (&bytes[11..], 0x10, hcn)]
+                {
+                    assert_eq!(&frame[..6], &[0x55, 0xaa, 0x51, 9, 0, register]);
+                    assert_eq!(&frame[6..10], &value.to_be_bytes());
+                    assert_eq!(frame[10], dcentrald_asic::protocol::crc5(&frame[2..10]));
+                }
+            }
+            let _fenced = terminal.revoke();
+            assert!(transport.write_reg_broadcast(0x08, 0x50a0_0141).is_err());
+            for reader in &readers {
+                let mut poll = libc::pollfd {
+                    fd: reader.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: same live descriptors; zero wait verifies no extra frame.
+                assert_eq!(unsafe { libc::poll(&mut poll, 1, 0) }, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn bm1362_aml_cold_parser_keeps_short_identity_separate_from_assigned_coverage() {
+        use dcentrald_common::AsicProtocolIdentity;
+        let bodies = vec![vec![0x13, 0x62, 3, 0, 0, 0, 0x0d]; 126];
+        let cold = validate_native_cold_window(AsicProtocolIdentity::Bm1362, &bodies).unwrap();
+        assert_eq!(cold.responder_addresses(), [0]);
+        assert_eq!(
+            cold.shape(),
+            SerialAddressWindowShape::RepeatedUnassignedZero
+        );
+        assert!(ValidatedSerialAssignedGeometry::from_window(
+            cold,
+            AsicProtocolIdentity::Bm1362,
+            126,
+            2
+        )
+        .is_err());
+        let mut bad = bodies.clone();
+        bad[5][6] ^= 1;
+        assert!(validate_native_cold_window(AsicProtocolIdentity::Bm1362, &bad).is_err());
+        assert!(validate_native_cold_window(AsicProtocolIdentity::Bm1366, &bodies).is_err());
+        assert!(validate_native_cold_window(
+            AsicProtocolIdentity::Bm1362,
+            &[chip_address_body(0x1362, 0).to_vec()]
+        )
+        .is_err());
     }
 
     #[test]
@@ -31714,7 +33577,9 @@ mod tests {
         assert!(run.contains("chips: published_chain_chip_count"));
         let raw_escape_marker = ["fn into_", "parts("].concat();
         assert!(!production.contains(&raw_escape_marker));
-        let native_start = run.find("} else if is_bm1368 || is_bm1370 {").unwrap();
+        let native_start = run
+            .find("} else if is_bm1362_aml || is_bm1366_xp || is_bm1368 || is_bm1370 {")
+            .unwrap();
         let native_end = run[native_start..]
             .find("// ---- BM1362 (S19j Pro): PIC init + BM1362-specific init ----")
             .map(|offset| native_start + offset)
@@ -31740,7 +33605,8 @@ mod tests {
             .expect("NoPic observation boundary")
             .0;
         assert!(nopic_facade.contains("SerialChainBackend::open("));
-        assert!(nopic_facade.contains("validate_serial_chip_address_window("));
+        assert!(nopic_facade.contains("validate_native_cold_window("));
+        assert!(nopic_facade.contains("BM1362_UNASSIGNED_RESP_BODY_LEN"));
 
         let am2_facade = production
             .split_once("impl Am2SerialObservation {")
@@ -31904,7 +33770,7 @@ mod tests {
         let test_start = source.find("\n#[cfg(test)]\nmod tests {").unwrap();
         let run = &source[run_start..test_start];
         assert!(run.contains("if is_bm1366 && !passthrough"));
-        assert!(run.contains("Self::s19k_native_cold_start_opt_in()"));
+        assert!(run.contains("self.s19k_native_cold_start_requested()"));
         assert!(run.contains("S19kNativeColdStartOwner::join("));
         assert!(run.contains(".promote_s19k_native_cold_start(&mut cold_owner)"));
         assert!(run.contains("Self::init_bm1366_chains(native_backends, target_freq)"));
@@ -33070,6 +34936,7 @@ mod tests {
             None,
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU8::new(0xFF)),
+            None,
         );
         (
             exit,
@@ -33163,6 +35030,7 @@ mod tests {
             None,
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU8::new(0xFF)),
+            None,
         );
         assert!(matches!(
             exit,
@@ -33389,6 +35257,7 @@ mod tests {
             None,
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU8::new(0xFF)),
+            None,
         );
         assert!(matches!(
             exit,
@@ -33630,6 +35499,44 @@ mod tests {
             .find("outstanding_s19k_tx.insert_wire_retiring")
             .expect("outstanding ownership publication");
         assert!(sequence_gate < advance && advance < publication);
+    }
+
+    #[test]
+    fn s19k_stale_epoch_commit_retires_under_present_authority() {
+        let source = include_str!("serial_mining.rs");
+        let consumer = source
+            .split_once("SerialActorEvent::S19kWorkCommitted(commit) =>")
+            .expect("S19k physical commit consumer")
+            .1
+            .split_once("let resp = &hit.body;")
+            .expect("physical commit consumer boundary")
+            .0;
+        let authority_refusal = consumer
+            .find("while pool hashing authority is absent")
+            .expect("authority-absent stale-commit refusal");
+        assert!(consumer.contains("!*pool_hashing_allowed_rx.borrow()"));
+        assert!(consumer.contains("tx-stale-epoch-retired"));
+        let retire = consumer
+            .find(".push_retired_generation(stale_wire)")
+            .expect("stale-commit retire-only publication");
+        let advance = consumer
+            .find("total_work = total_work.saturating_add(1)")
+            .expect("current-epoch accounting");
+        let current_publication = consumer
+            .find("outstanding_s19k_tx.insert_wire_retiring")
+            .expect("current-epoch publication");
+        assert!(
+            authority_refusal < retire && retire < current_publication,
+            "a stale-epoch commit under present authority must retire before any current-epoch publication"
+        );
+        let retire_exit = consumer[retire..advance]
+            .find("continue;")
+            .expect("the retire branch must exit before current-epoch accounting");
+        assert!(retire + retire_exit < advance && advance < current_publication);
+        assert!(
+            !consumer[retire..advance].contains("work_history.push"),
+            "the retire branch must never revive stale job state"
+        );
     }
 
     #[test]
@@ -34082,10 +35989,8 @@ mod tests {
         };
         // Trailer byte is the ONLY body byte the rejection path reads.
         let attempt9_tail_frame = |trailer: u8| -> Vec<u8> {
-            let mut body = vec![
-                0u8;
-                dcentrald_asic::serial_chip_address::SERIAL_CHIP_ADDRESS_BODY_BYTES - 1
-            ];
+            let mut body =
+                vec![0u8; dcentrald_asic::serial_chip_address::SERIAL_CHIP_ADDRESS_BODY_BYTES - 1];
             body.push(trailer);
             body
         };
@@ -34094,8 +35999,8 @@ mod tests {
         // 79-80): 103 frames = 77-frame plan + 26 tail frames rejected
         // JobResponseTrailer at indices 77..102 with these exact trailers.
         let terminal_tail_trailers = [
-            137u8, 152, 130, 155, 129, 151, 155, 152, 134, 158, 152, 135, 148, 149, 143, 145,
-            152, 137, 133, 157, 158, 145, 128, 146, 135, 154,
+            137u8, 152, 130, 155, 129, 151, 155, 152, 134, 158, 152, 135, 148, 149, 143, 145, 152,
+            137, 133, 157, 158, 145, 128, 146, 135, 154,
         ];
         let mut terminal = plan_prefix();
         assert_eq!(terminal.len(), 77);
@@ -34150,8 +36055,8 @@ mod tests {
         // Attempt-0 window (offset 21,486/line 65): 96 frames = 77 plan +
         // 19 tail rejections at indices 77..95 — also salvageable.
         let first_tail_trailers = [
-            145u8, 128, 146, 135, 154, 149, 156, 143, 156, 130, 138, 145, 131, 145, 129, 140,
-            138, 144, 145,
+            145u8, 128, 146, 135, 154, 149, 156, 143, 156, 130, 138, 145, 131, 145, 129, 140, 138,
+            144, 145,
         ];
         let mut first = plan_prefix();
         for &trailer in &first_tail_trailers {
@@ -34171,8 +36076,9 @@ mod tests {
         let mut second = plan_prefix();
         second[76] = attempt9_tail_frame(159);
         second.push(s19k_chip_address_body(plan[0])); // index 77 parsed clean live
-        for &trailer in &[149u8, 141, 142, 155, 139, 158, 145, 128, 132, 147, 141, 134, 148, 147]
-        {
+        for &trailer in &[
+            149u8, 141, 142, 155, 139, 158, 145, 128, 132, 147, 141, 134, 148, 147,
+        ] {
             second.push(attempt9_tail_frame(trailer));
         }
         assert_eq!(second.len(), 92, "attempt-9 second window frame count");
@@ -34585,14 +36491,17 @@ mod tests {
     }
 
     #[test]
-    fn serial_rolled_version_accepts_only_negotiated_mask_bits() {
+    fn serial_rolled_version_retains_full_field_for_later_pool_admission() {
         let entry = sample_entry(0x2000_0000, 0x0000_6000);
 
         assert_eq!(
             serial_rolled_version(&entry, 1, false, 0, false),
             Some(0x2000_2000)
         );
-        assert_eq!(serial_rolled_version(&entry, 4, false, 0, false), None);
+        assert_eq!(
+            serial_rolled_version(&entry, 4, false, 0, false),
+            Some(0x2000_8000)
+        );
         // : BM1366 fill is midstate0 OR, not BIP320 strip. vbits 0x0304
         // ORs onto packed ver0 (same as reconstruct when base has no 13..28).
         assert_eq!(
@@ -34609,6 +36518,110 @@ mod tests {
             serial_rolled_version(&packed, 0, false, 0, false),
             Some(0x2000_0000)
         );
+    }
+
+    #[test]
+    fn serial_pool_version_checks_both_set_and_cleared_base_bits() {
+        for (base, mask, field, permitted) in [
+            (0x2000_0000, 0, 0, true),
+            (0x2000_0000, 0, 1, false),
+            (0x2000_2000, 0, 1, true),
+            (0x2000_2000, 0, 0, false),
+            (0x2000_2000, 0x4000, 1, true),
+            (0x2000_2000, 0x4000, 0, false),
+            (0x2000_6000, 0x2000, 2, true),
+            (0x2000_6000, 0x2000, 0, false),
+            (0x2000_0000, 0x6000, 3, true),
+            (0x2000_0000, 0x6000, 4, false),
+        ] {
+            let entry = sample_entry(base, mask);
+            let rolled = serial_rolled_version(&entry, field, false, 0, false)
+                .expect("pool permission must not suppress full-header reconstruction");
+            assert_eq!(
+                serial_pool_version_admitted(&entry, rolled, false, false),
+                permitted,
+                "base={base:08x} mask={mask:08x} field={field:04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn serial_pool_version_genesis_matches_the_actual_v1_wire_header() {
+        for (base, mask, permitted) in [
+            (1, 0, true),
+            (0x2001, 0, false),
+            (0x2001, 0x2000, true),
+            (0x2001, 0x4000, false),
+        ] {
+            let mut entry = sample_entry(base, mask);
+            entry.prev_block_hash = [0; 32];
+            entry.merkle_root = [
+                0x3b, 0xa3, 0xed, 0xfd, 0x7a, 0x7b, 0x12, 0xb2, 0x7a, 0xc7, 0x2c, 0x3e, 0x67, 0x76,
+                0x8f, 0x61, 0x7f, 0xc8, 0x1b, 0xc3, 0x88, 0x8a, 0x51, 0x32, 0x3a, 0x9f, 0xb8, 0xaa,
+                0x4b, 0x1e, 0x5e, 0x4a,
+            ];
+            entry.ntime = 1231006505;
+            entry.nbits = 0x1d00ffff;
+            entry.share_target = dcentrald_stratum::work::difficulty_to_target(256.0);
+            let rolled = serial_rolled_version(&entry, 0, false, 0, false).unwrap();
+            assert_eq!(rolled, 1);
+            let header = serial_build_header(&entry, rolled, 2083236893);
+            assert!(dcentrald_stratum::share_pipeline::validate_full_header(
+                &header,
+                &entry.share_target
+            ), "the independent Genesis header remains a valid ticket even when pool submission is forbidden");
+            let version_bits = dcentrald_stratum::work::bip310_version_bits(rolled, mask);
+            let request = dcentrald_stratum::v1::messages::submit_request(
+                1,
+                "worker.native",
+                &entry.job_id,
+                &entry.extranonce2,
+                &format!("{:08x}", entry.ntime),
+                "7c2bac1d",
+                version_bits.as_deref(),
+            );
+            let json: serde_json::Value =
+                serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+            let params = json["params"].as_array().unwrap();
+            assert_eq!(params.len(), if mask == 0 { 5 } else { 6 });
+            let wire_version = if mask == 0 {
+                base
+            } else {
+                (base & !mask)
+                    | (u32::from_str_radix(params[5].as_str().unwrap(), 16).unwrap() & mask)
+            };
+            assert_eq!(wire_version == rolled, permitted);
+            assert_eq!(
+                serial_pool_version_admitted(&entry, rolled, false, false),
+                permitted
+            );
+            let wire_header = serial_build_header(&entry, wire_version, 2083236893);
+            assert_eq!(wire_header == header, permitted);
+        }
+    }
+
+    #[test]
+    fn serial_pool_version_leaves_bm1398_and_s19k_reconstruction_unchanged() {
+        let entry = sample_entry(0x2000_6000, 0x6000);
+        for midstate in 0..4 {
+            let mut expected = entry.version;
+            for _ in 0..midstate {
+                expected =
+                    dcentrald_stratum::work::increment_bitmask_pub(expected, entry.version_mask);
+            }
+            assert_eq!(
+                serial_rolled_version(&entry, 0xffff, true, midstate, false),
+                Some(expected)
+            );
+            assert!(serial_pool_version_admitted(&entry, expected, true, false));
+        }
+        assert!(serial_rolled_version(&entry, 0, true, 4, false).is_none());
+        let entry = sample_entry(0x2000_6000, 0);
+        for field in [0, 1, 0x0304, 0xffff] {
+            let actual = serial_rolled_version(&entry, field, false, 0, true).unwrap();
+            assert_eq!(actual, s19k_braiins_midstate0_version(entry.version, field));
+            assert!(serial_pool_version_admitted(&entry, actual, false, true));
+        }
     }
 
     #[test]
@@ -34751,6 +36764,84 @@ mod tests {
         assert_eq!(serial_next_asic_job_id(0, BM1398_JOB_ID_INC), 4);
         assert_eq!(serial_next_asic_job_id(124, BM1398_JOB_ID_INC), 0);
         assert_eq!(serial_next_asic_job_id(120, BM1398_JOB_ID_INC), 124);
+    }
+
+    #[test]
+    fn serial_job_id_steps_and_wrap_match_each_supported_family() {
+        let cycle_24: &[u8] = &[
+            0, 24, 48, 72, 96, 120, 16, 40, 64, 88, 112, 8, 32, 56, 80, 104,
+        ];
+        let cycle_8: &[u8] = &[
+            0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120,
+        ];
+        let cycle_4: &[u8] = &[
+            0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84,
+            88, 92, 96, 100, 104, 108, 112, 116, 120, 124,
+        ];
+        for (chip_id, is_bm1366_xp, expected_step, expected_cycle) in [
+            (0x1362, false, 24, cycle_24),
+            (0x1366, false, 8, cycle_8),
+            (0x1366, true, 24, cycle_24),
+            (0x1368, false, 24, cycle_24),
+            (0x1370, false, 24, cycle_24),
+            (0x1398, false, 4, cycle_4),
+        ] {
+            let step = serial_job_id_increment(chip_id, is_bm1366_xp).unwrap();
+            assert_eq!(step, expected_step, "chip {chip_id:#06x}, XP={is_bm1366_xp}");
+            let mut bookkeeping = SerialMiningEngineBookkeeping::serial_mining(step);
+            assert_eq!(bookkeeping.job_ids.mask(), 0x7F);
+            for &expected_job_id in expected_cycle {
+                assert_eq!(
+                    bookkeeping.take_dispatch().job_id,
+                    expected_job_id,
+                    "chip {chip_id:#06x}, XP={is_bm1366_xp}"
+                );
+            }
+            assert_eq!(bookkeeping.take_dispatch().job_id, 0, "cycle must repeat");
+        }
+    }
+
+    #[test]
+    fn serial_job_id_rejects_unknown_chips_and_mismatched_xp_dialect() {
+        for (chip_id, is_bm1366_xp) in [
+            (0x0000, false),
+            (0x1387, false),
+            (0xFFFF, false),
+            (0xFFFF, true),
+            (0x1362, true),
+            (0x1368, true),
+            (0x1370, true),
+            (0x1398, true),
+        ] {
+            assert!(
+                serial_job_id_increment(chip_id, is_bm1366_xp).is_err(),
+                "chip {chip_id:#06x}, XP={is_bm1366_xp} must not inherit a job-ID law"
+            );
+        }
+    }
+
+    #[test]
+    fn bm1370_job_id_dispatch_cycle_round_trips_all_small_cores() {
+        let expected_cycle = [
+            0, 24, 48, 72, 96, 120, 16, 40, 64, 88, 112, 8, 32, 56, 80, 104,
+        ];
+        let step = serial_job_id_increment(0x1370, false).unwrap();
+        let mut bookkeeping = SerialMiningEngineBookkeeping::serial_mining(step);
+        let mut reachable_ids = BTreeSet::new();
+        let mut id_core_pairs = BTreeSet::new();
+        for dispatch_index in 0..128 {
+            let job_id = bookkeeping.take_dispatch().job_id;
+            assert_eq!(job_id, expected_cycle[dispatch_index % expected_cycle.len()]);
+            reachable_ids.insert(job_id);
+            for small_core in 0u8..16 {
+                let id_byte = (job_id << 1) | small_core;
+                assert_eq!(serial_small_core_job_id(id_byte), job_id);
+                id_core_pairs.insert((job_id, small_core));
+            }
+        }
+        assert_eq!(reachable_ids.len(), 16);
+        assert_eq!(id_core_pairs.len(), 256);
+        assert_eq!(bookkeeping.take_dispatch().job_id, 0);
     }
 
     #[test]
@@ -34903,7 +36994,14 @@ mod tests {
             resolve_native_serial_identity_and_geometry(Some("s19jpro"), None).unwrap(),
             (0x1362, 126)
         );
-        assert!(resolve_native_serial_identity_and_geometry(Some("t19"), None).is_err());
+        // Gauntlet B6 (2026-09-02): T19 geometry is now CATALOG evidence —
+        // first-party stock topol NBT1903 = 76 BM1398P/chain (Phase A §3.7
+        // row 9), so the hint resolves without an explicit override. The old
+        // `None -> is_err()` pin recorded the pre-stock no-evidence state.
+        assert_eq!(
+            resolve_native_serial_identity_and_geometry(Some("t19"), None).unwrap(),
+            (0x1398, 76)
+        );
         assert_eq!(
             resolve_native_serial_identity_and_geometry(Some("t19"), Some(76)).unwrap(),
             (0x1398, 76)
@@ -35722,6 +37820,7 @@ mod tests {
             SerialActorTopology::ExactAm2Bm1362,
             Some(anyhow::anyhow!("operator loop failed")),
             None,
+            Err("no supervised test session".into()),
         )
         .expect_err("missing closeout evidence must remain reset pending");
         assert!(!is_terminal_safe_off_error(&missing_receipt));
@@ -35790,7 +37889,8 @@ mod tests {
 
     #[test]
     fn nopic_watchdog_and_safeoff_order_is_fail_closed() {
-        let source = include_str!("serial_mining.rs")
+        let source = include_str!("serial_mining.rs").replace("\r\n", "\n");
+        let source = source
             .split("\n#[cfg(test)]\nmod tests {")
             .next()
             .expect("production serial mining source");
@@ -35806,15 +37906,13 @@ mod tests {
         let psu_guard = source
             .find("let mut nopic_psu_guard")
             .expect("NoPic PSU guard declaration");
-        let service_spawn = source
-            .find(".spawn_power_thermal_service()")
-            .expect("retained bus-1 service spawn");
         let admission = source
-            .find("AmlogicNoPicAdmission::detect(")
-            .expect("typed Amlogic NoPic admission");
-        let bm1366_default_off = source
-            .find("native BM1366 cold-start is default-off")
-            .expect("BM1366 native default-off boundary");
+            .find("AmlogicNoPicAdmission::detect_modern_s21_population(profile)")
+            .expect("typed exact-population Amlogic NoPic admission");
+        let service_spawn = source[admission..]
+            .find(".spawn_power_thermal_service()")
+            .map(|offset| admission + offset)
+            .expect("admitted modern-population bus-1 service spawn");
         let fan_open = source
             .find(".open_fan_controller()")
             .expect("pre-energize cooling admission");
@@ -35842,8 +37940,14 @@ mod tests {
             .find(".take_psu_enable_operation()")
             .expect("one-shot GPIO437/APW enable authority");
         let psu_enable = power
-            .find("tokio::task::spawn_blocking(move || psu_enable_operation.enable_psu())")
-            .expect("retained-service GPIO437/APW enable call");
+            .find("let enable_result = tokio::task::spawn_blocking(move || {")
+            .expect("retained-service GPIO437/APW enable worker");
+        let voltage_enable = power
+            .find("psu_enable_operation.enable_psu_at_voltage(selected_rail_v)")
+            .expect("exact modern population rail-voltage enable");
+        let default_enable = power
+            .find("psu_enable_operation.enable_psu()")
+            .expect("retained-service default-voltage enable");
         let enabled_receipt = power
             .find("nopic_psu_guard.mark_enabled()")
             .expect("NoPic enable ownership receipt");
@@ -35859,16 +37963,20 @@ mod tests {
         assert!(may_be_energized < enable_operation);
         assert!(enable_operation < watchdog_arm);
         assert!(watchdog_arm < psu_enable);
-        assert!(psu_enable < enabled_receipt);
+        assert!(psu_enable < voltage_enable);
+        assert!(psu_enable < default_enable);
+        assert!(voltage_enable < enabled_receipt);
+        assert!(default_enable < enabled_receipt);
         assert!(enabled_receipt + power_start < startup_coverage_gate);
         assert!(startup_coverage_gate < first_asic_probe);
         assert!(management_owner < cooling_owner);
         assert!(cooling_owner < watchdog_owner);
         assert!(watchdog_owner < psu_guard);
+        assert!(psu_guard < admission);
+        assert!(admission < service_spawn);
         assert!(service_spawn < fan_open);
         assert!(fan_open < fan_motion);
         assert!(fan_motion < power_start);
-        assert!(bm1366_default_off < admission);
 
         assert!(source.contains("let mut runtime_threads = SerialRuntimeThreads::new();"));
         assert!(source.contains(".and_then(|owner| runtime_threads.activate_nopic(owner));"));
@@ -35878,7 +37986,7 @@ mod tests {
         assert!(source.contains("runtime_threads.spawn_serial_io(thread_name"));
         let apw_reservation = [".reserve_am2(", "Am2SerialThreadSlot::ApwHeartbeat)?"].concat();
         assert!(source.contains(&apw_reservation));
-        assert!(source.contains("AmlogicNoPicAdmission::detect("));
+        assert!(source.contains("AmlogicNoPicAdmission::detect_modern_s21_population(profile)"));
         assert!(source.contains(".spawn_power_thermal_service()"));
         assert!(source.contains(".read_board_temperatures("));
         let raw_temperature_helper = ["amlogic::read_board_", "temps("].concat();
@@ -36121,26 +38229,30 @@ mod tests {
     }
 
     #[test]
-    fn bm1366_native_route_is_default_off_then_evidence_joined() {
+    fn bm1366_native_route_requires_configured_request_then_evidence_joined() {
         let source = include_str!("serial_mining.rs")
             .split("\n#[cfg(test)]\nmod tests {")
             .next()
             .expect("production serial-mining source");
         let identity = source
-            .find("let is_bm1366 = resolved_chip_id == 0x1366;")
+            .find("let is_bm1366_family = resolved_chip_id == 0x1366;")
             .expect("BM1366 catalog identity boundary");
         let request_gate = source[identity..]
             .find("if is_bm1366 && !passthrough")
             .map(|offset| identity + offset)
             .expect("BM1366 native request gate");
         let optional_observation = source[identity..]
-            .find("let nopic = is_nopic(&self.config)?;")
+            // Re-anchored 2026-09-01 (Lane-F): production drifted to the
+            // install-custody branch form in 25ea0e9b1, so the historical
+            // `let nopic = is_nopic(&self.config)?;` literal only self-matched
+            // test bodies. Same statement, same ordering intent.
+            .find("let nopic = if s19k_install_custody_safeoff || is_bm1362_aml || is_bm1366_xp {")
             .map(|offset| identity + offset)
             .expect("optional EEPROM-backed NoPic observation");
         assert!(request_gate < optional_observation);
         let gate = &source[request_gate..optional_observation];
-        assert!(gate.contains("Self::s19k_native_cold_start_opt_in()"));
-        assert!(gate.contains("native BM1366 cold-start is default-off"));
+        assert!(gate.contains("self.s19k_native_cold_start_requested()"));
+        assert!(gate.contains("native BM1366 requires an admitted am3-s19k serial configuration"));
         assert!(gate.contains("the flag alone grants no hardware authority"));
         for forbidden in [
             "read_hashboard_eeprom",
@@ -36165,7 +38277,7 @@ mod tests {
             "serial transport chain anchor is no longer unique; re-anchor this contract"
         );
         let branch_end = source[transport_chain..]
-            .find("} else if is_bm1368 || is_bm1370 {")
+            .find("} else if is_bm1362_aml || is_bm1366_xp || is_bm1368 || is_bm1370 {")
             .map(|offset| transport_chain + offset)
             .expect("end of BM1366 transport branch");
         assert_eq!(
@@ -36196,92 +38308,37 @@ mod tests {
     }
 
     #[test]
-    fn bm1398_native_route_fails_closed_before_optional_hardware_observation() {
+    fn bm1398_native_route_consumes_exact_admission_before_generic_hardware() {
         let source = include_str!("serial_mining.rs");
-        let production = source
-            .split("\n#[cfg(test)]\nmod tests {")
-            .next()
-            .expect("production serial mining source");
-        let identity = production
-            .find("let is_bm1398 = resolved_chip_id == 0x1398;")
-            .expect("BM1398 catalog identity boundary");
-        let refusal = production[identity..]
-            .find("if is_bm1398 && !passthrough")
-            .map(|offset| identity + offset)
-            .expect("BM1398 native refusal");
-        let optional_observation = production[identity..]
-            .find("let nopic = is_nopic(&self.config)?;")
-            .map(|offset| identity + offset)
-            .expect("optional EEPROM-backed NoPic observation");
-        assert!(refusal < optional_observation);
-        let first_construction = production[refusal..]
-            .find("let mut runtime_dispatch_admission")
-            .map(|offset| refusal + offset)
-            .expect("first post-identity runtime construction");
-        let gate = &production[refusal..first_construction];
-        assert!(gate.contains("NOT IMPLEMENTED"));
-        assert!(gate.contains("BHB42 EEPROM preamble [04,11] identifies BM1362"));
-        assert!(gate.contains("must not authorize BM1398 voltage or ASIC mutation"));
-
-        // Refusal-before-observation, enforced not just ordered: nothing
-        // between run() entry and the optional NoPic observation may touch
-        // EEPROM, the filesystem, or I2C. `production` excludes this test
-        // module, so these tokens cannot be satisfied or tripped by this
-        // contract's own text.
-        let run_prefix = production
-            .find("pub async fn run(&mut self)")
-            .expect("serial run entrypoint");
-        assert!(run_prefix < identity);
-        let pre_refusal = &production[run_prefix..optional_observation];
-        for forbidden in [
-            "read_hashboard_eeprom",
-            "std::fs::read",
-            "i2c",
-            "I2cServiceHandle",
-        ] {
-            assert!(
-                !pre_refusal.contains(forbidden),
-                "pre-refusal window gained a hardware observation: {forbidden}"
-            );
-        }
-
-        assert_eq!(
-            production.matches("} else if is_bm1398 {").count(),
-            1,
-            "BM1398 transport-arm anchor is no longer unique; re-anchor this contract"
+        let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
+        let run = production
+            .split("pub async fn run(&mut self)")
+            .nth(1)
+            .unwrap();
+        let branch = run.find("if is_bm1398 && !passthrough").unwrap();
+        let dispatch = run[branch..]
+            .find("return crate::s19_bm1398_native_mining::run(")
+            .unwrap()
+            + branch;
+        let observation = run
+            .find("let nopic = if s19k_install_custody_safeoff || is_bm1362_aml || is_bm1366_xp {")
+            .unwrap();
+        assert!(
+            dispatch < observation,
+            "BM1398 must hand off before generic serial hardware discovery"
         );
-        let branch_start = production
-            .find("} else if is_bm1398 {")
-            .expect("BM1398 transport branch");
-        let branch_end = production[branch_start..]
-            .find("} else if is_bm1366 {")
-            .map(|offset| branch_start + offset)
-            .expect("BM1398 transport branch boundary");
-        let branch = &production[branch_start..branch_end];
-        assert_eq!(
-            branch.matches("} else if ").count(),
-            1,
-            "BM1398 transport-arm window re-anchored; it must span exactly one arm"
-        );
-        assert!(branch.contains("anyhow::bail!"));
-        assert!(branch.contains("non-passthrough BM1398 is refused before hardware construction"));
-        assert!(!branch.contains("unreachable!"));
-        assert!(!branch.contains("cold_boot_init"));
-        assert!(!branch.contains("init_bm1398_chain"));
-        assert!(!branch.contains("/dev/ttyS4"));
-        // The refusal arm itself must stay side-effect-free.
-        for forbidden in [
-            "read_hashboard_eeprom",
-            "std::fs::read",
-            "i2c",
-            "I2cServiceHandle",
-        ] {
-            assert!(
-                !branch.contains(forbidden),
-                "BM1398 refusal arm gained a hardware observation: {forbidden}"
-            );
-        }
-        assert!(!production.contains("pending_bm1398_presences"));
+        let admission: String = run[branch..dispatch].split_whitespace().collect();
+        assert!(admission.contains("runtime_dispatch_admission.take()"));
+        assert!(admission
+            .contains("admission.identity()==dcentrald_common::AsicProtocolIdentity::Bm1398"));
+        // R07 family extension: the join is the exact BM1398 platform table,
+        // not a per-target string compare.
+        assert!(admission.contains(
+            "crate::s19_bm1398_native_mining::platform::Bm1398Platform::from_admission(admission.board_target(),admission.identity(),)"
+        ));
+        assert!(!admission.contains("s19pro_native_cold_start_opt_in"));
+        // Positive work, factory matching, faults and terminal closeout are
+        // exercised in the actual native module and retained-owner executors.
     }
 
     #[test]
@@ -36576,6 +38633,7 @@ mod tests {
         // fence call.
         for operation in [
             "serial response flush",
+            "serial stale RX flush",
             "serial response window read",
             "serial host baud transition",
             "serial mining work send",

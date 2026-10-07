@@ -791,7 +791,7 @@ const ENV_INIT_TIMEOUT_SECS: &str = "DCENT_INIT_TIMEOUT_SECS";
 /// otherwise returns the compiled default. A value of `0` (or unparsable)
 /// falls back to the default.
 fn resolve_init_timeout() -> Duration {
-    let secs = std::env::var(ENV_INIT_TIMEOUT_SECS)
+    let secs = dcentrald_common::lab_env::var(ENV_INIT_TIMEOUT_SECS)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|&s| s > 0)
@@ -804,14 +804,14 @@ fn resolve_init_timeout() -> Duration {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Td003DestructiveWriteRefusal {
+struct RuntimeHardwareRefusal {
     model_name: &'static str,
     source: &'static str,
 }
 
 const HASHBOARD_EEPROM_WRITE_DENYLIST: [u8; 8] = [0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57];
 
-fn normalize_td003_signal(value: &str) -> String {
+fn normalize_identity_signal(value: &str) -> String {
     value
         .trim()
         .to_ascii_lowercase()
@@ -832,12 +832,12 @@ fn legacy_kernel_smart_psu_path_allowed(
     board_target: &str,
     psu_override_active: bool,
 ) -> bool {
-    let board_target = normalize_td003_signal(board_target);
+    let board_target = normalize_identity_signal(board_target);
     if psu_override_active || !board_target.starts_with("am2s17") {
         return false;
     }
     config_model
-        .map(normalize_td003_signal)
+        .map(normalize_identity_signal)
         .is_some_and(|model| model.contains("s17") && !model.contains("s19"))
 }
 
@@ -878,71 +878,19 @@ mod legacy_smart_psu_path_tests {
     }
 }
 
-fn td003_model_from_freeform_signal(signal: &str) -> Option<&'static str> {
-    let signal = normalize_td003_signal(signal);
-    if signal.contains("s19xp") || signal.contains("s19jxp") {
-        Some("Antminer S19 XP")
-    } else if signal.contains("t19") {
-        Some("Antminer T19")
-    } else if signal.contains("t17") {
-        Some("Antminer T17")
-    } else if signal.contains("s17") {
-        Some("Antminer S17 / S17 Pro")
-    } else {
-        None
-    }
-}
-
-fn td003_generic_am2_without_exact_board_target(platform_marker: &str, board_target: &str) -> bool {
-    let platform = normalize_td003_signal(platform_marker);
-    let is_generic_am2 = platform == "zynqbm3am2" || platform == "am2";
-    if !is_generic_am2 {
-        return false;
-    }
-
-    let target = normalize_td003_signal(board_target);
-    target.is_empty()
-        || matches!(target.as_str(), "unknown" | "am2" | "zynqbm3am2")
-        || model::board_target_chip_label(board_target).is_none()
-}
-
-fn td003_destructive_write_refusal_from_signals(
-    config_model: Option<&str>,
-    board_target: &str,
-    platform_marker: &str,
-    subtype: &str,
-) -> Option<Td003DestructiveWriteRefusal> {
-    if let Some(model_name) = config_model.and_then(model::td003_management_only_model) {
-        return Some(Td003DestructiveWriteRefusal {
-            model_name,
-            source: "config-model",
-        });
-    }
-    if let Some(model_name) = model::td003_management_only_board_target(board_target) {
-        return Some(Td003DestructiveWriteRefusal {
-            model_name,
+fn runtime_hardware_refusal_for_target(board_target: &str) -> Option<RuntimeHardwareRefusal> {
+    match dcentrald_common::BoardDesc::lookup(board_target) {
+        Some(board) if board.release_channel.is_publishable()
+            && board.work_engine != dcentrald_common::WorkEngineKind::ManagementOnly => None,
+        Some(board) => Some(RuntimeHardwareRefusal {
+            model_name: board.board_target,
+            source: "no-work-engine",
+        }),
+        None => Some(RuntimeHardwareRefusal {
+            model_name: "unknown control-board target",
             source: "board-target",
-        });
+        }),
     }
-    if let Some(model_name) = td003_model_from_freeform_signal(platform_marker) {
-        return Some(Td003DestructiveWriteRefusal {
-            model_name,
-            source: "platform-marker",
-        });
-    }
-    if let Some(model_name) = td003_model_from_freeform_signal(subtype) {
-        return Some(Td003DestructiveWriteRefusal {
-            model_name,
-            source: "subtype",
-        });
-    }
-    if td003_generic_am2_without_exact_board_target(platform_marker, board_target) {
-        return Some(Td003DestructiveWriteRefusal {
-            model_name: "generic AM2 platform without exact board target",
-            source: "platform-marker+board-target",
-        });
-    }
-    None
 }
 
 fn read_first_trimmed(paths: &[&str]) -> String {
@@ -1214,7 +1162,9 @@ mod divergent_chip_policy_tests {
 /// control-board string remains useful telemetry but cannot authorize a raw
 /// devmem transport or removal of the EEPROM write denylist.
 fn is_am1_s9_from_evidence(board_target: &str, control_board: &str) -> bool {
-    board_target.trim().starts_with("am1-s9") && control_board.trim() == "Zynq am1-s9"
+    dcentrald_common::BoardDesc::lookup(board_target.trim())
+        .is_some_and(|desc| desc.admits_standard_bm1387_runtime())
+        && control_board.trim() == "Zynq am1-s9"
 }
 
 /// Existing single-owner I2C constructor selected from one identity snapshot.
@@ -1307,8 +1257,15 @@ fn admit_standard_hardware_composition(
             "standard passthrough requires a fresh typed hardware-handoff receipt; a configuration boolean and model hint cannot authorize unmeasured ASIC execution"
         );
     }
-    let is_am1_s9 = board_target.trim().starts_with("am1-s9");
+    let is_am1_s9 = dcentrald_common::BoardDesc::lookup(board_target.trim())
+        .is_some_and(|desc| desc.admits_standard_bm1387_runtime());
     validate_profile_platform_authority(board_target, is_am1_s9, profile)?;
+    if is_am1_s9 {
+        anyhow::ensure!(
+            pic_type == PicType::Pic16F1704 && pic_addrs == [0x55, 0x56, 0x57],
+            "exact S9/S9i/S9j composition requires its bare PIC16 application owner at 0x55/0x56/0x57"
+        );
+    }
     validate_standard_daemon_topology(profile, pic_type, pic_addrs)?;
     match (is_am1_s9, i2c_transport) {
         (true, StandardI2cTransport::Am1S9Devmem) => {}
@@ -1630,7 +1587,12 @@ mod is_am1_s9_evidence_tests {
         assert!(!is_am1_s9_from_evidence("am2-s19jpro-zynq", "Zynq am1-s9"));
         assert!(!is_am1_s9_from_evidence("am2-s17p", "Zynq am1-s9"));
         assert!(!is_am1_s9_from_evidence("am3-s21", "Zynq am1-s9"));
-        assert!(is_am1_s9_from_evidence("am1-s9", "Zynq am1-s9"));
+        for target in ["am1-s9", "am1-s9i", "am1-s9j"] {
+            assert!(is_am1_s9_from_evidence(target, "Zynq am1-s9"));
+            for observed in ["Zynq am2", "Zynq ambiguous", ""] {
+                assert!(!is_am1_s9_from_evidence(target, observed));
+            }
+        }
         assert!(!is_am1_s9_from_evidence("am1-s9", "Zynq am2"));
         assert!(!is_am1_s9_from_evidence("am1-s9", "Zynq ambiguous"));
         assert!(!is_am1_s9_from_evidence("am1-s9", ""));
@@ -1649,7 +1611,10 @@ mod is_am1_s9_evidence_tests {
     #[test]
     fn non_s9_am1_variants_take_the_safe_path() {
         // am1-s15 / am1-s17 are Zynq am1 but NOT BM1387 S9 — they must not take
-        // the S9 emergency-heartbeat-to-0x55-0x57 path; only "am1-s9*" is S9.
+        // the S9 emergency-heartbeat-to-0x55-0x57 path.
+        for target in ["am1-s9se", "am1-s9k", "am1-s9-prototype", "am1-t9plus"] {
+            assert!(!is_am1_s9_from_evidence(target, "Zynq am1-s9"));
+        }
         assert!(!is_am1_s9_from_evidence("am1-s15", "Zynq am1-s9"));
         assert!(!is_am1_s9_from_evidence("am1-s17", "Zynq am1-s9"));
     }
@@ -1912,6 +1877,21 @@ fn validate_profile_platform_authority(
         );
     }
     if authoritative_am1_s9 {
+        anyhow::ensure!(
+            dcentrald_common::BoardDesc::lookup(&board_target)
+                .is_some_and(|desc| desc.admits_standard_bm1387_runtime()),
+            "standard BM1387 topology requires an exact S9/S9i/S9j composition"
+        );
+        anyhow::ensure!(
+            profile.chip_id == 0x1387
+                && profile.chips_per_chain == 63
+                && profile.chain_count == 3
+                && profile.chain_ids == [6, 7, 8]
+                && profile.pic_addrs == [0x55, 0x56, 0x57]
+                && profile.uio_bases == [1, 5, 9]
+                && matches!(profile.pic_type, PicType::Pic16F1704),
+            "standard BM1387 topology must retain all three 63-chip PIC16 chains"
+        );
         return Ok(());
     }
     if board_target.starts_with("am2-") {
@@ -2002,6 +1982,55 @@ mod identified_miner_profile_tests {
         assert!(validate_profile_platform_authority("am1-s9", true, s19).is_err());
         assert!(validate_profile_platform_authority("am2-s19pro", false, s9).is_err());
         assert!(validate_profile_platform_authority("am3-s21", false, s19).is_err());
+    }
+
+    #[test]
+    fn s9i_s9j_standard_composition_retains_exact_topology_and_live_transport() {
+        let profile = identified_miner_profile(0x1387).unwrap();
+        let registry = ChipRegistry::production();
+        for target in ["am1-s9", "am1-s9i", "am1-s9j"] {
+            validate_profile_platform_authority(target, true, profile).unwrap();
+            let admission = admit_standard_hardware_composition(
+                target,
+                profile,
+                PicType::Pic16F1704,
+                &[0x55, 0x56, 0x57],
+                StandardI2cTransport::Am1S9Devmem,
+                false,
+                &registry,
+            )
+            .unwrap();
+            assert_eq!(admission.board_target, target);
+            assert!(admission.admits_chip(0x1387));
+            for (pic, addresses, transport) in [
+                (
+                    PicType::DsPic33EP,
+                    &[0x55, 0x56, 0x57][..],
+                    StandardI2cTransport::Am1S9Devmem,
+                ),
+                (
+                    PicType::Pic16F1704,
+                    &[0x50, 0x51, 0x52][..],
+                    StandardI2cTransport::Am1S9Devmem,
+                ),
+                (
+                    PicType::Pic16F1704,
+                    &[0x55, 0x56, 0x57][..],
+                    StandardI2cTransport::KernelProtected,
+                ),
+            ] {
+                assert!(
+                    admit_standard_hardware_composition(
+                        target, profile, pic, addresses, transport, false, &registry,
+                    )
+                    .is_err(),
+                    "{target} admitted mismatched {pic:?}/{addresses:?}/{transport:?}"
+                );
+            }
+        }
+        for target in ["am1-s9se", "am1-s9k", "am1-t9plus", "am1-s9-prototype"] {
+            assert!(validate_profile_platform_authority(target, true, profile).is_err());
+        }
     }
 
     #[test]
@@ -2127,6 +2156,101 @@ fn cooling_readiness_from_tach(
 
 fn hardware_bringup_permitted(cooling: &CoolingReadiness, presence: &[BoardPresence]) -> bool {
     matches!(cooling, CoolingReadiness::Ready { .. }) && presence.contains(&BoardPresence::Present)
+}
+
+/// C3a fix lane (DCENT_Thermal merge condition): the autotuner first-boot
+/// start gate's fan-evidence rule — ALL observable per-fan tach channels
+/// must show motion before characterization may begin. A partially stalled
+/// fan array (e.g. 3 of 4 fans at 0 RPM) must PARK, not pass: the
+/// gate-open event is immediately followed by a characterization search
+/// that can probe above stock (750 vs 650 nominal on S9). Mirrors the P0
+/// preflight's own rule (`cooling_readiness_from_tach` refuses when any
+/// observable channel's max sample is 0) and the S19k stock admission
+/// (all 4 channels >= 2000 RPM). The legacy primary-tach arm survives ONLY
+/// as the fallback when no per-fan channels are observable (`per_fan`
+/// empty). A declared fanless (external-loop) medium keeps its bypass —
+/// there is no fan actuator to check. Fail-closed: an air-shaped variant
+/// with no fan telemetry parks.
+fn autotuner_gate_fans_ok(
+    fanless_medium: bool,
+    primary_tach_rpm: u32,
+    per_fan: &[dcentrald_api::PerFanReading],
+) -> bool {
+    if fanless_medium {
+        return true;
+    }
+    if per_fan.is_empty() {
+        // No per-fan channels observable — fall back to the legacy
+        // primary-tach motion check.
+        return primary_tach_rpm > 0;
+    }
+    per_fan.iter().all(|f| f.rpm > 0)
+}
+
+#[cfg(test)]
+mod autotuner_start_gate_fans_policy_tests {
+    //! C3a fix lane (DCENT_Thermal merge condition) pins for the autotuner
+    //! first-boot gate's fan rule — mirrors `cooling_readiness_from_tach`'s
+    //! zero-channel and partial-stall cases (`hardware_preflight_policy_tests`
+    //! above): the characterization gate must never admit a fan array the P0
+    //! preflight itself would have refused.
+    use super::autotuner_gate_fans_ok;
+    use dcentrald_api::PerFanReading;
+
+    fn fan(id: u8, rpm: u32) -> PerFanReading {
+        PerFanReading {
+            id,
+            rpm,
+            pwm_percent: 30,
+        }
+    }
+
+    #[test]
+    fn all_channels_moving_passes() {
+        assert!(autotuner_gate_fans_ok(
+            false,
+            0,
+            &[fan(0, 2_400), fan(1, 2_460), fan(2, 2_400), fan(3, 2_520),]
+        ));
+    }
+
+    /// MUTATION PIN (the merge condition itself): 3 of 4 fans at 0 RPM must
+    /// PARK — the old any-channel-motion rule admitted exactly this array.
+    #[test]
+    fn partial_stall_three_of_four_dead_parks() {
+        assert!(
+            !autotuner_gate_fans_ok(
+                false,
+                4_560,
+                &[fan(0, 4_560), fan(1, 0), fan(2, 0), fan(3, 0)],
+            ),
+            "a partially stalled fan array must NOT open the characterization gate"
+        );
+        // ... including when the legacy primary tach is one of the spinners
+        // (it must not rescue a stalled per-fan array).
+        assert!(!autotuner_gate_fans_ok(
+            false,
+            4_560,
+            &[fan(0, 0), fan(1, 0), fan(2, 4_560), fan(3, 0)],
+        ));
+    }
+
+    /// Mirrors `cooling_readiness_from_tach`'s no-observable-channel case:
+    /// empty `per_fan` falls back to the legacy primary tach; zero there
+    /// parks (fail-closed).
+    #[test]
+    fn zero_channels_fall_back_to_primary_tach_and_zero_parks() {
+        assert!(autotuner_gate_fans_ok(false, 3_000, &[]));
+        assert!(!autotuner_gate_fans_ok(false, 0, &[]));
+        // All-zero per-fan entries park even with a spinning primary.
+        assert!(!autotuner_gate_fans_ok(false, 3_000, &[fan(0, 0)]));
+    }
+
+    #[test]
+    fn fanless_medium_bypass_is_unchanged() {
+        assert!(autotuner_gate_fans_ok(true, 0, &[]));
+        assert!(autotuner_gate_fans_ok(true, 0, &[fan(0, 0)]));
+    }
 }
 
 #[cfg(test)]
@@ -2501,6 +2625,9 @@ fn unresolved_mutation_journal_entries() -> Vec<MutationDispositionEntry> {
                         I2cFabricQuarantineDisposition::UnresolvedPic16State => {
                             MutationQuarantineReason::UnresolvedPic16State
                         }
+                        I2cFabricQuarantineDisposition::UnresolvedClassicAmlPicState => {
+                            MutationQuarantineReason::UnresolvedClassicAmlPicState
+                        }
                         I2cFabricQuarantineDisposition::UnexpectedLeaseDrop => {
                             MutationQuarantineReason::UnexpectedLeaseDrop
                         }
@@ -2522,6 +2649,48 @@ fn unresolved_mutation_journal_entries() -> Vec<MutationDispositionEntry> {
             })
         })
         .collect()
+}
+
+/// Publish software restart evidence only after the caller's retained watchdog
+/// owner has returned its terminal closeout receipt. This does not resolve a
+/// Mutated/Quarantined fabric or assert that a physical rail was measured off.
+pub(crate) fn publish_orderly_software_closeout(
+    run: std::result::Result<
+        dcentrald_common::mutation_disposition::SoftwareCloseoutRun,
+        String,
+    >,
+    _closeout: &crate::runtime::safety_watchdog::WatchdogCloseoutReceipt,
+) -> Result<()> {
+    persist_clean_software_closeout(run)
+}
+
+pub(crate) fn publish_never_started_software_closeout(
+    closeout: crate::runtime::cold_activation::ColdIdleCloseout,
+) -> Result<()> {
+    persist_clean_software_closeout(closeout.into_run())
+}
+
+fn persist_clean_software_closeout(
+    run: std::result::Result<
+        dcentrald_common::mutation_disposition::SoftwareCloseoutRun,
+        String,
+    >,
+) -> Result<()> {
+    match run {
+        Ok(run) => {
+            dcentrald_common::mutation_disposition::persist_orderly_software_closeout(
+                run,
+                &unresolved_mutation_journal_entries(),
+            )
+            .map_err(anyhow::Error::msg)?;
+            info!("Recorded exact-session orderly software closeout; physical rail state remains unmeasured");
+        }
+        Err(reason) => warn!(
+            %reason,
+            "No bound supervisor closeout request; restart latch remains unchanged"
+        ),
+    }
+    Ok(())
 }
 
 /// Capture and durably journal any Mutated/Quarantined fabric dispositions.
@@ -2716,7 +2885,9 @@ fn standard_watchdog_disarm_admission(
     now: Instant,
 ) -> StandardWatchdogDisarmAdmission {
     match intent {
-        WatchdogIntent::Mining => StandardWatchdogDisarmAdmission::TeardownNotObserved,
+        WatchdogIntent::Mining | WatchdogIntent::Bringup { .. } => {
+            StandardWatchdogDisarmAdmission::TeardownNotObserved
+        }
         WatchdogIntent::Teardown { deadline } if now < deadline => {
             StandardWatchdogDisarmAdmission::Admitted
         }
@@ -3114,6 +3285,7 @@ struct WatchdogKickerSetup {
     kick_secs: u64,
     stall_limit: u64,
     feed_gate: WatchdogFeedGate,
+    verified_arm: bool,
 }
 
 type WatchdogDisarmResult = std::result::Result<(), String>;
@@ -3126,10 +3298,9 @@ fn prepare_watchdog_kicker(
     if !watchdog.enabled {
         return None;
     }
-    // NEW-4 (2026-06-10 adversarial pass): open the watchdog HERE (after init).
-    // Defer watchdog acquisition until after slow hardware initialization, then
-    // attempt timeout configuration and an initial feed before starting the
-    // kicker. Kernel/device action remains target-specific and unmeasured here.
+    // Ordinary mining opens after initialization. The bounded census owner
+    // calls this before bootstrap and requires verified configuration + initial
+    // feed readiness before hardware access. Kernel action remains unmeasured.
     let wd = match Watchdog::open() {
         Ok(wd) => {
             info!("Watchdog device opened at /dev/watchdog; timeout configuration, feed admission, and target reset action are verified separately");
@@ -3142,11 +3313,15 @@ fn prepare_watchdog_kicker(
     };
     // BUG FIX (2026-04-11): Apply timeout_s from config to hardware watchdog.
     // Was parsed from TOML but never sent to kernel driver.
+    let mut verified_arm = false;
     let effective_timeout_s = {
         #[cfg(unix)]
         {
             match wd.set_timeout(watchdog.timeout_s) {
-                Ok(effective_timeout_s) => effective_timeout_s,
+                Ok(effective_timeout_s) => {
+                    verified_arm = effective_timeout_s > watchdog.kick_interval_s;
+                    effective_timeout_s
+                }
                 Err(e) => {
                     warn!(error = %e, requested_timeout_s = watchdog.timeout_s,
                         "Failed to set watchdog timeout — kernel default is unknown; supervision math conservatively retains the requested value");
@@ -3165,11 +3340,17 @@ fn prepare_watchdog_kicker(
     #[cfg(unix)]
     match feed_gate.try_kick(|| wd.kick()) {
         Ok(WatchdogFeedOutcome::Kicked) => {}
-        Ok(outcome) => warn!(
-            ?outcome,
-            "Initial watchdog kick was withheld by the terminal feed gate"
-        ),
-        Err(error) => warn!(%error, "Initial watchdog kick failed"),
+        Ok(outcome) => {
+            verified_arm = false;
+            warn!(
+                ?outcome,
+                "Initial watchdog kick was withheld by the terminal feed gate"
+            );
+        }
+        Err(error) => {
+            verified_arm = false;
+            warn!(%error, "Initial watchdog kick failed");
+        }
     }
     let kick_interval = watchdog.kick_interval_s as u64;
     info!(
@@ -3202,6 +3383,7 @@ fn prepare_watchdog_kicker(
         kick_secs,
         stall_limit,
         feed_gate,
+        verified_arm,
     })
 }
 
@@ -3216,6 +3398,7 @@ async fn watchdog_kicker_loop(
         kick_secs,
         stall_limit,
         feed_gate,
+        verified_arm: _,
     } = setup;
     let mut last_live: u64 = 0;
     let mut stalls: u64 = 0;
@@ -3280,7 +3463,85 @@ async fn watchdog_kicker_loop(
 #[derive(Debug, Clone, Copy)]
 enum WatchdogIntent {
     Mining,
+    Bringup { deadline: Instant },
     Teardown { deadline: Instant },
+}
+
+async fn await_census_watchdog_ready(
+    ready_rx: oneshot::Receiver<std::result::Result<(), String>>,
+    shutdown: &CancellationToken,
+    owner: &WatchdogFeedGateOwner,
+    timeout: Duration,
+) -> Result<()> {
+    let result = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => Err(anyhow::anyhow!("census cancelled before watchdog readiness")),
+        ready = tokio::time::timeout(timeout, ready_rx) => {
+            ready.context("census watchdog readiness timed out")
+                .and_then(|result| result.context("census watchdog readiness owner disappeared"))
+                .and_then(|result| result.map_err(anyhow::Error::msg))
+        }
+    };
+    if result.is_err() {
+        // A blocked device write must not delay publishing terminal intent.
+        owner.stop_signal().close_terminal_lock_free();
+    }
+    result
+}
+
+#[cfg(test)]
+mod firstlight_watchdog_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_timeout_and_failed_arm_never_cross_census_readiness() {
+        for case in ["cancelled", "timeout", "failed", "dropped"] {
+            let owner = WatchdogFeedGateOwner::new();
+            let shutdown = CancellationToken::new();
+            let (tx, rx) = oneshot::channel();
+            let mut pending = None;
+            match case {
+                "cancelled" => { tx.send(Ok(())).unwrap(); shutdown.cancel(); }
+                "timeout" => pending = Some(tx),
+                "failed" => { tx.send(Err("initial kick failed".into())).unwrap(); }
+                _ => drop(tx),
+            }
+            assert!(await_census_watchdog_ready(rx, &shutdown, &owner, Duration::from_millis(1)).await.is_err(), "{case}");
+            assert_ne!(owner.gate().try_kick(|| Ok::<_, std::io::Error>(())).unwrap(), WatchdogFeedOutcome::Kicked);
+            drop(pending);
+        }
+        let owner = WatchdogFeedGateOwner::new();
+        let (tx, rx) = oneshot::channel();
+        tx.send(Ok(())).unwrap();
+        await_census_watchdog_ready(rx, &CancellationToken::new(), &owner, Duration::from_secs(1)).await.unwrap();
+        assert_eq!(owner.gate().try_kick(|| Ok::<_, std::io::Error>(())).unwrap(), WatchdogFeedOutcome::Kicked);
+    }
+
+    #[tokio::test]
+    async fn disabled_real_watchdog_owner_reports_refusal_without_opening_hardware() {
+        let (scope, _, mining, _, unit, _, budget) = StandardWatchdogRunAdmission::new().into_parts();
+        let owner = WatchdogFeedGateOwner::new();
+        let (_intent, intent_rx) = watch::channel(WatchdogIntent::Bringup { deadline: Instant::now() + Duration::from_secs(90) });
+        let (_disarm, disarm_rx) = oneshot::channel();
+        let (receipt_tx, receipt_rx) = oneshot::channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let config = crate::config::WatchdogConfig { enabled: false, ..Default::default() };
+        owned_watchdog_kicker(config, Duration::from_secs(1), CancellationToken::new(), owner.gate(),
+            intent_rx, disarm_rx, scope, mining, unit, budget, Arc::new(AtomicU64::new(0)),
+            receipt_tx, Some(ready_tx)).await;
+        assert!(ready_rx.await.unwrap().is_err());
+        assert!(matches!(receipt_rx.await.unwrap(), WatchdogTaskReceipt::NotOpenedByDaemon));
+    }
+
+    #[test]
+    fn census_bringup_cannot_authorize_magic_close_or_feed_after_its_deadline() {
+        let deadline = Instant::now();
+        assert!(matches!(standard_watchdog_disarm_admission(WatchdogIntent::Bringup { deadline }, deadline),
+            StandardWatchdogDisarmAdmission::TeardownNotObserved));
+        assert!(!watchdog_teardown_kick_allowed(deadline, deadline));
+        assert!(!watchdog_teardown_kick_allowed(deadline, deadline + Duration::from_secs(1)));
+        assert!(watchdog_teardown_kick_allowed(deadline, deadline - Duration::from_millis(1)));
+    }
 }
 
 #[derive(Debug)]
@@ -3762,11 +4023,15 @@ async fn owned_watchdog_kicker(
     teardown_budget_expectation: crate::runtime::teardown_budget::TeardownBudgetExpectation,
     safety_liveness: Arc<AtomicU64>,
     receipt_tx: oneshot::Sender<WatchdogTaskReceipt>,
+    ready_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
 ) {
     // Open only after RuntimeTaskGuard has accepted and spawned this future.
     // Registration refusal therefore cannot leave an armed, unowned fd.
     let Some(setup) = prepare_watchdog_kicker(&config, Some(expected_liveness_interval), feed_gate)
     else {
+        if let Some(ready_tx) = ready_tx {
+            let _ = ready_tx.send(Err("census requires an opened and armed watchdog".into()));
+        }
         let _ = receipt_tx.send(WatchdogTaskReceipt::NotOpenedByDaemon);
         return;
     };
@@ -3775,6 +4040,7 @@ async fn owned_watchdog_kicker(
         kick_secs,
         stall_limit,
         feed_gate,
+        verified_arm,
     } = setup;
     // The task may be aborted by RuntimeTaskGuard or by Tokio runtime
     // teardown at any await point. An ordinary future drop must never
@@ -3782,6 +4048,19 @@ async fn owned_watchdog_kicker(
     // whether that remains fail-closed. Only the successful magic-close
     // branch explicitly recovers and closes this value.
     let mut wd = std::mem::ManuallyDrop::new(wd);
+    if let Some(ready_tx) = ready_tx {
+        if !verified_arm {
+            feed_gate.close_terminal();
+            let _ = ready_tx.send(Err(
+                "census watchdog timeout configuration or initial feed failed".into(),
+            ));
+            return;
+        }
+        if ready_tx.send(Ok(())).is_err() {
+            feed_gate.close_terminal();
+            return;
+        }
+    }
     let mut last_live = 0_u64;
     let mut stalls = 0_u64;
     let mut interval = tokio::time::interval(Duration::from_secs(kick_secs));
@@ -3849,7 +4128,7 @@ async fn owned_watchdog_kicker(
                 }
                 let observed_feed_deadline = match *intent_rx.borrow() {
                     WatchdogIntent::Teardown { deadline } => deadline,
-                    WatchdogIntent::Mining => unreachable!("teardown admission checked above"),
+                    WatchdogIntent::Mining | WatchdogIntent::Bringup { .. } => unreachable!("teardown admission checked above"),
                 };
                 if permit.deadline(TeardownStage::FeedDeadline) != observed_feed_deadline {
                     feed_gate.close_terminal();
@@ -3924,7 +4203,7 @@ async fn owned_watchdog_kicker(
                         stalls = new_stalls;
                         should_kick
                     }
-                    WatchdogIntent::Teardown { deadline } => {
+                    WatchdogIntent::Bringup { deadline } | WatchdogIntent::Teardown { deadline } => {
                         if watchdog_teardown_kick_allowed(
                             deadline,
                             Instant::now(),
@@ -4343,7 +4622,7 @@ const ENV_DPS_GOVERNOR_SHADOW: &str = "DCENT_DPS_GOVERNOR_SHADOW";
 /// [`ENV_DPS_GOVERNOR_SHADOW`]. Reuses the shared autotuner env-truthiness
 /// helper so the daemon and tests agree on what counts as "on".
 fn dps_governor_shadow_enabled() -> bool {
-    std::env::var(ENV_DPS_GOVERNOR_SHADOW)
+    dcentrald_common::lab_env::var(ENV_DPS_GOVERNOR_SHADOW)
         .ok()
         .map(|v| dcentrald_autotuner::config::env_flag_is_truthy(&v))
         .unwrap_or(false)
@@ -4363,7 +4642,7 @@ const ENV_AM2_SKU_AWARE_CEILING: &str = "DCENT_AM2_SKU_AWARE_CEILING";
 /// [`ENV_AM2_SKU_AWARE_CEILING`]. Reuses the shared autotuner env-truthiness
 /// helper so the daemon and tests agree on what counts as "on".
 fn am2_sku_aware_ceiling_enabled() -> bool {
-    std::env::var(ENV_AM2_SKU_AWARE_CEILING)
+    dcentrald_common::lab_env::var(ENV_AM2_SKU_AWARE_CEILING)
         .ok()
         .map(|v| dcentrald_autotuner::config::env_flag_is_truthy(&v))
         .unwrap_or(false)
@@ -4407,7 +4686,7 @@ const ENV_TUNER_DRIVER_SHADOW: &str = "DCENT_TUNER_DRIVER_SHADOW";
 /// [`ENV_TUNER_DRIVER_SHADOW`]. Reuses the shared autotuner env-truthiness
 /// helper so the daemon and tests agree on what counts as "on".
 fn tuner_driver_shadow_enabled() -> bool {
-    std::env::var(ENV_TUNER_DRIVER_SHADOW)
+    dcentrald_common::lab_env::var(ENV_TUNER_DRIVER_SHADOW)
         .ok()
         .map(|v| dcentrald_autotuner::config::env_flag_is_truthy(&v))
         .unwrap_or(false)
@@ -4435,7 +4714,7 @@ const ENV_VNISH_PHASE_SHADOW: &str = "DCENT_VNISH_PHASE_SHADOW";
 /// [`ENV_VNISH_PHASE_SHADOW`]. Reuses the shared autotuner env-truthiness
 /// helper so the daemon and tests agree on what counts as "on".
 fn vnish_phase_shadow_enabled() -> bool {
-    std::env::var(ENV_VNISH_PHASE_SHADOW)
+    dcentrald_common::lab_env::var(ENV_VNISH_PHASE_SHADOW)
         .ok()
         .map(|v| dcentrald_autotuner::config::env_flag_is_truthy(&v))
         .unwrap_or(false)
@@ -4946,6 +5225,7 @@ pub struct Daemon {
     /// after bounded hardware teardown may produce a positive receipt.
     watchdog_tasks: RuntimeTaskGuard,
     watchdog_feed_owner: Option<WatchdogFeedGateOwner>,
+    firstlight_watchdog_liveness: Option<Arc<AtomicU64>>,
     watchdog_intent_tx: Option<watch::Sender<WatchdogIntent>>,
     watchdog_disarm_tx: Option<oneshot::Sender<StandardWatchdogDisarmPermit>>,
     watchdog_run_scope: Option<WatchdogRunScope>,
@@ -5173,6 +5453,7 @@ impl Daemon {
             mining_tasks,
             watchdog_tasks,
             watchdog_feed_owner: None,
+            firstlight_watchdog_liveness: None,
             watchdog_intent_tx: None,
             watchdog_disarm_tx: None,
             watchdog_run_scope: Some(watchdog_run_scope),
@@ -5221,16 +5502,11 @@ impl Daemon {
         }
     }
 
-    fn td003_destructive_write_refusal(
+    fn runtime_hardware_refusal(
         &self,
         identity: &crate::daemon_lifecycle::PlatformIdentitySnapshot,
-    ) -> Option<Td003DestructiveWriteRefusal> {
-        td003_destructive_write_refusal_from_signals(
-            self.config.mining.model.as_deref(),
-            identity.board_target(),
-            identity.platform_marker(),
-            identity.subtype(),
-        )
+    ) -> Option<RuntimeHardwareRefusal> {
+        runtime_hardware_refusal_for_target(identity.board_target())
     }
 
     async fn run_api_only(&mut self) -> Result<()> {
@@ -5849,10 +6125,9 @@ impl Daemon {
         // conservatively retain the unknown/hot-hardware disposition.
         self.preflight_hardware_state_unknown = true;
 
-        if let Some(refusal) = self.td003_destructive_write_refusal(identity) {
+        if let Some(refusal) = self.runtime_hardware_refusal(identity) {
             anyhow::bail!(
-                "TD-003 destructive-write gate refused hardware admission for {} from {} \
-                 (Experimental feature / In development; exact promotion gates incomplete)",
+                "runtime target refused hardware admission for {} from {}",
                 refusal.model_name,
                 refusal.source
             );
@@ -5885,17 +6160,15 @@ impl Daemon {
         validate_profile_platform_authority(board_target, is_am1_s9, admitted_profile)?;
         validate_standard_daemon_topology(admitted_profile, admitted_pic_type, admitted_pic_addrs)?;
 
-        let experimental_config = crate::experimental::ExperimentalConfig::load();
-        self.experimental_thermal_board_proxy_release =
-            experimental_config.allow_thermal_board_proxy_release_after_dwell;
-        self.asic_driver_execution_policy = if experimental_config
-            .executable_asic_chip_ids
-            .contains(&admitted_profile.chip_id)
-        {
-            ChipDriverExecutionPolicy::with_experimental_chip(admitted_profile.chip_id)
-        } else {
-            ChipDriverExecutionPolicy::production_only()
-        };
+        self.experimental_thermal_board_proxy_release = false;
+        let declared = identity.board_desc.ok_or_else(|| anyhow::anyhow!("missing exact BoardDesc"))?;
+        anyhow::ensure!(
+            declared.release_channel.is_publishable()
+                && declared.asic_protocol.to_chip_id() == Some(admitted_profile.chip_id),
+            "standard ASIC driver must match the image's implemented exact target"
+        );
+        self.asic_driver_execution_policy =
+            ChipDriverExecutionPolicy::with_experimental_chip(admitted_profile.chip_id);
         let i2c_transport = standard_i2c_transport(identity, is_am1_s9)?;
         let registry = ChipRegistry::with_execution_policy(self.asic_driver_execution_policy);
         let composition_admission = admit_standard_hardware_composition(
@@ -6022,6 +6295,70 @@ impl Daemon {
         Ok(())
     }
 
+    async fn arm_census_watchdog(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            self.config.watchdog.enabled,
+            "census requires watchdog supervision"
+        );
+        anyhow::ensure!(
+            self.watchdog_feed_owner.is_none(),
+            "census watchdog already owned"
+        );
+        let deadline = crate::firstlight_census::initialization_deadline()?;
+        let (intent_tx, intent_rx) = watch::channel(WatchdogIntent::Bringup { deadline });
+        let (disarm_tx, disarm_rx) = oneshot::channel();
+        let (receipt_tx, receipt_rx) = oneshot::channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let scope = self
+            .watchdog_run_scope
+            .as_ref()
+            .context("census watchdog scope missing")?
+            .clone();
+        let mining = self
+            .watchdog_mining_actor_expectation
+            .take()
+            .context("census actor issuer missing")?;
+        let unit = self
+            .watchdog_unit_closeout_expectation
+            .take()
+            .context("census closeout issuer missing")?;
+        let budget = self
+            .watchdog_teardown_budget_expectation
+            .take()
+            .context("census teardown issuer missing")?;
+        let feed_owner = WatchdogFeedGateOwner::new();
+        let thermal_liveness = Arc::new(AtomicU64::new(0));
+        let future = owned_watchdog_kicker(
+            self.config.watchdog.clone(),
+            Duration::from_secs_f32(thermal_pid_interval_secs(self.config.thermal.pid_interval_s)),
+            self.watchdog_tasks.cancellation_token(),
+            feed_owner.gate(),
+            intent_rx,
+            disarm_rx,
+            scope,
+            mining,
+            unit,
+            budget,
+            thermal_liveness.clone(),
+            receipt_tx,
+            Some(ready_tx),
+        );
+        anyhow::ensure!(
+            self.watchdog_tasks.spawn("census-soc-watchdog", future),
+            "census watchdog task ownership unavailable"
+        );
+        self.watchdog_feed_owner = Some(feed_owner);
+        self.watchdog_intent_tx = Some(intent_tx);
+        self.watchdog_disarm_tx = Some(disarm_tx);
+        self.watchdog_receipt_rx = Some(receipt_rx);
+        self.firstlight_watchdog_liveness = Some(thermal_liveness);
+        await_census_watchdog_ready(
+            ready_rx, &self.shutdown_token,
+            self.watchdog_feed_owner.as_ref().context("census feed owner missing")?,
+            Duration::from_secs(3),
+        ).await
+    }
+
     /// The full daemon lifecycle: management-only short-circuit, then Phases 1-7
     /// init -> spawn all async tasks -> wait for the shutdown signal -> graceful
     /// teardown. Wrapped by `run()` so an early `?` error after `init()` energized
@@ -6036,12 +6373,15 @@ impl Daemon {
 
         let platform_identity = self.platform_identity.clone();
 
-        if let Some(refusal) = self.td003_destructive_write_refusal(&platform_identity) {
+        if let Some(refusal) = self.runtime_hardware_refusal(&platform_identity) {
+            if crate::firstlight_census::operation_requested() {
+                anyhow::bail!("firstlight hardware admission refused before initialization");
+            }
             warn!(
                 model = refusal.model_name,
                 source = refusal.source,
                 config_model = ?self.config.mining.model,
-                "TD-003 destructive-write gate: platform is an Experimental feature / In development or lacks exact board identity; parking management-only before I2C, fan, FPGA, voltage, ASIC init, or hash dispatch"
+                "runtime target has no implemented engine or exact board identity; parking before hardware initialization"
             );
             return self
                 .run_api_only_with_hardware_mutation_gate(
@@ -6051,6 +6391,9 @@ impl Daemon {
         }
 
         if let Err(error) = self.admit_standard_composition_before_bootstrap(&platform_identity) {
+            if crate::firstlight_census::operation_requested() {
+                return Err(error.context("census composition admission failed"));
+            }
             warn!(
                 error = %error,
                 "Standard composition admission failed before bootstrap hardware queries; starting a read-only management plane"
@@ -6060,6 +6403,10 @@ impl Daemon {
                     dcentrald_hal::platform::HardwareMutationGate::new_closed(),
                 )
                 .await;
+        }
+
+        if crate::firstlight_census::operation_requested() {
+            self.arm_census_watchdog().await?;
         }
 
         // Capture I2C-backed identity and policy observations before runtime
@@ -6119,7 +6466,11 @@ impl Daemon {
         // mining loop. The coordinator retains a tested management-only path for
         // a future positive partial-bringup safety ledger; it is not a claim that
         // every production init failure can currently keep the API reachable.
-        let init_timeout = resolve_init_timeout();
+        let init_timeout = if crate::firstlight_census::operation_requested() {
+            resolve_init_timeout().min(crate::firstlight_census::initialization_remaining()?)
+        } else {
+            resolve_init_timeout()
+        };
         let disposition = {
             let mut recovery_publisher = BootProgressRecoveryPublisher {
                 boot_progress: Arc::clone(&boot_progress),
@@ -6138,6 +6489,19 @@ impl Daemon {
             .await?
         };
         if disposition == crate::daemon_lifecycle::BringupDisposition::ManagementOnlyStopped {
+            anyhow::ensure!(!crate::firstlight_census::operation_requested(),
+                "firstlight initialization did not reach its owned execution phase");
+            return Ok(());
+        }
+
+        if crate::firstlight_census::requested() {
+            let measured: Vec<_> = self
+                .asic_enumeration_receipts
+                .iter()
+                .map(|r| (r.chain_id(), r.chip_id(), u16::from(r.chip_count())))
+                .collect();
+            crate::firstlight_census::publish(self.platform_identity.board_target(), &measured)?;
+            self.shutdown().await?;
             return Ok(());
         }
 
@@ -6457,6 +6821,7 @@ impl Daemon {
         };
 
         let (state_tx, state_rx) = watch::channel(initial_state);
+        let firstlight_work_state = state_rx.clone();
         let (_mode_tx, mode_rx) = watch::channel(initial_mode);
         let (stats_broadcast_tx, _) = broadcast::channel::<String>(64);
         let (mining_sync_broadcast_tx, _) = broadcast::channel::<String>(256);
@@ -6518,7 +6883,7 @@ impl Daemon {
                     PicType::DsPic33EP => "dspic",
                     PicType::NoPic => "nopic",
                 },
-                std::env::var(dcentrald_autotuner::AM2_VOLTAGE_AUTOTUNE_ENV)
+                dcentrald_common::lab_env::var(dcentrald_autotuner::AM2_VOLTAGE_AUTOTUNE_ENV)
                     .ok()
                     .as_deref(),
             );
@@ -6587,6 +6952,12 @@ impl Daemon {
                     self.config.mode.home.night_mode.power_reduction_pct,
                     self.config.thermal.night_mode.timezone_offset_hours,
                 )),
+                // C3a: bootstrap carries no guard verdict yet — the tuner
+                // surfaces the NotTunable reason / start-gate park reason /
+                // convergence evidence once its runtime watch goes live.
+                not_tunable_reason: None,
+                start_gate_park_reason: None,
+                convergence: None,
             }
         } else {
             dcentrald_autotuner::AutotunerRuntimeStatus::default()
@@ -7811,6 +8182,18 @@ impl Daemon {
             );
         }
 
+        // The receiver exists before pool startup; capacity remains withdrawn
+        // until the admitted dispatcher publishes its applied operating state.
+        let (mut stratum_capacity_tx, stratum_capacity_rx) =
+            if self.config.pool.v1_policy.dynamic_difficulty {
+                let (tx, rx) = watch::channel(dcentrald_stratum::v1::policy::ActiveCapacity {
+                    hashes_per_second: 0.0,
+                });
+                (Some(tx), Some(rx))
+            } else {
+                (None, None)
+            };
+
         // ---- Start Stratum client (V1/V2 via StratumRouter) ----
         if mining_enabled {
             info!(
@@ -7843,6 +8226,11 @@ impl Daemon {
 
             let stratum_router = dcentrald_stratum::StratumRouter::new(stratum_config)
                 .with_job_declaration_status_rx(jd_status_rx.clone());
+            let stratum_router = if let Some(rx) = stratum_capacity_rx {
+                stratum_router.with_capacity_rx(rx)
+            } else {
+                stratum_router
+            };
 
             tokio::spawn(async move {
                 stratum_router.run(job_tx, share_rx, status_tx).await;
@@ -8778,6 +9166,16 @@ impl Daemon {
         //
         // Hoist SoC watchdog kicker *before* dispatch so the watchdog pillar is
         // honest (Armed when enabled + owned, not Unavailable-then-lie).
+        let thermal_liveness = if crate::firstlight_census::operation_requested() {
+            // Reuse the already verified pre-energize owner and its liveness
+            // counter. Reopening would consume a second single-use issuer.
+            self.watchdog_intent_tx.as_ref()
+                .context("firstlight watchdog intent owner missing")?
+                .send(WatchdogIntent::Mining)
+                .map_err(|_| anyhow::anyhow!("firstlight watchdog owner ended before work"))?;
+            self.firstlight_watchdog_liveness.take()
+                .context("firstlight thermal liveness owner missing")?
+        } else {
         let thermal_liveness = Arc::new(AtomicU64::new(0));
         let (watchdog_intent_tx, watchdog_intent_rx) = watch::channel(WatchdogIntent::Mining);
         let (watchdog_disarm_tx, watchdog_disarm_rx) = oneshot::channel();
@@ -8818,6 +9216,7 @@ impl Daemon {
             watchdog_teardown_budget_expectation,
             thermal_liveness.clone(),
             watchdog_receipt_tx,
+            None,
         );
         if !self
             .watchdog_tasks
@@ -8831,6 +9230,8 @@ impl Daemon {
         self.watchdog_intent_tx = Some(watchdog_intent_tx);
         self.watchdog_disarm_tx = Some(watchdog_disarm_tx);
         self.watchdog_receipt_rx = Some(watchdog_receipt_rx);
+        thermal_liveness
+        };
 
         let mut dispatch_life = WorkDispatchLifecycle::new();
         let admission_cycle_id = 1u64;
@@ -8936,6 +9337,9 @@ impl Daemon {
         };
         dispatcher.set_circuit_capacity(circuit_capacity);
         dispatcher.set_fpga_status_tx(fpga_status_tx);
+        if let Some(tx) = stratum_capacity_tx.take() {
+            dispatcher.set_capacity_tx(tx);
+        }
         //  W1: install the shared local-reject ring so the
         // dispatcher can push diagnostic entries on every reject.
         dispatcher.set_local_reject_ring(dispatcher_local_reject_ring);
@@ -9503,7 +9907,7 @@ impl Daemon {
         let am2_bm1362_family =
             effective_chip_id == 0x1362 && matches!(self.pic_type()?, PicType::DsPic33EP);
         let am2_freq_autotune_opted_in = self.config.autotuner.am2_frequency_autotune_enabled(
-            std::env::var(dcentrald_autotuner::config::AM2_FREQUENCY_AUTOTUNE_ENV)
+            dcentrald_common::lab_env::var(dcentrald_autotuner::config::AM2_FREQUENCY_AUTOTUNE_ENV)
                 .ok()
                 .as_deref(),
         );
@@ -9867,7 +10271,7 @@ impl Daemon {
                             PicType::DsPic33EP => "dspic",
                             PicType::NoPic => "nopic",
                         },
-                        std::env::var(dcentrald_autotuner::AM2_VOLTAGE_AUTOTUNE_ENV)
+                        dcentrald_common::lab_env::var(dcentrald_autotuner::AM2_VOLTAGE_AUTOTUNE_ENV)
                             .ok()
                             .as_deref(),
                     );
@@ -9920,6 +10324,24 @@ impl Daemon {
                 let autotune_freq_tx = freq_cmd_tx.clone();
                 let autotune_power_calibration = power_calibration.clone();
                 let autotune_xadc_temp = shared_xadc_temp.clone();
+                // C3a (2026-09-01): variant guard + first-boot start-gate
+                // inputs, resolved from the variant's registered BoardDesc
+                // row; image admission has already been verified at startup.
+                // `autotune_fanless_medium` keeps fanless cut-ladder
+                // semantics (no fan actuator to check).
+                let autotune_board_target =
+                    self.platform_identity.board_target().trim().to_string();
+                let autotune_board_desc =
+                    dcentrald_common::BoardDesc::lookup(&autotune_board_target);
+                let autotune_fanless_medium = autotune_board_desc
+                    .map(|d| {
+                        d.cooling_medium
+                            .map(|m| !m.has_fan_actuator())
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                let autotune_variant_cooling =
+                    autotune_board_desc.map(|d| (d.cooling_medium, d.cut_ladder));
                 tokio::spawn(async move {
                     let mut tuner = dcentrald_autotuner::AutoTuner::new(
                         autotune_config,
@@ -9940,6 +10362,16 @@ impl Daemon {
                     for (&chain_id, &sku) in &autotuner_chain_skus {
                         tuner.set_chain_sku(chain_id, sku);
                     }
+                    // C3a: install the daemon-fed first-boot start gate
+                    // receiver + the BoardDesc-declared cooling medium /
+                    // cut-ladder for the variant guard.
+                    let (first_boot_gate_tx, first_boot_gate_rx) = tokio::sync::watch::channel(
+                        dcentrald_autotuner::FirstBootGateSnapshot::default(),
+                    );
+                    tuner.set_first_boot_gate(first_boot_gate_rx);
+                    if let Some((medium, ladder)) = autotune_variant_cooling {
+                        tuner.set_variant_cooling(medium, ladder);
+                    }
                     tuner.set_runtime_status_watch(autotuner_status_watch);
                     tuner.set_efficiency_watch(autotuner_efficiency_watch);
                     tuner.set_chip_health_watch(autotuner_chip_health_watch);
@@ -9947,72 +10379,114 @@ impl Daemon {
                     tuner.set_accepted_work_watch(autotuner_share_efficiency_rx);
                     tuner.set_command_receiver(autotuner_command_rx);
 
-                    // Wait for real mining readiness before starting characterization.
-                    // A fixed sleep is not enough on S9 handoff paths where zero nonces or
-                    // missing board-temp samples can linger briefly after startup.
-                    let require_board_temp_gate = matches!(
-                        pic_type,
-                        PicType::Pic16F1704 | PicType::DsPic33EP | PicType::NoPic
-                    );
-                    let mut stable_hashrate_ticks = 0u8;
-                    let mut readiness_tick =
-                        tokio::time::interval(std::time::Duration::from_secs(5));
-                    readiness_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                    loop {
-                        tokio::select! {
-                            _ = autotune_shutdown.cancelled() => {
-                                info!("Auto-tuner stopping before characterization started");
-                                return;
-                            }
-                            _ = readiness_tick.tick() => {
-                                let state = autotune_state_rx.borrow().clone();
-                                let now_s = board_temp_time_base_autotune.elapsed().as_secs() as u32;
-                                let fresh_board_temp_count = board_temps_autotune
-                                    .iter()
-                                    .zip(board_temp_seen_at_autotune.iter())
-                                    .filter(|(temp_atomic, seen_at_atomic)| {
-                                        let bits = temp_atomic.load(Ordering::Acquire);
-                                        let seen_at_s = seen_at_atomic.load(Ordering::Acquire);
-                                        if bits == 0 || seen_at_s == 0 {
-                                            return false;
-                                        }
-                                        let temp_c = f32::from_bits(bits);
-                                        temp_c > 0.0
-                                            && temp_c < 150.0
-                                            && now_s.saturating_sub(seen_at_s)
-                                                <= dcentrald_autotuner::chip_stats::BOARD_TEMP_STALE_TIMEOUT_S
-                                                    as u32
-                                    })
-                                    .count();
-
-                                let die_temp_c = f32::from_bits(autotune_xadc_temp.load(Ordering::Acquire));
-                                let has_valid_die_temp = die_temp_c > 0.0 && die_temp_c < 125.0;
-                                let has_valid_temp = if require_board_temp_gate {
-                                    (fresh_board_temp_count >= chain_infos_clone.len() && !chain_infos_clone.is_empty())
-                                        || has_valid_die_temp
-                                } else {
-                                    true
-                                };
-
-                                let telemetry_ready = state.hashrate_5s_ghs > 0.0
-                                    && has_valid_temp;
-
-                                if telemetry_ready {
-                                    stable_hashrate_ticks = stable_hashrate_ticks.saturating_add(1);
-                                } else {
-                                    stable_hashrate_ticks = 0;
+                    // ---- C3a: first-boot safe-stock start gate (visible park) ----
+                    //
+                    // Spawn a gate PUBLISHER that computes the start-gate
+                    // conditions every 5s and publishes them on the watch
+                    // installed above. The tuner's `run()` parks in Idle
+                    // (surfacing the park reason on its runtime-status
+                    // watch) until the gate opens:
+                    //   * health snapshot OK - stable hashrate, debounced
+                    //     over 2 stable ticks (the pre-C3a readiness
+                    //     semantics);
+                    //   * fans OK - commanded/tach fan state shows motion,
+                    //     or the variant's BoardDesc medium has no fan
+                    //     actuator (external loop);
+                    //   * temp in envelope - fresh in-plausibility-bounds
+                    //     board/die temperature;
+                    //
+                    // The board keeps running the variant's safe-stock
+                    // (nominal) profile while parked.
+                    let gate_publisher_shutdown = autotune_shutdown.clone();
+                    let gate_state_rx = autotune_state_rx;
+                    let gate_board_temps = board_temps_autotune.clone();
+                    let gate_board_seen_at = board_temp_seen_at_autotune.clone();
+                    let gate_time_base = board_temp_time_base_autotune.clone();
+                    let gate_xadc_temp = autotune_xadc_temp.clone();
+                    let gate_chain_count = chain_infos_clone.len();
+                    let gate_publisher = tokio::spawn(async move {
+                        let require_board_temp_gate = matches!(
+                            pic_type,
+                            PicType::Pic16F1704 | PicType::DsPic33EP | PicType::NoPic
+                        );
+                        let mut stable_hashrate_ticks = 0u8;
+                        let mut gate_tick =
+                            tokio::time::interval(std::time::Duration::from_secs(5));
+                        gate_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                        loop {
+                            tokio::select! {
+                                _ = gate_publisher_shutdown.cancelled() => {
+                                    return;
                                 }
+                                _ = gate_tick.tick() => {
+                                    let state = gate_state_rx.borrow().clone();
+                                    let now_s = gate_time_base.elapsed().as_secs() as u32;
+                                    let fresh_board_temp_count = gate_board_temps
+                                        .iter()
+                                        .zip(gate_board_seen_at.iter())
+                                        .filter(|(temp_atomic, seen_at_atomic)| {
+                                            let bits = temp_atomic.load(Ordering::Acquire);
+                                            let seen_at_s = seen_at_atomic.load(Ordering::Acquire);
+                                            if bits == 0 || seen_at_s == 0 {
+                                                return false;
+                                            }
+                                            let temp_c = f32::from_bits(bits);
+                                            temp_c > 0.0
+                                                && temp_c < 150.0
+                                                && now_s.saturating_sub(seen_at_s)
+                                                    <= dcentrald_autotuner::chip_stats::BOARD_TEMP_STALE_TIMEOUT_S
+                                                        as u32
+                                        })
+                                        .count();
 
-                                if stable_hashrate_ticks >= 2 {
-                                    break;
+                                    let die_temp_c = f32::from_bits(gate_xadc_temp.load(Ordering::Acquire));
+                                    let has_valid_die_temp = die_temp_c > 0.0 && die_temp_c < 125.0;
+                                    let temp_in_envelope = if require_board_temp_gate {
+                                        (fresh_board_temp_count >= gate_chain_count && gate_chain_count > 0)
+                                            || has_valid_die_temp
+                                    } else {
+                                        true
+                                    };
+
+                                    let health_ok = state.hashrate_5s_ghs > 0.0;
+                                    if health_ok && temp_in_envelope {
+                                        stable_hashrate_ticks = stable_hashrate_ticks.saturating_add(1);
+                                    } else {
+                                        stable_hashrate_ticks = 0;
+                                    }
+                                    let health_snapshot_ok = stable_hashrate_ticks >= 2;
+
+                                    // Fans OK: ALL observable per-fan channels
+                                    // show motion (legacy primary-tach fallback
+                                    // when per_fan is empty), or a fanless
+                                    // (external-loop) declared medium — there is
+                                    // no fan actuator to check. C3a fix lane
+                                    // (DCENT_Thermal merge condition): was
+                                    // any-channel-motion; a partially stalled
+                                    // array (3 of 4 fans dead) must park.
+                                    let fans_ok = autotuner_gate_fans_ok(
+                                        autotune_fanless_medium,
+                                        state.fans.rpm,
+                                        &state.fans.per_fan,
+                                    );
+
+                                    let _ = first_boot_gate_tx.send(
+                                        dcentrald_autotuner::FirstBootGateSnapshot {
+                                            health_snapshot_ok,
+                                            fans_ok,
+                                            temp_in_envelope,
+                                        },
+                                    );
                                 }
                             }
                         }
-                    }
+                    });
 
-                    info!("Auto-tuner: Mining stable, beginning per-chip characterization...");
-
-                    // Run the full auto-tuner lifecycle via channel-based architecture
+                    // Run the full auto-tuner lifecycle via channel-based
+                    // architecture. The tuner parks in Idle (with the
+                    // surfaced park reason) until the first-boot gate opens;
+                    // the variant guard inside `run()` refuses NotTunable
+                    // variants outright (refuse, never tune blind).
                     tuner
                         .run(
                             &chain_infos_clone,
@@ -10021,6 +10495,7 @@ impl Daemon {
                             autotune_shutdown,
                         )
                         .await;
+                    gate_publisher.abort();
                 });
             }
         }
@@ -10206,7 +10681,15 @@ impl Daemon {
                                                             pic_val,
                                                             "Runtime voltage apply: PIC16 target committed (pic16_mv_to_dac)"
                                                         );
-                                                        VoltageCommandReply::Applied(target_mv)
+                                                        // C3a fix lane (DCENT_EE finding 4):
+                                                        // ack the DECODED rail value, not the
+                                                        // request — pic16_mv_to_dac floors at
+                                                        // DAC 6 (≈9.40 V), so an above-9400 mV
+                                                        // request must never be acknowledged
+                                                        // at a value above the actual rail.
+                                                        VoltageCommandReply::Applied(
+                                                            dcentrald_common::pic16_dac_to_mv(pic_val),
+                                                        )
                                                     })
                                                     .map_err(|e| e.to_string())
                                             }
@@ -10601,7 +11084,15 @@ impl Daemon {
                                                         pic_val,
                                                         "Runtime voltage apply: PIC16 target committed"
                                                     );
-                                                    VoltageCommandReply::Applied(target_mv)
+                                                    // C3a fix lane (DCENT_EE finding 4):
+                                                    // ack the DECODED rail value, not the
+                                                    // request — pic16_mv_to_dac floors at
+                                                    // DAC 6 (≈9.40 V), so an above-9400 mV
+                                                    // request must never be acknowledged
+                                                    // at a value above the actual rail.
+                                                    VoltageCommandReply::Applied(
+                                                        dcentrald_common::pic16_dac_to_mv(pic_val),
+                                                    )
                                                 })
                                                 .map_err(|e| e.to_string())
                                         }
@@ -10618,7 +11109,22 @@ impl Daemon {
                                                         target_mv,
                                                         "Runtime voltage apply: dsPIC target committed"
                                                     );
-                                                    VoltageCommandReply::Applied(target_mv)
+                                                    // C3a fix lane (DCENT_EE finding 4): ack
+                                                    // the value the encode path actually
+                                                    // programs — the dsPIC rail-program
+                                                    // boundary applies the load-bearing
+                                                    // 14500 mV input clamp
+                                                    // (`clamp_dspic_voltage_to_hard_cap`).
+                                                    // (The framed DAC→mV inversion is
+                                                    // deliberately not a decode SSOT —
+                                                    // see `decode_voltage_dac_reply`.)
+                                                    VoltageCommandReply::Applied(
+                                                        dcentrald_asic::dspic::clamp_dspic_voltage_to_hard_cap(
+                                                            target_mv,
+                                                            dcentrald_asic::dspic::dspic_lab_overvolt_override_enabled(),
+                                                        )
+                                                        .0,
+                                                    )
                                                 })
                                                 .map_err(|e| e.to_string())
                                         }
@@ -11019,7 +11525,7 @@ impl Daemon {
             .observed_control_board
             .starts_with("AML");
         let thermal_platform_marker = self.platform_identity.platform_marker().to_string();
-        let thermal_include_die_on_am2 = std::env::var(ENV_THERMAL_INCLUDE_DIE_ON_AM2)
+        let thermal_include_die_on_am2 = dcentrald_common::lab_env::var(ENV_THERMAL_INCLUDE_DIE_ON_AM2)
             .map(|v| dcentrald_autotuner::config::env_flag_is_truthy(&v))
             .unwrap_or(false);
         let thermal_restart_voltage_mv = match self.pic_type()? {
@@ -11032,14 +11538,14 @@ impl Daemon {
 
         let thermal_pid_state_tx = pid_state_tx;
         let mut thermal_pid_command_rx = pid_command_rx;
-        // Wave-G G1 (E3b): LuxOS-shape ThermalSupervisor. Default-off — when
-        // `[thermal.supervisor].enabled` is false the supervisor is never
-        // constructed and the controller-only path below is byte-identical to
-        // pre-Wave-G. When true (operator opt-in, Wave-H live-soak gated) the
-        // loop drives the 6-layer FSM alongside the controller and reconciles
-        // strongest-safety-wins via `reconcile_with_supervisor`. The snapshot
-        // channel feeds `/api/thermal/supervisor` (honest telemetry).
-        let thermal_supervisor_cfg = self.config.thermal.supervisor.clone();
+        // Enable the conservative supervisor only for the exact registered
+        // sensor topology. An unknown marker cannot inherit another family.
+        let mut thermal_supervisor_cfg = self.config.thermal.supervisor.clone();
+        let thermal_supervisor_platform =
+            dcentrald_thermal::supervisor::SupervisorPlatform::from_board_target(
+                self.platform_identity.board_target());
+        thermal_supervisor_cfg.enabled &=
+            dcentrald_thermal::supervisor::supervisor_default_enabled(thermal_supervisor_platform);
         // R-11: snapshot the supervisor config values the hardware-safety audit
         // rows need (Copy scalars, moved into the thermal task). Captured here
         // because `thermal_supervisor_cfg` is moved into the FSM constructor
@@ -11047,35 +11553,13 @@ impl Daemon {
         let thermal_audit_min_fans = thermal_supervisor_cfg.min_fans;
         let thermal_audit_board_panic_c = thermal_supervisor_cfg.board_panic_c;
         let thermal_audit_chip_panic_c = thermal_supervisor_cfg.chip_panic_c;
-        // THERMAL-8: per-platform default-enable for the fail-closed supervisor.
-        // The compiled default stays OFF — `supervisor_default_enabled` returns
-        // false for every platform unless the operator sets the per-platform
-        // live-validation gate `DCENT_THERMAL_SUPERVISOR_DEFAULT_ON=1` AND that
-        // platform's arm has been signed off in `supervisor.rs`. An explicit
-        // `[thermal.supervisor].enabled = true` in config always wins. This makes
-        // the capability reachable + host-testable without flipping any live
-        // platform to default-on (LIVE-HARDWARE-DEFAULT principle). FLAGGED FOR
-        // OPERATOR LIVE VALIDATION.
-        let thermal_supervisor_default_on = {
-            let validated = std::env::var("DCENT_THERMAL_SUPERVISOR_DEFAULT_ON")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            let marker = self.platform_identity.board_target();
-            let platform =
-                dcentrald_thermal::supervisor::SupervisorPlatform::from_board_target(marker);
-            let on = dcentrald_thermal::supervisor::supervisor_default_enabled(platform, validated);
-            if on && !thermal_supervisor_cfg.enabled {
-                info!(?platform, "THERMAL-8: thermal supervisor default-enabled for this validated platform (DCENT_THERMAL_SUPERVISOR_DEFAULT_ON=1)");
-            }
-            on
-        };
         let (thermal_supervisor_snapshot_tx, thermal_supervisor_snapshot_rx) =
             tokio::sync::watch::channel::<Option<dcentrald_thermal::supervisor::SupervisorSnapshot>>(
                 None,
             );
         dcentrald_api::install_thermal_supervisor_rx(
             thermal_supervisor_snapshot_rx,
-            thermal_supervisor_cfg.enabled || thermal_supervisor_default_on,
+            thermal_supervisor_cfg.enabled,
         );
 
         // W8 parity: immersion / hydro cooling mode. Captured before `config` is
@@ -11215,7 +11699,7 @@ impl Daemon {
             // via the platform default we force `enabled = true` on the cfg copy so
             // the FSM's own `tick()` dormancy guard agrees with construction.
             let mut thermal_supervisor =
-                if thermal_supervisor_cfg.enabled || thermal_supervisor_default_on {
+                if thermal_supervisor_cfg.enabled {
                     let mut cfg = thermal_supervisor_cfg;
                     cfg.enabled = true;
                     let mut sup = dcentrald_thermal::supervisor::ThermalSupervisor::new(cfg);
@@ -13249,8 +13733,19 @@ impl Daemon {
         }
 
         // Graceful shutdown sequence
-        let _closeout = self.shutdown().await?;
-
+        let firstlight_observation = if crate::firstlight_census::operation_requested() {
+            let observed = firstlight_work_state.borrow().clone();
+            crate::firstlight_census::publish_work(
+                self.platform_identity.board_target(),
+                observed.accepted, observed.rejected, observed.hashrate_ghs,
+                observed.uptime_s,
+                &observed.chains.iter().map(|chain| chain.temp_c).collect::<Vec<_>>(),
+                observed.fans.pwm,
+            )
+        } else { Ok(()) };
+        let _closeout = crate::firstlight_census::finish_observation_after_closeout(
+            firstlight_observation, self.shutdown(),
+        ).await?;
         Ok(())
     }
 
@@ -15996,8 +16491,11 @@ impl Daemon {
                             let chip_name = match chip_id {
                                 0x1387 => "BM1387 (Antminer S9, 16nm)",
                                 0x1397 => "BM1397 (Antminer S17/T17, 7nm)",
-                                0x1398 => "BM1398 (Antminer S19/S19j, 7nm)",
-                                0x1362 => "BM1362 (Antminer S19j Pro, 5nm)",
+                                // Gauntlet B5b (2026-09-02): "S19j" removed from
+                                // the BM1398 row — the classic S19j is BM1362
+                                // (stock BHB42701 topol; see model.rs `s19j`).
+                                0x1398 => "BM1398 (Antminer S19/S19 Pro/T19, 7nm)",
+                                0x1362 => "BM1362 (Antminer S19j family, 5nm)",
                                 0x1366 => "BM1366 (Antminer S19 XP, 5nm)",
                                 0x1368 => "BM1368 (Antminer S21, 5nm)",
                                 0x1370 => "BM1370 (Antminer S21 Pro, 3nm)",
@@ -16199,6 +16697,29 @@ impl Daemon {
         // ticket-mask, relay, and work-capable driver operations require a new
         // authority sealed from measured GetAddress receipts.
         self.seal_standard_phase7_driver_admission()?;
+
+        // A census ends at fresh enumeration. It cannot configure PLL/open
+        // cores or create the Stratum/work pipeline; the lifecycle owner above
+        // retains and closes its existing power/cooling/watchdog resources.
+        if crate::firstlight_census::requested() {
+            let initialized =
+                initialized_pic_addrs.snapshot("census controller closeout ownership");
+            anyhow::ensure!(
+                self.asic_enumeration_receipts.len() == self.detected_board_indices.len(),
+                "census requires fresh enumeration for every discovered board"
+            );
+            for &index in &self.detected_board_indices {
+                anyhow::ensure!(
+                    initialized.contains(&self.pic_addr_for_board(index)?),
+                    "census controller closeout endpoint is incomplete"
+                );
+            }
+            self.initialized_pic_addrs_final = initialized;
+            // Every present slot and controller owner is resolved. No runtime
+            // dispatcher authority is minted by this enumeration checkpoint.
+            self.preflight_hardware_state_unknown = false;
+            return Ok(());
+        }
 
         // ---- Phase 7: Chip configuration ----
         // Now we configure each ASIC chip for mining:
@@ -17036,6 +17557,12 @@ impl Daemon {
                 "shutdown was already attempted; refusing to consume hardware ownership or extend watchdog teardown grace twice"
             );
         }
+        // Capture the exact supervised process/image before the terminal
+        // operation. This is a request binding, never completion authority.
+        let software_closeout_run =
+            dcentrald_common::mutation_disposition::capture_software_closeout_run(
+                self.platform_identity.board_target(),
+            );
         let mut unit_closeout_owners = self
             .standard_unit_closeout_owners
             .take()
@@ -17102,10 +17629,22 @@ impl Daemon {
             .collect::<Result<Vec<_>>>();
         let cutoff_budget_view = teardown_budget_view.clone();
         let cutoff_chip_id = self.chip_id;
+        let census_cutoff_service =
+            if crate::firstlight_census::operation_requested() && cutoff_mailbox.is_none() {
+                Some(
+                    self.i2c_service
+                        .clone()
+                        .context("census cutoff I2C owner missing"),
+                )
+            } else {
+                None
+            };
+        let census_cutoff_firmware = match self.pic_firmware {
+            PicFirmware::BraiinsOs => dcentrald_hal::i2c::I2cPicFirmware::BraiinsOs,
+            PicFirmware::Stock(_) => dcentrald_hal::i2c::I2cPicFirmware::Stock,
+            PicFirmware::Unknown => dcentrald_hal::i2c::I2cPicFirmware::Unknown,
+        };
         let standard_teardown_progress_result: Result<StandardTeardownProgress> = async move {
-            let tx = cutoff_mailbox.context(
-                "standard first-stage voltage cutoff requires the runtime voltage mailbox",
-            )?;
             let endpoints = cutoff_endpoints?;
             anyhow::ensure!(
                 !endpoints.is_empty(),
@@ -17114,6 +17653,25 @@ impl Daemon {
             let mut first_started_at: Option<Instant> = None;
             let mut last_completed_at: Option<Instant> = None;
             for (chain_id, pic_addr) in endpoints {
+                if let Some(service) = census_cutoff_service.as_ref() {
+                    anyhow::ensure!(cutoff_chip_id == 0x1387,
+                        "direct census cutoff is scoped to the admitted S9 PIC owner");
+                    let service = service.as_ref().map_err(|e| anyhow::anyhow!("{e}"))?.clone();
+                    let remaining = cutoff_budget_view.remaining_at(TeardownStage::CutoffComplete, Instant::now())?;
+                    let (started, completed) = tokio::time::timeout(remaining,
+                        tokio::task::spawn_blocking(move || -> Result<(Instant, Instant)> {
+                            let started = Instant::now();
+                            service.disable_voltage(pic_addr, census_cutoff_firmware)?;
+                            Ok((started, Instant::now()))
+                        })).await.context("census first cutoff timed out")?
+                        .context("census first cutoff owner failed")??;
+                    first_started_at = Some(first_started_at.map_or(started, |old| old.min(started)));
+                    last_completed_at = Some(last_completed_at.map_or(completed, |old| old.max(completed)));
+                    continue;
+                }
+                let tx = cutoff_mailbox.as_ref().context(
+                    "standard first-stage voltage cutoff requires the runtime voltage mailbox",
+                )?;
                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                 tx.try_send(VoltageCommand::DisableVoltage {
                     chain_id: Some(chain_id),
@@ -17991,9 +18549,16 @@ impl Daemon {
                 );
             }
         }
-        Ok(StandardDaemonTerminalCloseout {
+        let closeout = StandardDaemonTerminalCloseout {
             _watchdog: watchdog_closeout,
-        })
+        };
+        // Only this positive terminal path has completed the same-run owner
+        // receipts, absolute teardown schedule, watchdog result and worker
+        // join. Thermal/quarantine history never becomes restart authority.
+        if !thermal_emergency_active(&self.terminal_thermal_generation_latch) {
+            persist_clean_software_closeout(software_closeout_run)?;
+        }
+        Ok(closeout)
     }
 }
 // Hardware-info free functions moved to crate::runtime::hardware_info
@@ -18184,7 +18749,7 @@ const ENV_GRPC_WRITE_CONTROL: &str = "DCENT_GRPC_WRITE_CONTROL";
 /// [`ENV_GRPC_WRITE_CONTROL`]. Reuses the shared autotuner env-truthiness
 /// helper so the daemon and tests agree on what counts as "on".
 fn grpc_write_control_enabled() -> bool {
-    std::env::var(ENV_GRPC_WRITE_CONTROL)
+    dcentrald_common::lab_env::var(ENV_GRPC_WRITE_CONTROL)
         .ok()
         .map(|v| dcentrald_autotuner::config::env_flag_is_truthy(&v))
         .unwrap_or(false)
@@ -18419,7 +18984,7 @@ impl dcentrald_api_grpc::GrpcWriteDelegate for DaemonGrpcWriteDelegate {
 }
 
 #[cfg(test)]
-mod td003_destructive_write_guard_tests {
+mod runtime_hardware_guard_tests {
     use super::*;
 
     const DAEMON_RS: &str = include_str!("daemon.rs");
@@ -18432,65 +18997,23 @@ mod td003_destructive_write_guard_tests {
     }
 
     #[test]
-    fn td003_signal_classifier_blocks_in_development_and_ambiguous_am2() {
-        assert_eq!(
-            td003_destructive_write_refusal_from_signals(Some("s19xp"), "", "", "")
-                .unwrap()
-                .source,
-            "config-model"
-        );
-        assert_eq!(
-            td003_destructive_write_refusal_from_signals(None, "am2-s17p", "", "")
-                .unwrap()
-                .model_name,
-            "Antminer S17 / S17 Pro"
-        );
-        assert_eq!(
-            td003_destructive_write_refusal_from_signals(None, "", "am3-s19xp", "")
-                .unwrap()
-                .model_name,
-            "Antminer S19 XP"
-        );
-        assert_eq!(
-            td003_destructive_write_refusal_from_signals(None, "", "zynq-bm3-am2", "")
-                .unwrap()
-                .model_name,
-            "generic AM2 platform without exact board target"
-        );
-        assert_eq!(
-            td003_destructive_write_refusal_from_signals(None, "unknown", "zynq-bm3-am2", "",)
-                .unwrap()
-                .source,
-            "platform-marker+board-target"
-        );
-    }
-
-    #[test]
-    fn td003_signal_classifier_allows_promoted_or_non_td003_identities() {
-        for (model, board_target, platform) in [
-            (Some("s9"), "am1-s9", "zynq-bm1-s9"),
-            (Some("s19jpro"), "am2-s19jpro-zynq", "zynq-bm3-am2"),
-            (Some("s19pro"), "am2-s19pro", "zynq-bm3-am2"),
-            (Some("s19k"), "am3-s19k", "amlogic-a113d"),
-            (Some("s21"), "am3-s21", "amlogic-a113d"),
-            (None, "am2-s19jpro-xil", "zynq-bm3-am2"),
-        ] {
-            assert_eq!(
-                td003_destructive_write_refusal_from_signals(model, board_target, platform, ""),
-                None,
-                "model={model:?} board_target={board_target:?} platform={platform:?} must not be caught by TD-003"
-            );
+    fn runtime_target_refuses_unknown_or_missing_engine() {
+        for target in ["", "unknown", "am2", "am1-s11", "am2-t19-unknown", "am3-s19kpro"] {
+            assert!(runtime_hardware_refusal_for_target(target).is_some(), "{target}");
+        }
+        for target in ["am1-s9", "am2-s17p", "am2-s19j", "am2-s19pro", "am2-s19", "am2-s19a", "am2-s19plus", "am2-t19", "am3-s19xp", "am3-s21"] {
+            assert_eq!(runtime_hardware_refusal_for_target(target), None, "{target}");
         }
     }
 
     #[test]
-    fn td003_run_lifecycle_guard_precedes_hardware_init() {
+    fn runtime_target_guard_precedes_hardware_init() {
         let lifecycle_signature =
             ["    async fn run_", "lifecycle(&mut self) -> Result<()> {"].concat();
         let start = DAEMON_RS
             .find(&lifecycle_signature)
             .expect("run_lifecycle missing");
-        let guard = offset_after(DAEMON_RS, start, "self.td003_destructive_write_refusal(");
+        let guard = offset_after(DAEMON_RS, start, "self.runtime_hardware_refusal(");
         let composition_admission = offset_after(
             DAEMON_RS,
             start,
@@ -18502,11 +19025,11 @@ mod td003_destructive_write_guard_tests {
         let init_call = offset_after(DAEMON_RS, start, "initialize_or_recover(");
         assert!(
             guard < boot_progress,
-            "TD-003 guard must run before boot-progress mining init starts"
+            "runtime target guard must run before boot-progress mining init starts"
         );
         assert!(
             guard < init_call,
-            "TD-003 guard must run before the injected platform lifecycle"
+            "runtime target guard must run before the injected platform lifecycle"
         );
         assert!(
             guard < composition_admission
@@ -18519,7 +19042,7 @@ mod td003_destructive_write_guard_tests {
         assert!(
             guard_body.contains("run_api_only_with_hardware_mutation_gate(")
                 && guard_body.contains("HardwareMutationGate::new_closed()"),
-            "run_lifecycle TD-003 refusal must park with a closed-gate API, not exit or continue"
+            "run_lifecycle target refusal must park with a closed-gate API, not exit or continue"
         );
     }
 
@@ -18965,8 +19488,8 @@ mod sw02_perf004_wiring_tests {
         for truthy in ["1", "true", "yes", "on", "ON", "Yes"] {
             with_env(ENV_GRPC_WRITE_CONTROL, Some(truthy), || {
                 assert!(
-                    grpc_write_control_enabled(),
-                    "{truthy:?} should enable the gRPC write control plane"
+                    grpc_write_control_enabled() == dcentrald_common::lab_env::compiled(),
+                    "{truthy:?} may enable the gRPC write control plane only in a lab binary"
                 );
             });
         }
@@ -19043,7 +19566,8 @@ mod sw02_perf004_wiring_tests {
     fn sku_aware_ceiling_opt_in_truthy() {
         for truthy in ["1", "true", "yes", "on"] {
             with_env(ENV_AM2_SKU_AWARE_CEILING, Some(truthy), || {
-                assert!(am2_sku_aware_ceiling_enabled(), "{truthy:?} should enable");
+                assert_eq!(am2_sku_aware_ceiling_enabled(), dcentrald_common::lab_env::compiled(),
+                    "{truthy:?} may change the frequency ceiling only in a lab binary");
             });
         }
     }
@@ -19219,9 +19743,11 @@ mod sw02_perf004_wiring_tests {
         use dcentrald_thermal::supervisor::{
             BoardSensors, SupervisorAction, ThermalSupervisor, ThermalSupervisorConfig, ThermalTick,
         };
-        // Default config => enabled = false (operator opt-in).
-        let mut sup = ThermalSupervisor::new(ThermalSupervisorConfig::default());
-        assert!(!sup.is_enabled(), "supervisor must be default-OFF");
+        let mut sup = ThermalSupervisor::new(ThermalSupervisorConfig {
+            enabled: false,
+            ..ThermalSupervisorConfig::default()
+        });
+        assert!(!sup.is_enabled(), "explicitly disabled supervisor must stay inert");
         // Even a chain hot enough to step-down produces ZERO actions while off.
         let tick = ThermalTick {
             board_sensors: vec![BoardSensors {

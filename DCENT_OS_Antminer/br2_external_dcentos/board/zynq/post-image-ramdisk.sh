@@ -104,7 +104,7 @@ File: rootfs.squashfs
 Size: ${SQFS_SIZE:-N/A} bytes
 SHA256: ${SQFS_SHA256:-N/A}
 Flash command:
-  make flash-braiinsos MINER_IP=203.0.113.97
+  make flash-braiinsos MINER_IP=<miner-ip>
   (or: scp -O rootfs.squashfs root@MINER:/tmp/ && ssh root@MINER "ubiupdatevol /dev/ubi0_1 /tmp/rootfs.squashfs")
 Status: lab/compatibility only — not the primary tester/support flow
 Revert: sysupgrade with BraiinsOS, or recovery partition (hold reset on power-on)
@@ -146,5 +146,5 @@ fi
 echo "  ${BINARIES_DIR}/BUILD_INFO.txt    - Build info and flash instructions"
 echo ""
 echo "=== Legacy Compatibility Flash (BraiinsOS S9) ==="
-echo "  make flash-braiinsos MINER_IP=203.0.113.97   # lab/compatibility only"
+echo "  make flash-braiinsos MINER_IP=<miner-ip>   # lab/compatibility only"
 echo ""

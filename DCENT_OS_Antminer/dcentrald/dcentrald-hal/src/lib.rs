@@ -35,10 +35,26 @@
 
 #![allow(clippy::doc_lazy_continuation, clippy::doc_overindented_list_items)]
 
-#[cfg(all(feature = "sim-hal", target_os = "linux", target_arch = "arm"))]
+#[cfg(all(
+    feature = "sim-hal",
+    target_os = "linux",
+    any(target_arch = "arm", target_arch = "aarch64")
+))]
 compile_error!("sim-hal is host-only and must never be compiled into ARM Linux firmware artifacts");
 
 pub mod adc;
+pub mod bb_pic_application;
+pub mod bb_pic_heartbeat;
+pub(crate) mod bb_pic_lm75;
+pub(crate) mod bb_apw_diagnostics;
+pub(crate) mod bb_apw_diagnostic_owner;
+pub(crate) mod bb_pre_power_diagnostics;
+pub(crate) mod bb_apw_voltage_exchange;
+pub(crate) mod bb_management_owner;
+pub mod bb_management_runtime;
+pub(crate) mod bb_voltage_planner;
+pub(crate) mod bb_voltage_profile;
+pub mod bb_pic_rail;
 pub mod board_control;
 pub mod chain_backend;
 pub mod epic_umc_psu_v1;

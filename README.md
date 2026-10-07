@@ -71,12 +71,12 @@ or efficiency (J/TH), with an honest before → after prediction and hard safety
 
 ```
 DCENT_OS/
-└── firmware/
-    ├── antminer/     → industrial Antminers (S9 → S21): Rust dcentrald daemon + Buildroot Linux + dashboard + docs/
-    ├── esp/          → ESP32-S3 Bitaxe-class miners (BM1397/1366/1368/1370): original Rust firmware + MCP
-    ├── avalon/       → Avalon (Canaan) K230/K210 — experimental port: board support, daemon crates,
-    │                    recovery tooling, gauntlets (see DCENT_OS_AvalonMiner/README.md)
-    └── whatsminer/   → WhatsMiner (MicroBT) support — in development (see DCENT_OS_WhatsMiner/README.md)
+├── DCENT_OS_Antminer/     → industrial Antminers (S9 → S21): Rust dcentrald daemon + Buildroot Linux + dashboard + docs/
+├── DCENT_OS_ESP/          → ESP32-S3 Bitaxe-class miners (BM1397/1366/1368/1370): original Rust firmware + MCP
+├── DCENT_OS_AvalonMiner/  → Avalon (Canaan) K230/K210 — experimental port: board support, daemon crates,
+│                             recovery tooling, gauntlets (see DCENT_OS_AvalonMiner/README.md)
+├── DCENT_OS_WhatsMiner/   → WhatsMiner (MicroBT) support — in development (see DCENT_OS_WhatsMiner/README.md)
+└── shared/                → crates shared across the family (dcent-schema)
 ```
 
 | Platform | Where | Status |
@@ -94,6 +94,10 @@ measure; the captures come from real bench hardware.
 
 ## Quick start
 
+> **New: DCENT_OS 0.9.0 Beta 1 (Drop 1)** — 28 signed Antminer images, S9 through S21, each labelled
+> Public beta / Lab preview / Developer preview. Grab yours from the
+> [Releases page](https://github.com/DCentralTech/DCENT_OS/releases) and verify the signature before you flash.
+
 Pick your platform and follow its guide:
 
 - **Antminer:** [`DCENT_OS_Antminer/README.md`](DCENT_OS_Antminer/README.md) → flash a prebuilt signed
@@ -109,8 +113,9 @@ Pick your platform and follow its guide:
 
 ## What makes DCENT_OS different
 
-- **No mandatory dev fee.** A transparent, fully-disableable voluntary donation (zero is valid),
-  always visible on the dashboard when active — versus the industry's forced 1.5–2.8%.
+- **0% fee by default — no mandatory dev fee, ever.** The optional donation is off until you
+  turn it on (1–5%), fully visible on the dashboard while active, and one tap off — versus the
+  industry's forced 1.5–2.8% or paid 0% licenses.
 - **Quiet by default.** Low-PWM boot, PID thermal control, and a hard policy that **cuts hash power
   before raising fan noise** — firmware designed for the room you live in, not a warehouse.
 - **Original open code.** GPL-3.0, no forked proprietary code. Every ASIC constant is documented

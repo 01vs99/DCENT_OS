@@ -197,7 +197,7 @@ v=$(accept_enum_verdict "$(accept_parse_enumerated < "$FIX/log_am3_bb_enumerated
 # --- exact AM3-BB route identity and unique-population receipts ------------
 am3_pid=4242
 am3_case=/tmp/dcentos-am3-bb.A1b2c3
-am3_route_receipt="AM3_BB_ROUTE_ADMISSION_RECEIPT schema=v2 run_pid=$am3_pid board_target=am3-bb-s19jpro soc=am335x carrier=S19J_IO_BOARD_V2_0 asic=BM1362 asic_evidence=declared_runtime_composition topology_profile=s19j_io_board_v2_0_exact_v1 gpio_profile=enable59-rst49_60_27_22-plug51_48_47_46-fantach7_20_110_112-led23_45 uart_profile=ttyS1_48022000-ttyS2_48024000-ttyS4_481a8000-3000000 i2c_profile=eeprom0_50_51_52-deny-psu1_10 cold_boot_profile=15000_13800-reset10_1100_retry1x2_200_100-fan10_30 identity_evidence=exact_device_tree"
+am3_route_receipt="AM3_BB_ROUTE_ADMISSION_RECEIPT schema=v3 run_pid=$am3_pid board_target=am3-bb-s19jpro soc=am335x carrier=S19J_IO_BOARD_V2_0 asic=BM1362 asic_evidence=declared_runtime_composition topology_profile=s19j_io_board_v2_0_exact_v1 gpio_profile=legacy59_metadata-psu65_high-rst49_60_27_22-plug51_48_47_46-fantach7_20_110_112-led23_45 uart_profile=ttyS1_48022000-ttyS2_48024000-ttyS4_481a8000-3000000 i2c_profile=eeprom0_50_51_52-deny-psu1_10 cold_boot_profile=fixed_apw15120_runtime_owner_required-reset10_1100_retry1x2_200_100-fan10_30 identity_evidence=exact_device_tree"
 am3_enum_receipt="AM3_BB_ENUMERATION_RECEIPT schema=v1 run_pid=$am3_pid chains=3 chain0=126 chain1=126 chain2=126 total=378 evidence=post_assignment_unique"
 am3_identity() {
     printf '%s\n' \
@@ -222,6 +222,10 @@ v=$(am3_identity | sed 's/rest_reachable=1/rest_reachable=0/' | accept_am3_bb_id
 assert_eq "AM3 identity: unreachable REST fails" "IDENTITY_FAIL:rest" "$v"; assert_rc "AM3 REST fail rc" 1 "$rc"
 v=$(am3_identity | sed 's/run_pid=4242/run_pid=99/' | accept_am3_bb_identity_verdict "$am3_case"); rc=$?
 assert_eq "AM3 identity: stale route receipt PID fails" "IDENTITY_FAIL:runtime_receipt" "$v"; assert_rc "AM3 stale receipt rc" 1 "$rc"
+v=$(am3_identity | sed 's/schema=v3/schema=v2/' | accept_am3_bb_identity_verdict "$am3_case"); rc=$?
+assert_eq "AM3 identity: retired supply recipe schema fails" "IDENTITY_FAIL:runtime_receipt" "$v"; assert_rc "AM3 retired supply schema rc" 1 "$rc"
+v=$(am3_identity | sed 's/fixed_apw15120_runtime_owner_required/15000_13800/' | accept_am3_bb_identity_verdict "$am3_case"); rc=$?
+assert_eq "AM3 identity: guessed APW operating targets fail" "IDENTITY_FAIL:runtime_receipt" "$v"; assert_rc "AM3 guessed APW target rc" 1 "$rc"
 v=$(am3_identity | sed '/^cmdline=/p' | accept_am3_bb_identity_verdict "$am3_case"); rc=$?
 assert_eq "AM3 identity: duplicate process evidence fails" "IDENTITY_FAIL:process" "$v"; assert_rc "AM3 duplicate cmdline rc" 1 "$rc"
 v=$(am3_identity | sed "s#cmdline=$am3_case/dcentrald #cmdline=$am3_case/dcentrald-evil #" | accept_am3_bb_identity_verdict "$am3_case"); rc=$?
@@ -358,8 +362,13 @@ sed -n '/^S9|/p' "$CONF" >> "$bad_manifest"
 v=$(jr PASS S9 am1-s9 capstone | accept_matrix_verdict "$bad_manifest" 'S9:capstone' 2>/dev/null); rc=$?
 rm -f "$bad_manifest"
 assert_eq "matrix: duplicate manifest SKU fails" "ACCEPTANCE_SCOPE_NOGO:manifest_invalid" "$v"; assert_rc "matrix bad manifest rc" 1 "$rc"
-v=$(jr PASS S15 am1-s15 capstone | accept_matrix_verdict "$CONF" 'S15:capstone' 2>/dev/null); rc=$?
-assert_eq "matrix: NOT-IMPLEMENTED cannot pass" "ACCEPTANCE_SCOPE_NOGO:S15:not_implemented" "$v"; assert_rc "matrix not implemented rc" 1 "$rc"
+# The negative control follows an actual held route, not a SKU since promoted.
+capture_row=$(awk -F '|' '$9 == "NOT-IMPLEMENTED" { print $1 "|" $2; exit }' "$CONF")
+[ -n "$capture_row" ] || { no "required NOT-IMPLEMENTED control is absent from skus.conf"; exit 1; }
+capture_sku=${capture_row%%|*}
+capture_target=${capture_row#*|}
+v=$(jr PASS "$capture_sku" "$capture_target" capstone | accept_matrix_verdict "$CONF" "$capture_sku:capstone" 2>/dev/null); rc=$?
+assert_eq "matrix: NOT-IMPLEMENTED cannot pass" "ACCEPTANCE_SCOPE_NOGO:$capture_sku:not_implemented" "$v"; assert_rc "matrix not implemented rc" 1 "$rc"
 v=$(jr PASS S19jProBB am3-bb-s19jpro capstone | accept_matrix_verdict "$CONF" 'S19jProBB:capstone' 2>/dev/null); rc=$?
 assert_eq "matrix: external-media evidence can complete diagnostic scope" "ACCEPTANCE_SCOPE_PASS" "$v"; assert_rc "matrix external diagnostic rc" 0 "$rc"
 v=$(jr PASS S19jProBB am3-bb-s19jpro ota | accept_matrix_verdict "$CONF" 'S19jProBB:ota' 2>/dev/null); rc=$?

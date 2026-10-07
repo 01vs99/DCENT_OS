@@ -150,7 +150,9 @@ mod tests {
     use crate::board_desc::{
         AsicProtocolIdentity, BoardDesc, ChainTransportKind, VoltageControllerClass, WorkEngineKind,
     };
-    use dcent_schema::hardware::{InstallAuthorization, RuntimeStatus};
+    use dcent_schema::hardware::{
+        GenericConstruction, InstallAuthorization, LifecycleLane, RuntimeStatus,
+    };
 
     #[test]
     fn four_parent_and_two_script_pins_are_exact_and_distinct() {
@@ -197,26 +199,61 @@ mod tests {
     }
 
     #[test]
-    fn s17e_t17e_descriptors_remain_capture_first_and_install_denied() {
-        for target in ["am2-s17e", "am2-t17e"] {
-            let board = BoardDesc::lookup(target).expect("registered BM1396 target");
-            assert_eq!(board.asic_protocol, AsicProtocolIdentity::Bm1396);
-            assert_eq!(board.chain_transport, ChainTransportKind::None);
-            assert_eq!(board.work_engine, WorkEngineKind::ManagementOnly);
-            assert_eq!(
-                board.voltage_controller,
-                VoltageControllerClass::Bm1396FramedI2c11
-            );
-            assert!(matches!(
-                board.runtime_status,
-                RuntimeStatus::CaptureFirst { .. }
-            ));
-            assert_eq!(
-                board.enablement.install_authorization,
-                InstallAuthorization::Denied
-            );
-            assert!(!board.public_beta_install);
-            assert!(!board.mining_default_enabled);
-        }
+    fn s17e_t17e_owned_native_descriptors_keep_generic_and_install_denied() {
+        // Both exact native owners retain stock fabric custody. Recovery-jig
+        // evidence supplies neither generic construction nor install authority.
+        let s17e = BoardDesc::lookup("am2-s17e").expect("registered BM1396 target");
+        assert_eq!(s17e.asic_protocol, AsicProtocolIdentity::Bm1396);
+        assert_eq!(s17e.chain_transport, ChainTransportKind::StockFpga);
+        assert_eq!(s17e.work_engine, WorkEngineKind::FpgaWorkFifo);
+        assert_eq!(
+            s17e.voltage_controller,
+            VoltageControllerClass::Bm1396FramedI2c11
+        );
+        assert!(matches!(
+            s17e.runtime_status,
+            RuntimeStatus::SpecialisedLifecycle {
+                lane: LifecycleLane::Bm1396Native,
+                generic_construction: GenericConstruction::Refused
+            }
+        ));
+        assert_eq!(
+            s17e.enablement.install_authorization,
+            InstallAuthorization::Denied
+        );
+        assert!(!s17e.public_beta_install());
+        assert!(!s17e.mining_default_enabled);
+        assert!(s17e.admit_protocol_transport_and_work_engine().is_err());
+
+        // am2-t17e landed its exact native cold-300 BM1396 runtime
+        // (SpecialisedLifecycle over the retained stock fabric). The
+        // fail-closed law that must survive: install stays Denied, and the
+        // generic BM1396 protocol admit still refuses an active transport
+        // (BM1396 is pure-only; the native runtime owns its exact custody).
+        let t17e = BoardDesc::lookup("am2-t17e").expect("registered BM1396 target");
+        assert_eq!(t17e.asic_protocol, AsicProtocolIdentity::Bm1396);
+        assert_eq!(t17e.chain_transport, ChainTransportKind::StockFpga);
+        assert_eq!(t17e.work_engine, WorkEngineKind::FpgaWorkFifo);
+        assert_eq!(
+            t17e.voltage_controller,
+            VoltageControllerClass::Bm1396FramedI2c11
+        );
+        assert!(matches!(
+            t17e.runtime_status,
+            RuntimeStatus::SpecialisedLifecycle {
+                lane: LifecycleLane::Bm1396Native,
+                generic_construction: GenericConstruction::Refused
+            }
+        ));
+        assert_eq!(
+            t17e.enablement.install_authorization,
+            InstallAuthorization::Denied
+        );
+        assert!(!t17e.public_beta_install());
+        assert!(!t17e.mining_default_enabled);
+        assert!(
+            t17e.admit_protocol_transport_and_work_engine().is_err(),
+            "am2-t17e generic admit must stay refused"
+        );
     }
 }

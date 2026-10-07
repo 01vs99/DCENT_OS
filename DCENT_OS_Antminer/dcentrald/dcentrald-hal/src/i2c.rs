@@ -174,7 +174,7 @@ impl Lm75TemperatureRegister {
 }
 
 fn map_at24_read_error(bus: u8, addr: u8, path: &str, error: std::io::Error) -> HalError {
-    let is_linux_eio = error.raw_os_error() == Some(libc::EIO);
+    let is_linux_eio = matches!(error.raw_os_error(), Some(libc::EIO | libc::ENXIO | libc::EREMOTEIO));
     let kind = error.kind();
     let detail = format!("AT24 identity read from {path} failed: {error}");
     // Linux reports adapter NACK/I/O readiness failures as EIO. Rust maps
@@ -191,6 +191,26 @@ fn map_at24_read_error(bus: u8, addr: u8, path: &str, error: std::io::Error) -> 
         | std::io::ErrorKind::UnexpectedEof
         | std::io::ErrorKind::Other => HalError::I2cEndpointNotReady { bus, addr, detail },
         _ => HalError::I2cEndpointRefused { bus, addr, detail },
+    }
+}
+
+/// Prefer the bound AT24 driver; a missing attribute is only eligible for a
+/// fixed read transfer when no kernel driver owns the endpoint. Permission,
+/// partial-read and driver-binding failures never select the raw transport.
+fn open_at24_identity_file(device: &std::path::Path) -> std::io::Result<Option<fs::File>> {
+    match fs::File::open(device.join("eeprom")) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match fs::symlink_metadata(device.join("driver")) {
+                Err(unbound) if unbound.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
+                Ok(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "kernel-bound EEPROM has no readable at24 attribute",
+                )),
+            }
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -723,9 +743,14 @@ impl I2cBus {
         // bosminer-matching safe variant). See I2C_SLAVE_SAFE doc-comment
         // above for the strace evidence + rationale. Default-OFF →
         // fleet byte-identical when DCENT_AM2_I2C_SLAVE_SAFE is unset.
-        let use_safe_slave_ioctl = std::env::var("DCENT_AM2_I2C_SLAVE_SAFE")
+        let use_safe_slave_ioctl = dcentrald_common::lab_env::var("DCENT_AM2_I2C_SLAVE_SAFE")
             .map(|v| v.trim() == "1")
-            .unwrap_or(false);
+            .unwrap_or_else(|error| {
+            matches!(error, std::env::VarError::NotPresent)
+                && dcentrald_common::runtime_hardware_recipe::am2_default(
+                    dcentrald_common::runtime_hardware_recipe::Am2HardwareFlag::SafeI2cSlave
+                )
+        });
         let ioctl_cmd: u32 = if use_safe_slave_ioctl {
             I2C_SLAVE_SAFE
         } else {
@@ -924,9 +949,14 @@ impl I2cBus {
         // and could be what wedges 0x20. When env gate
         // `DCENT_AM2_DSPIC_BOSMINER_FAITHFUL=1`, scale up to 6 ms.
         // Default off → byte-identical to prior waves on .79/.109.
-        let inter_byte_ms: u64 = if std::env::var("DCENT_AM2_DSPIC_BOSMINER_FAITHFUL")
+        let inter_byte_ms: u64 = if dcentrald_common::lab_env::var("DCENT_AM2_DSPIC_BOSMINER_FAITHFUL")
             .map(|v| v.trim() == "1")
-            .unwrap_or(false)
+            .unwrap_or_else(|error| {
+            matches!(error, std::env::VarError::NotPresent)
+                && dcentrald_common::runtime_hardware_recipe::am2_default(
+                    dcentrald_common::runtime_hardware_recipe::Am2HardwareFlag::BosminerDsPicPacing
+                )
+        })
         {
             6
         } else {
@@ -1103,9 +1133,9 @@ impl I2cBus {
     /// Read one fixed offset-zero AT24 region through a platform-admitted
     /// protected endpoint.
     ///
-    /// Production kernel services use the bound `at24` driver's sysfs file,
-    /// so this operation never issues `I2C_SLAVE[_FORCE]` and remains
-    /// compatible with an address already owned by the kernel. Simulation
+    /// Production uses the bound `at24` driver's sysfs file, or an exact
+    /// offset-zero repeated-start read when no kernel driver is bound. This
+    /// operation never issues `I2C_SLAVE[_FORCE]`. Simulation
     /// models the equivalent offset-zero transfer explicitly. The service's
     /// platform write-denylist is also the admission policy: an S9 or generic
     /// service with no AT24 policy cannot use this operation at PIC addresses.
@@ -1151,11 +1181,43 @@ impl I2cBus {
             });
         }
 
-        let path = format!("/sys/bus/i2c/devices/{}-{:04x}/eeprom", self.bus, addr);
-        let mut file = fs::File::open(&path)
-            .map_err(|error| map_at24_read_error(self.bus, addr, &path, error))?;
-        file.read_exact(&mut buf)
-            .map_err(|error| map_at24_read_error(self.bus, addr, &path, error))?;
+        let device = format!("/sys/bus/i2c/devices/{}-{:04x}", self.bus, addr);
+        if let Some(mut file) = open_at24_identity_file(std::path::Path::new(&device))
+            .map_err(|error| map_at24_read_error(self.bus, addr, &device, error))?
+        {
+            file.read_exact(&mut buf)
+                .map_err(|error| map_at24_read_error(self.bus, addr, &device, error))?;
+            return Ok(buf);
+        }
+
+        // Unbound AT24C02: a single address byte selects offset zero and the
+        // repeated START reads the immutable 32/256-byte span. No payload byte,
+        // address selector, driver unbind, or general write exception is exposed.
+        // The per-platform EEPROM policy above excludes S9 PIC endpoints.
+        let mut offset = [0u8];
+        let mut messages = [
+            I2cMsg { addr: u16::from(addr), flags: 0, len: 1, buf: offset.as_mut_ptr() },
+            I2cMsg { addr: u16::from(addr), flags: I2C_M_RD, len: span.len() as u16, buf: buf.as_mut_ptr() },
+        ];
+        let mut transfer = I2cRdwrIoctlData { msgs: messages.as_mut_ptr(), nmsgs: 2 };
+        let file = self.file.as_ref().ok_or_else(|| HalError::I2cEndpointRefused {
+            bus: self.bus, addr, detail: "AT24 fixed read requires the retained kernel adapter".into(),
+        })?;
+        // SAFETY: both message buffers and their descriptors remain alive and
+        // correctly sized until the synchronous ioctl returns; the service is
+        // the sole adapter owner and has admitted this protected EEPROM address.
+        let completed = unsafe {
+            libc::ioctl(file.as_raw_fd(), I2C_RDWR as _, &mut transfer as *mut I2cRdwrIoctlData)
+        };
+        if completed < 0 {
+            return Err(map_at24_read_error(self.bus, addr, &device, std::io::Error::last_os_error()));
+        }
+        if completed != 2 {
+            return Err(HalError::I2cEndpointNotReady {
+                bus: self.bus, addr,
+                detail: format!("AT24 fixed read completed {completed} messages; exactly two required"),
+            });
+        }
         Ok(buf)
     }
 
@@ -2607,6 +2669,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod pic16_admission;
 mod pic16_runtime;
+pub(crate) mod aml_pic_lm75;
+pub(crate) mod aml_pic_application;
 
 use pic16_admission::{
     hal_busy_error, validate_admitted_batch_for_service, validate_safe_off_handle_for_service,
@@ -3078,6 +3142,13 @@ struct I2cSafetyAuthority {
     /// PIC16 cleanup could not prove the physical rails safe. This is
     /// deliberately separate from the generic terminal lifecycle barrier.
     pic16_shutdown_unresolved: AtomicBool,
+    /// A classic AML transaction failed after parser mutation. Normal close
+    /// cannot prove that an attempted cleanup restored this parser.
+    classic_aml_pic_unresolved: AtomicBool,
+    /// Successfully observed classic applications retain endpoint custody
+    /// until their fixed reserved Disable receives its exact acknowledgement.
+    /// Publication occurs inside the worker, before any caller can be dropped.
+    classic_aml_pic_active: AtomicU8,
 }
 
 impl Default for I2cSafetyAuthority {
@@ -3097,6 +3168,8 @@ impl Default for I2cSafetyAuthority {
             pic16_service_state: Mutex::new(Pic16ServiceAuthorityState::default()),
             observations: Mutex::new(I2cObservationState::default()),
             pic16_shutdown_unresolved: AtomicBool::new(false),
+            classic_aml_pic_unresolved: AtomicBool::new(false),
+            classic_aml_pic_active: AtomicU8::new(0),
         }
     }
 }
@@ -3402,6 +3475,7 @@ enum I2cServiceQuarantineReason {
     PreparationAborted,
     WorkerPanicked,
     UnresolvedPic16State,
+    UnresolvedClassicAmlPicState,
     UnexpectedLeaseDrop,
     RegistryInvariantLost,
 }
@@ -3475,6 +3549,7 @@ pub enum I2cFabricQuarantineDisposition {
     PreparationAborted,
     WorkerPanicked,
     UnresolvedPic16State,
+    UnresolvedClassicAmlPicState,
     UnexpectedLeaseDrop,
     RegistryInvariantLost,
 }
@@ -3485,6 +3560,7 @@ impl From<I2cServiceQuarantineReason> for I2cFabricQuarantineDisposition {
             I2cServiceQuarantineReason::PreparationAborted => Self::PreparationAborted,
             I2cServiceQuarantineReason::WorkerPanicked => Self::WorkerPanicked,
             I2cServiceQuarantineReason::UnresolvedPic16State => Self::UnresolvedPic16State,
+            I2cServiceQuarantineReason::UnresolvedClassicAmlPicState => Self::UnresolvedClassicAmlPicState,
             I2cServiceQuarantineReason::UnexpectedLeaseDrop => Self::UnexpectedLeaseDrop,
             I2cServiceQuarantineReason::RegistryInvariantLost => Self::RegistryInvariantLost,
         }
@@ -3925,6 +4001,10 @@ impl I2cServiceRegistryLease {
         if owns_entry {
             let quarantine_reason = if std::thread::panicking() {
                 Some(I2cServiceQuarantineReason::WorkerPanicked)
+            } else if authority.classic_aml_pic_unresolved.load(Ordering::SeqCst)
+                || authority.classic_aml_pic_active.load(Ordering::SeqCst) != 0
+            {
+                Some(I2cServiceQuarantineReason::UnresolvedClassicAmlPicState)
             } else if unresolved {
                 Some(I2cServiceQuarantineReason::UnresolvedPic16State)
             } else {
@@ -4384,6 +4464,20 @@ fn validate_transaction_message_lengths(
 /// I2C request types for the serialized service.
 #[derive(Debug)]
 pub(crate) enum I2cRequest {
+    /// One fixed original-owner enable; never a reserved SafeOff operation.
+    BbPicEnable {
+        operation: bb_pic_enable::Queued,
+        reply_tx: mpsc::SyncSender<Result<()>>,
+    },
+    /// One fixed original-owner initialization phase; never a reserved SafeOff operation.
+    BbPicInitializationExchange {
+        operation: bb_pic_initialization_exchange::Queued,
+        reply_tx: mpsc::SyncSender<Result<()>>,
+    },
+    BbPicOptionalBridge {
+        operation: bb_pic_optional_bridge::Queued,
+        reply_tx: mpsc::SyncSender<Result<()>>,
+    },
     /// Send a heartbeat to a PIC at the given address.
     Heartbeat {
         addr: u8,
@@ -4473,6 +4567,21 @@ pub(crate) enum I2cRequest {
     /// Read exactly the signed two-byte LM75 temperature register through one
     /// repeated-start transfer. Platform topology supplies the endpoint; no
     /// caller-controlled pointer, payload, or length reaches the worker.
+    ReadClassicAmlPicLm75 {
+        addr: u8,
+        route: aml_pic_lm75::AmlPicLm75Route,
+        sensor: u8,
+        deadline: Instant,
+        reply_tx: mpsc::SyncSender<Result<aml_pic_lm75::AmlPicLm75Sample>>,
+    },
+    ClassicAmlPicApplication {
+        addr: u8,
+        route: aml_pic_lm75::AmlPicLm75Route,
+        operation: aml_pic_application::Operation,
+        deadline: Instant,
+        reply_tx: mpsc::SyncSender<Result<Vec<u8>>>,
+    },
+    ReadClassicAmlFactoryPage { addr: u8, deadline: Instant, reply_tx: mpsc::SyncSender<Result<Vec<u8>>> },
     ReadLm75TemperatureRegister {
         addr: u8,
         reply_tx: mpsc::SyncSender<Result<Lm75TemperatureRegister>>,
@@ -4532,6 +4641,9 @@ fn transaction_has_wire_operation(steps: &[I2cTransactionStep]) -> bool {
 /// are excluded because their submit reply does not prove one exact endpoint.
 fn observable_operation(request: &I2cRequest) -> Option<I2cObservedOperation> {
     match request {
+        I2cRequest::BbPicEnable { .. } => None,
+        I2cRequest::BbPicInitializationExchange { .. } => None,
+        I2cRequest::BbPicOptionalBridge { .. } => None,
         I2cRequest::Heartbeat { .. } => Some(I2cObservedOperation::PicHeartbeat),
         I2cRequest::SetVoltage { .. } | I2cRequest::Pic16SetVoltageOnly { .. } => {
             Some(I2cObservedOperation::PicVoltageCommand)
@@ -4547,6 +4659,9 @@ fn observable_operation(request: &I2cRequest) -> Option<I2cObservedOperation> {
         I2cRequest::ReadHashboardEepromSpan { .. } => {
             Some(I2cObservedOperation::HashboardEepromRead)
         }
+        I2cRequest::ReadClassicAmlPicLm75 { .. } => Some(I2cObservedOperation::Lm75TemperatureRead),
+        I2cRequest::ClassicAmlPicApplication { .. } => Some(I2cObservedOperation::CompoundTransaction),
+        I2cRequest::ReadClassicAmlFactoryPage { .. } => Some(I2cObservedOperation::HashboardEepromRead),
         I2cRequest::ReadLm75TemperatureRegister { .. } => {
             Some(I2cObservedOperation::Lm75TemperatureRead)
         }
@@ -4788,6 +4903,12 @@ struct PendingI2cSafeOff {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum I2cSafeOffKey {
+    BbPicDisable {
+        addr: u8,
+        attempt: usize,
+    },
+    ClassicAmlPicDisable { addr: u8 },
+    S17DspicDisable { addr: u8 },
     Pic16BatchDisable {
         epoch: u64,
         addresses: Vec<u8>,
@@ -4817,6 +4938,11 @@ enum I2cSafeOffKey {
 }
 
 enum I2cSafeOffOperation {
+    BbPicDisable {
+        observation: bb_pic_disable::Shared,
+    },
+    ClassicAmlPicDisable { route: aml_pic_lm75::AmlPicLm75Route, deadline: Instant },
+    S17DspicDisable,
     Pic16BatchDisable {
         epoch: u64,
         addresses: Vec<u8>,
@@ -4848,6 +4974,7 @@ enum I2cSafeOffWaiter {
 }
 
 enum I2cSafeOffExecution {
+    BbPicDisable(Result<()>),
     Unit(Result<()>),
     Conditional {
         outcome: I2cConditionalSafeOffOutcome,
@@ -4863,6 +4990,8 @@ impl I2cSafeOffExecution {
     fn requires_transport_recovery(&self) -> bool {
         match self {
             Self::Unit(result) => i2c_result_requires_transport_recovery(result),
+            // Retain the fixed BB attempt and deadline; never recover or replay.
+            Self::BbPicDisable(_) => false,
             Self::Conditional {
                 transport_fault, ..
             }
@@ -5518,6 +5647,15 @@ impl PendingI2cSafeOff {
             return reconciled;
         }
         match &self.operation {
+            I2cSafeOffOperation::BbPicDisable { observation } => I2cSafeOffExecution::BbPicDisable(
+                bb_pic_disable::execute(i2c, self.addr, &self.permit, observation),
+            ),
+            I2cSafeOffOperation::ClassicAmlPicDisable { route, deadline } => I2cSafeOffExecution::Unit(
+                aml_pic_application::execute(i2c, route, aml_pic_application::Operation::Disable, &self.permit, *deadline).map(|_| ())
+            ),
+            I2cSafeOffOperation::S17DspicDisable => I2cSafeOffExecution::Unit(
+                execute_s17_dspic_disable(i2c,self.addr,&self.permit),
+            ),
             I2cSafeOffOperation::Pic16BatchDisable {
                 epoch, addresses, ..
             } => {
@@ -5596,8 +5734,17 @@ impl PendingI2cSafeOff {
     }
 
     fn complete(self, bus: u8, execution: I2cSafeOffExecution) {
+        if let I2cSafeOffOperation::BbPicDisable { observation } = &self.operation {
+            let failure = match &execution {
+                I2cSafeOffExecution::BbPicDisable(result) => {
+                    result.as_ref().err().map(ToString::to_string)
+                }
+                _ => Some("BB disable reserved completion type mismatch".into()),
+            };
+            bb_pic_disable::finalized(observation, failure.as_deref());
+        }
         match execution {
-            I2cSafeOffExecution::Unit(result) => {
+            I2cSafeOffExecution::Unit(result) | I2cSafeOffExecution::BbPicDisable(result) => {
                 for waiter in self.waiters {
                     let I2cSafeOffWaiter::Unit(waiter) = waiter else {
                         tracing::error!(bus, addr = self.addr, "SafeOff waiter type mismatch");
@@ -5693,6 +5840,13 @@ impl PendingI2cSafeOff {
         }
         let detail = "bus reopen failed while executing reserved safe-off";
         match &self.operation {
+            I2cSafeOffOperation::BbPicDisable { .. } => {
+                I2cSafeOffExecution::BbPicDisable(Err(HalError::I2cSafeOffOutcomeUnknown {
+                    bus,
+                    addr: self.addr,
+                    detail: detail.into(),
+                }))
+            }
             I2cSafeOffOperation::ConditionalPlan { .. } => I2cSafeOffExecution::Conditional {
                 outcome: I2cConditionalSafeOffOutcome {
                     prelude: I2cSafeOffPhaseOutcome::Failed(detail.into()),
@@ -5721,6 +5875,13 @@ impl PendingI2cSafeOff {
             return reconciled;
         }
         match &self.operation {
+            I2cSafeOffOperation::BbPicDisable { .. } => {
+                I2cSafeOffExecution::BbPicDisable(Err(HalError::I2cSafeOffOutcomeUnknown {
+                    bus,
+                    addr: self.addr,
+                    detail: detail.into(),
+                }))
+            }
             I2cSafeOffOperation::ConditionalPlan { .. } => I2cSafeOffExecution::Conditional {
                 outcome: I2cConditionalSafeOffOutcome {
                     prelude: I2cSafeOffPhaseOutcome::Failed(detail.into()),
@@ -5908,6 +6069,7 @@ struct I2cRequestBudget {
     admission: Duration,
     start: Duration,
     execution: Duration,
+    absolute_limit: Option<Instant>,
 }
 
 impl I2cRequestBudget {
@@ -5917,6 +6079,7 @@ impl I2cRequestBudget {
             admission: I2C_QUEUE_ADMISSION_BUDGET,
             start: I2C_QUEUE_START_BUDGET,
             execution,
+            absolute_limit: None,
         })
     }
 
@@ -5924,7 +6087,10 @@ impl I2cRequestBudget {
     /// deadline. Admission happens inside the start window, so it is clamped
     /// to the same bound rather than added a second time.
     fn for_request_until(request: &I2cRequest, deadline: Instant) -> Option<Self> {
-        let default = Self::for_request(request)?;
+        let mut default = Self::for_request(request)?;
+        // Retain the caller's Instant even when its remaining window exceeds
+        // the default budget. Preemption before submission cannot rebase it.
+        default.absolute_limit = Some(deadline);
         let remaining = deadline.checked_duration_since(Instant::now())?;
         let default_total = default.start.saturating_add(default.execution);
         if remaining >= default_total {
@@ -5939,6 +6105,7 @@ impl I2cRequestBudget {
             admission: default.admission.min(start),
             start,
             execution,
+            absolute_limit: Some(deadline),
         })
     }
 }
@@ -5967,6 +6134,19 @@ fn pic16_heartbeat_round_execution_budget(endpoint_count: usize) -> Duration {
 fn request_execution_budget(request: &I2cRequest) -> Duration {
     let byte_op = I2C_DEFAULT_KERNEL_TIMEOUT + Duration::from_millis(1);
     let budget = match request {
+        // Original fixed enable: select, write, two reads and 140 ms waits.
+        I2cRequest::BbPicEnable { .. } => {
+            duration_mul(byte_op, 4).saturating_add(Duration::from_millis(140))
+        }
+        // Fixed phase budget includes every source transition wait.
+        I2cRequest::BbPicInitializationExchange { operation, .. } => {
+            let (operations, waits) = operation.kernel_operations_and_waits();
+            duration_mul(byte_op, operations).saturating_add(waits)
+        }
+        I2cRequest::BbPicOptionalBridge { operation, .. } => {
+            let (operations, waits) = operation.kernel_operations_and_waits();
+            duration_mul(byte_op, operations).saturating_add(waits)
+        }
         // These PIC operations may flush 16 bytes after a NACK. Account for
         // every byte-level transaction, not just the successful command path.
         I2cRequest::Heartbeat { .. } => duration_mul(byte_op, 19),
@@ -5988,8 +6168,16 @@ fn request_execution_budget(request: &I2cRequest) -> Duration {
         I2cRequest::WriteBytes { .. }
         | I2cRequest::ReadBytes { .. }
         | I2cRequest::ReadHashboardEepromSpan { .. }
+        | I2cRequest::ReadClassicAmlFactoryPage { .. }
         | I2cRequest::ReadLm75TemperatureRegister { .. }
         | I2cRequest::WriteRead { .. } => I2C_DEFAULT_KERNEL_TIMEOUT,
+        I2cRequest::ReadClassicAmlPicLm75 { .. } => {
+            // 16 request bytes + 9 reply bytes + mandatory 16-byte fault flush.
+            duration_mul(byte_op, 41).saturating_add(Duration::from_millis(200))
+        }
+        I2cRequest::ClassicAmlPicApplication { operation, .. } => {
+            duration_mul(byte_op, operation.byte_budget()).saturating_add(Duration::from_millis(50))
+        }
         I2cRequest::WriteByteByte { data, .. } => duration_mul(byte_op, data.len()),
         I2cRequest::SetTimeout { .. } => Duration::from_millis(250),
         I2cRequest::RecoverUnmanagedBus { .. } => duration_mul(byte_op, 9),
@@ -6034,6 +6222,9 @@ fn transaction_execution_budget(steps: &[I2cTransactionStep]) -> Duration {
 
 fn request_addr(request: &I2cRequest) -> u8 {
     match request {
+        I2cRequest::BbPicEnable { operation, .. } => operation.address(),
+        I2cRequest::BbPicInitializationExchange { operation, .. } => operation.address(),
+        I2cRequest::BbPicOptionalBridge { operation, .. } => operation.address(),
         I2cRequest::Heartbeat { addr, .. }
         | I2cRequest::SetVoltage { addr, .. }
         | I2cRequest::Pic16SetVoltageOnly { addr, .. }
@@ -6044,6 +6235,9 @@ fn request_addr(request: &I2cRequest) -> u8 {
         | I2cRequest::WriteByteByte { addr, .. }
         | I2cRequest::ReadBytes { addr, .. }
         | I2cRequest::ReadHashboardEepromSpan { addr, .. }
+        | I2cRequest::ReadClassicAmlPicLm75 { addr, .. }
+        | I2cRequest::ClassicAmlPicApplication { addr, .. }
+        | I2cRequest::ReadClassicAmlFactoryPage { addr, .. }
         | I2cRequest::ReadLm75TemperatureRegister { addr, .. }
         | I2cRequest::WriteRead { addr, .. }
         | I2cRequest::Transaction { addr, .. }
@@ -6070,6 +6264,42 @@ fn reply_i2c_request_error(request: I2cRequest, bus: u8, detail: &str) {
     }
 
     match request {
+        I2cRequest::BbPicEnable {
+            mut operation,
+            reply_tx,
+        } => {
+            let result: Result<()> = Err(HalError::I2c {
+                bus,
+                addr: operation.address(),
+                detail: detail.into(),
+            });
+            operation.finalize(&result);
+            let _ = reply_tx.send(result);
+        }
+        I2cRequest::BbPicInitializationExchange {
+            mut operation,
+            reply_tx,
+        } => {
+            let result: Result<()> = Err(HalError::I2c {
+                bus,
+                addr: operation.address(),
+                detail: detail.into(),
+            });
+            operation.finalize(&result);
+            let _ = reply_tx.send(result);
+        }
+        I2cRequest::BbPicOptionalBridge {
+            mut operation,
+            reply_tx,
+        } => {
+            let result: Result<()> = Err(HalError::I2c {
+                bus,
+                addr: operation.address(),
+                detail: detail.into(),
+            });
+            operation.finalize(&result);
+            let _ = reply_tx.send(result);
+        }
         I2cRequest::Heartbeat { reply_tx, addr, .. }
         | I2cRequest::SetVoltage { reply_tx, addr, .. }
         | I2cRequest::Pic16SetVoltageOnly { reply_tx, addr, .. }
@@ -6090,6 +6320,9 @@ fn reply_i2c_request_error(request: I2cRequest, bus: u8, detail: &str) {
         I2cRequest::ReadBytes { reply_tx, addr, .. }
         | I2cRequest::ReadHashboardEepromSpan { reply_tx, addr, .. }
         | I2cRequest::WriteRead { reply_tx, addr, .. } => reply!(reply_tx, addr),
+        I2cRequest::ReadClassicAmlPicLm75 { reply_tx, addr, .. } => reply!(reply_tx, addr),
+        I2cRequest::ClassicAmlPicApplication { reply_tx, addr, .. } => reply!(reply_tx, addr),
+        I2cRequest::ReadClassicAmlFactoryPage { reply_tx, addr, .. } => reply!(reply_tx, addr),
         I2cRequest::ReadLm75TemperatureRegister { reply_tx, addr } => {
             reply!(reply_tx, addr)
         }
@@ -6109,6 +6342,30 @@ fn reply_i2c_request_failure(request: I2cRequest, error: HalError) {
     }
 
     match request {
+        I2cRequest::BbPicEnable {
+            mut operation,
+            reply_tx,
+        } => {
+            let result: Result<()> = Err(error);
+            operation.finalize(&result);
+            let _ = reply_tx.send(result);
+        }
+        I2cRequest::BbPicInitializationExchange {
+            mut operation,
+            reply_tx,
+        } => {
+            let result: Result<()> = Err(error);
+            operation.finalize(&result);
+            let _ = reply_tx.send(result);
+        }
+        I2cRequest::BbPicOptionalBridge {
+            mut operation,
+            reply_tx,
+        } => {
+            let result: Result<()> = Err(error);
+            operation.finalize(&result);
+            let _ = reply_tx.send(result);
+        }
         I2cRequest::Heartbeat { reply_tx, .. }
         | I2cRequest::SetVoltage { reply_tx, .. }
         | I2cRequest::Pic16SetVoltageOnly { reply_tx, .. }
@@ -6126,6 +6383,9 @@ fn reply_i2c_request_failure(request: I2cRequest, error: HalError) {
         | I2cRequest::WriteRead { reply_tx, .. } => {
             reply!(reply_tx)
         }
+        I2cRequest::ReadClassicAmlPicLm75 { reply_tx, .. } => reply!(reply_tx),
+        I2cRequest::ClassicAmlPicApplication { reply_tx, .. } => reply!(reply_tx),
+        I2cRequest::ReadClassicAmlFactoryPage { reply_tx, .. } => reply!(reply_tx),
         I2cRequest::ReadLm75TemperatureRegister { reply_tx, .. } => reply!(reply_tx),
         I2cRequest::Transaction { reply_tx, .. } => reply!(reply_tx),
         I2cRequest::ConditionalSafeOffPlan { reply_tx, .. } => reply!(reply_tx),
@@ -6161,6 +6421,30 @@ fn reply_i2c_request_busy(request: I2cRequest, bus: u8) {
         }};
     }
     match request {
+        I2cRequest::BbPicEnable {
+            mut operation,
+            reply_tx,
+        } => {
+            let result: Result<()> = Err(hal_busy_error(bus, operation.address()));
+            operation.finalize(&result);
+            let _ = reply_tx.send(result);
+        }
+        I2cRequest::BbPicInitializationExchange {
+            mut operation,
+            reply_tx,
+        } => {
+            let result: Result<()> = Err(hal_busy_error(bus, operation.address()));
+            operation.finalize(&result);
+            let _ = reply_tx.send(result);
+        }
+        I2cRequest::BbPicOptionalBridge {
+            mut operation,
+            reply_tx,
+        } => {
+            let result: Result<()> = Err(hal_busy_error(bus, operation.address()));
+            operation.finalize(&result);
+            let _ = reply_tx.send(result);
+        }
         I2cRequest::Heartbeat { reply_tx, addr, .. }
         | I2cRequest::SetVoltage { reply_tx, addr, .. }
         | I2cRequest::Pic16SetVoltageOnly { reply_tx, addr, .. }
@@ -6181,6 +6465,9 @@ fn reply_i2c_request_busy(request: I2cRequest, bus: u8) {
         I2cRequest::ReadBytes { reply_tx, addr, .. }
         | I2cRequest::ReadHashboardEepromSpan { reply_tx, addr, .. }
         | I2cRequest::WriteRead { reply_tx, addr, .. } => busy!(reply_tx, addr),
+        I2cRequest::ReadClassicAmlPicLm75 { reply_tx, addr, .. } => busy!(reply_tx, addr),
+        I2cRequest::ClassicAmlPicApplication { reply_tx, addr, .. } => busy!(reply_tx, addr),
+        I2cRequest::ReadClassicAmlFactoryPage { reply_tx, addr, .. } => busy!(reply_tx, addr),
         I2cRequest::ReadLm75TemperatureRegister { reply_tx, addr } => busy!(reply_tx, addr),
         I2cRequest::SetTimeout { reply_tx, .. } | I2cRequest::RecoverUnmanagedBus { reply_tx } => {
             busy!(reply_tx, 0)
@@ -6622,9 +6909,12 @@ impl I2cServiceHandle {
             I2cServiceSender::Raw(_) => unreachable!("raw test sender returned above"),
         };
         let submitted_at = Instant::now();
-        let admission_deadline = submitted_at + budget.admission;
-        let must_start_by = submitted_at + budget.start;
-        let reply_deadline = must_start_by + budget.execution;
+        let cap = |deadline: Instant| {
+            budget.absolute_limit.map_or(deadline, |limit| deadline.min(limit))
+        };
+        let admission_deadline = cap(submitted_at + budget.admission);
+        let must_start_by = cap(submitted_at + budget.start);
+        let reply_deadline = cap(must_start_by + budget.execution);
         let state = Arc::new(AtomicU8::new(I2C_REQUEST_QUEUED));
         let mut envelope = I2cServiceEnvelope {
             must_start_by,
@@ -6639,6 +6929,15 @@ impl I2cServiceHandle {
         };
 
         loop {
+            // Check before try_send even when the queue is empty. An expired
+            // caller must not enqueue after a pause before this submission.
+            if budget.absolute_limit.is_some_and(|limit| Instant::now() >= limit) {
+                return Err(HalError::I2c {
+                    bus: self.bus,
+                    addr,
+                    detail: "I2C caller deadline expired; request was not admitted".into(),
+                });
+            }
             match tx.try_send(envelope) {
                 Ok(()) => break,
                 Err(mpsc::TrySendError::Full(returned)) => {
@@ -6668,6 +6967,16 @@ impl I2cServiceHandle {
         let remaining = reply_deadline.saturating_duration_since(Instant::now());
         match reply_rx.recv_timeout(remaining) {
             Ok(result) => {
+                // recv_timeout may immediately return an already queued
+                // reply after this caller was descheduled past its deadline.
+                // This is not a timely observation or a worker-drain receipt.
+                if budget.absolute_limit.is_some_and(|limit| Instant::now() >= limit) {
+                    return Err(HalError::I2c {
+                        bus: self.bus,
+                        addr,
+                        detail: "I2C reply was observed after the caller deadline; hardware outcome is unknown".into(),
+                    });
+                }
                 if result.is_ok() {
                     self.record_successful_observation(addr, observation_operation);
                 }
@@ -6852,7 +7161,11 @@ impl I2cServiceHandle {
         let generation = self
             .safety
             .capture(I2cOperationIntent::SafeOff)
-            .expect("SafeOff admission is valid in every lifecycle state");
+            .map_err(|detail| HalError::I2cSafetySuperseded {
+                bus: self.bus,
+                addr,
+                detail: format!("SafeOff request was not admitted: {detail}"),
+            })?;
         commit(I2cSafetyPermit {
             authority: Arc::clone(&self.safety),
             intent: I2cOperationIntent::SafeOff,
@@ -8077,6 +8390,195 @@ impl I2cServiceHandle {
         self.transaction_with_intent(label.internal_intent(), addr, steps)
     }
 
+    /// Submit only the existing native BB application query within the
+    /// caller's absolute deadline, through this same service and normal lane.
+    /// No caller-selected frame, intent or endpoint address is accepted.
+    /// A started backend operation can still outlive the deadline; an error
+    /// does not prove worker drain or supply unavailable partial reply bytes.
+    pub(crate) fn read_bb_pic_application_at(
+        &self,
+        chain: usize,
+        deadline: Instant,
+    ) -> Result<Vec<Vec<u8>>> {
+        let addr = crate::bb_pic_application::native_pic_address(chain).ok_or_else(|| {
+            HalError::I2cEndpointRefused {
+                bus: self.bus,
+                addr: 0,
+                detail: "BB application query requires native slot0..2".into(),
+            }
+        })?;
+        if self.bus != 0 {
+            return Err(HalError::I2cEndpointRefused {
+                bus: self.bus,
+                addr,
+                detail: "BB application query requires the retained bus-0 service".into(),
+            });
+        }
+        let steps = crate::bb_pic_application::transaction_steps();
+        validate_transaction_message_lengths(self.bus, addr, &steps)?;
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        let request = I2cRequest::Transaction {
+            addr,
+            steps,
+            reply_tx,
+        };
+        let budget = I2cRequestBudget::for_request_until(&request, deadline).ok_or_else(|| {
+            HalError::I2cEndpointNotReady {
+                bus: self.bus,
+                addr,
+                detail: "BB application query deadline elapsed before admission".into(),
+            }
+        })?;
+        self.submit_with_intent_budget(
+            addr,
+            I2cMutationLabel::QueryPrelude.internal_intent(),
+            request,
+            reply_rx,
+            budget,
+        )
+    }
+
+    /// Submit a fixed existing-runtime BB LM75 diagnostic query on the normal
+    /// lane of this retained service. No caller frame, intent or cadence is
+    /// accepted. Returned bytes have no freshness or physical sensor authority.
+    /// Started transfer timeout remains unknown and does not join the service.
+    pub(crate) fn read_bb_pic_lm75_at(
+        &self,
+        chain: usize,
+        sensor_address: u8,
+        deadline: Instant,
+    ) -> Result<Vec<Vec<u8>>> {
+        let addr = crate::bb_pic_application::native_pic_address(chain).ok_or_else(|| {
+            HalError::I2cEndpointRefused {
+                bus: self.bus,
+                addr: 0,
+                detail: "BB LM75 query requires native slot0..2".into(),
+            }
+        })?;
+        if self.bus != 0 {
+            return Err(HalError::I2cEndpointRefused {
+                bus: self.bus,
+                addr,
+                detail: "BB LM75 query requires the retained bus-0 service".into(),
+            });
+        }
+        let steps = crate::bb_pic_lm75::transaction_steps(
+            sensor_address,
+            crate::bb_pic_lm75::QueryCadence::ExistingRuntime,
+        )
+        .ok_or_else(|| HalError::I2cEndpointRefused {
+            bus: self.bus,
+            addr,
+            detail: "BB LM75 query requires sensor address0x48..0x4b".into(),
+        })?;
+        validate_transaction_message_lengths(self.bus, addr, &steps)?;
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        let request = I2cRequest::Transaction {
+            addr,
+            steps,
+            reply_tx,
+        };
+        let budget = I2cRequestBudget::for_request_until(&request, deadline).ok_or_else(|| {
+            HalError::I2cEndpointNotReady {
+                bus: self.bus,
+                addr,
+                detail: "BB LM75 query deadline elapsed before admission".into(),
+            }
+        })?;
+        self.submit_with_intent_budget(
+            addr,
+            I2cMutationLabel::QueryPrelude.internal_intent(),
+            request,
+            reply_rx,
+            budget,
+        )
+    }
+
+    /// Observe the fixed HW76/FW17 APW profile through this retained bus-1
+    /// service. Exact decoded identity precedes any calibration/DAC query.
+    /// No caller frame, opcode, intent, cadence or endpoint is accepted.
+    /// The returned attempt preserves every available prior phase on failure;
+    /// neither its completion nor an error joins or closes this service.
+    pub(crate) fn read_bb_apw_profile_at(
+        &self,
+        deadline: Instant,
+    ) -> crate::bb_apw_diagnostics::ProfileAttempt {
+        use crate::bb_apw_diagnostics::{ProfileAttempt, Query, QueryAttempt, ADDRESS};
+        let mut attempt = ProfileAttempt::new(deadline);
+        if self.bus != 1 {
+            attempt.stop("BB APW profile requires the retained bus-1 service");
+            return attempt;
+        }
+        // Query order is internal. A failed hardware or firmware reply must
+        // prevent opcode06 from reaching a foreign PSU protocol.
+        for query in [
+            Query::Hardware,
+            Query::Firmware,
+            Query::Calibration,
+            Query::Dac,
+        ] {
+            if Instant::now() >= deadline || self.terminal_safe_off_is_latched() {
+                attempt.stop("BB APW profile deadline or terminal latch before query");
+                return attempt;
+            }
+            let prepared_at = Instant::now();
+            let returned =
+                (|| {
+                    let steps = query.steps()?;
+                    validate_transaction_message_lengths(self.bus, ADDRESS, &steps)?;
+                    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+                    let request = I2cRequest::Transaction {
+                        addr: ADDRESS,
+                        steps,
+                        reply_tx,
+                    };
+                    let budget = I2cRequestBudget::for_request_until(&request, deadline)
+                        .ok_or_else(|| HalError::I2cEndpointNotReady {
+                            bus: self.bus,
+                            addr: ADDRESS,
+                            detail: "BB APW profile deadline elapsed before admission".into(),
+                        })?;
+                    self.submit_with_intent_budget(
+                        ADDRESS,
+                        I2cMutationLabel::QueryPrelude.internal_intent(),
+                        request,
+                        reply_rx,
+                        budget,
+                    )
+                })();
+            let returned_at = Instant::now();
+            let decoded = match &returned {
+                Ok(reads) => query.decode(reads),
+                Err(error) => Err(error.to_string()),
+            };
+            let failure = decoded.as_ref().err().cloned();
+            attempt.queries.push(QueryAttempt {
+                query,
+                prepared_at,
+                returned_at,
+                returned_reads: returned.ok(),
+                decoded,
+            });
+            if let Some(error) = failure {
+                attempt.stop(error);
+                return attempt;
+            }
+            // Preserve returned bytes even when observation/cancellation makes
+            // them late. No later query may follow this refused phase.
+            if Instant::now() >= deadline || self.terminal_safe_off_is_latched() {
+                attempt.stop("BB APW profile deadline or terminal latch after query");
+                return attempt;
+            }
+        }
+        let completed_at = Instant::now();
+        if completed_at >= deadline || self.terminal_safe_off_is_latched() {
+            attempt.stop("BB APW profile deadline or terminal latch at completion");
+            return attempt;
+        }
+        attempt.caller_completed_at = Some(completed_at);
+        attempt
+    }
+
     /// Execute a fixed dsPIC voltage-disable plan through the reserved
     /// terminal-safe lane. No caller-provided bytes can acquire SafeOff
     /// authority through this API.
@@ -8098,6 +8600,39 @@ impl I2cServiceHandle {
             }
         };
         self.safe_off_transaction(addr, vec![I2cTransactionStep::Write(frame)])
+    }
+
+    /// Fixed S17 production disable: bytewise framed command and correlated
+    /// two-byte acknowledgement. This does not reuse the write-only S19
+    /// disable receipt or expose caller-supplied bytes to the reserved lane.
+    pub fn disable_s17_dspic_voltage(&self, addr: u8) -> Result<()> {
+        self.disable_s17_dspic_voltage_with_budget(addr,I2C_SAFE_OFF_RECEIPT_BUDGET)
+    }
+
+    /// NBP1901 PIC89 uses the same fixed framed disable and [0x15, 0x01]
+    /// acknowledgement as the S17 reserved transaction. The retained 500 ms
+    /// wait exceeds stock's 300 ms minimum. This alias admits no new endpoint,
+    /// payload or ordinary post-terminal mutation.
+    pub fn disable_nbp1901_pic89_voltage(&self, addr: u8) -> Result<()> {
+        self.disable_s17_dspic_voltage(addr)
+    }
+
+    fn disable_s17_dspic_voltage_with_budget(&self, addr: u8, budget: Duration) -> Result<()> {
+        if self.bus != 0 || !(0x20..=0x22).contains(&addr) {
+            return Err(HalError::I2cEndpointRefused {
+                bus:self.bus, addr,
+                detail:"S17 dsPIC disable requires bus 0 address 0x20..=0x22".into(),
+            });
+        }
+        let mailbox=self.safe_off_mailbox.as_ref().ok_or_else(|| HalError::I2c {
+            bus:self.bus,addr,detail:"S17 disable requires a reserved service worker".into(),
+        })?;
+        let (reply_tx,reply_rx)=mpsc::sync_channel(1);
+        self.commit_pre_management_safe_off(addr,|permit| mailbox.enqueue(
+            self.bus,addr,I2cSafeOffKey::S17DspicDisable {addr},
+            I2cSafeOffOperation::S17DspicDisable,permit,I2cSafeOffWaiter::Unit(reply_tx),
+        ))?;
+        wait_for_reserved_safe_off_receipt_with_budget(self.bus,addr,reply_rx,"S17 acknowledged PIC disable",budget)
     }
 
     /// Execute the fixed PIC1704 `REG_CONTROL=DC_DC_OFF` plan through the
@@ -8385,9 +8920,121 @@ fn map_async_i2c_join<T>(
     })
 }
 
+#[cfg(all(test, feature = "sim-hal"))]
+#[path = "i2c_absolute_deadline_tests.rs"]
+mod absolute_deadline_tests;
+
+#[cfg(all(test, feature = "sim-hal"))]
+#[path = "i2c_bb_lm75_tests.rs"]
+mod bb_lm75_tests;
+
+#[path = "i2c_bb_apw_voltage_execution.rs"]
+pub(crate) mod bb_apw_voltage_execution;
+
+#[cfg(all(test, feature = "sim-hal"))]
+#[path = "i2c_bb_apw_profile_tests.rs"]
+mod bb_apw_profile_tests;
+
 #[cfg(test)]
 mod i2c_service_deadline_tests {
+    #[cfg(feature = "sim-hal")]
+    struct S17DisableBackend {
+        identity: usize,
+        writes: Mutex<Vec<(u8,Vec<u8>)>>,
+        replies: Mutex<VecDeque<Vec<u8>>>,
+    }
+
+    #[cfg(feature = "sim-hal")]
+    impl S17DisableBackend {
+        fn new(replies: Vec<Vec<u8>>) -> Self {
+            Self {identity:next_test_service_identity(),writes:Mutex::new(Vec::new()),replies:Mutex::new(replies.into())}
+        }
+    }
+
+    #[cfg(feature = "sim-hal")]
+    impl I2cSimBackend for S17DisableBackend {
+        fn write(&self,_bus:u8,addr:u8,bytes:&[u8])->Result<usize> {
+            self.writes.lock().unwrap().push((addr,bytes.to_vec()));
+            assert_eq!(bytes.len(),1,"S17 PIC commands require one I2C operation per byte");
+            Ok(1)
+        }
+        fn read(&self,_bus:u8,_addr:u8,bytes:&mut[u8])->Result<usize> {
+            assert_eq!(bytes.len(),1);
+            let reply=self.replies.lock().unwrap().pop_front().unwrap_or_default();
+            bytes[..reply.len()].copy_from_slice(&reply);
+            Ok(reply.len())
+        }
+        fn write_read(&self,_bus:u8,_addr:u8,_write:&[u8],_read:&mut[u8])->Result<()> {
+            panic!("S17 framed disable must not use combined I2C_RDWR")
+        }
+        fn service_identity(&self)->Option<usize> {Some(self.identity)}
+    }
+
+    #[cfg(feature = "sim-hal")]
+    #[test]
+    fn s17_disable_reserved_worker_requires_the_actual_complete_ack() {
+        let backend=Arc::new(S17DisableBackend::new(vec![vec![0x15],vec![1]]));
+        let service=spawn_sim_i2c_service(0,backend.clone(),(0x50..=0x57).collect()).unwrap();
+        service.latch_terminal_safe_off();
+        service.disable_s17_dspic_voltage(0x21).unwrap();
+        let expected:Vec<_>=[0x55,0xaa,5,0x15,0,0,0x1a].into_iter().map(|v|(0x21,vec![v])).collect();
+        assert_eq!(*backend.writes.lock().unwrap(),expected);
+        assert!(service.disable_s17_dspic_voltage(0x50).is_err());
+        assert_eq!(backend.writes.lock().unwrap().len(),7);
+    }
+
+    #[cfg(feature = "sim-hal")]
+    #[test]
+    fn s17_disable_partial_or_wrong_ack_is_not_safe_off_evidence() {
+        for replies in [vec![vec![0x15],vec![]],vec![vec![0x16],vec![1]],vec![vec![0x15],vec![0]]] {
+            let backend=Arc::new(S17DisableBackend::new(replies));
+            let service=spawn_sim_i2c_service(0,backend,(0x50..=0x57).collect()).unwrap();
+            service.latch_terminal_safe_off();
+            assert!(service.disable_s17_dspic_voltage(0x20).is_err());
+        }
+    }
+
+    #[test]
+    fn s17_disable_unobserved_reserved_work_is_typed_unknown() {
+        let (mut service,_normal_queue)=I2cServiceHandle::for_unit_tests();
+        let mailbox=Arc::new(I2cSafeOffMailbox::default());
+        service.safe_off_mailbox=Some(mailbox.clone());
+        let error=service.disable_s17_dspic_voltage_with_budget(0x20,Duration::from_millis(1)).unwrap_err();
+        assert!(matches!(error,HalError::I2cSafeOffOutcomeUnknown {..}));
+        assert_eq!(mailbox.lock_pending().len(),1,"accepted disable remains owned after caller timeout");
+    }
     use super::*;
+
+    #[test]
+    fn at24_identity_transport_only_falls_back_for_unbound_endpoints() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("dcentos-at24-{}-{stamp}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        assert!(open_at24_identity_file(&root).unwrap().is_none());
+        // A driver binding without a readable attribute must not be bypassed,
+        // including a dangling symlink while a device is being removed.
+        std::os::unix::fs::symlink("/nonexistent-at24-driver", root.join("driver")).unwrap();
+        assert_eq!(open_at24_identity_file(&root).unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        fs::write(root.join("eeprom"), [5, 17, 33]).unwrap();
+        let mut file = open_at24_identity_file(&root).unwrap().unwrap();
+        let mut page = [0; 3];
+        file.read_exact(&mut page).unwrap();
+        assert_eq!(page, [5, 17, 33]);
+        fs::remove_file(root.join("eeprom")).unwrap();
+        fs::remove_file(root.join("driver")).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn at24_fixed_read_nacks_do_not_recover_or_reset_the_adapter() {
+        for errno in [libc::ENXIO, libc::EREMOTEIO, libc::EIO] {
+            let error = map_at24_read_error(1, 0x50, "fixed offset zero", std::io::Error::from_raw_os_error(errno));
+            assert!(matches!(error, HalError::I2cEndpointNotReady { .. }));
+            let result: Result<()> = Err(error);
+            assert!(!i2c_result_requires_transport_recovery(&result));
+        }
+    }
 
     #[test]
     fn retained_endpoint_observations_require_successful_exact_service_replies() {
@@ -10170,6 +10817,7 @@ mod i2c_service_deadline_tests {
                 admission: Duration::from_millis(5),
                 start: Duration::from_millis(10),
                 execution: Duration::from_millis(10),
+                absolute_limit: None,
             },
         );
 
@@ -10479,6 +11127,72 @@ mod i2c_service_deadline_tests {
         assert!(!unknown.requires_transport_recovery());
     }
 
+    #[cfg(feature = "sim-hal")]
+    #[test]
+    fn closed_original_service_public_disable_is_typed_not_admitted_without_wire() {
+        use crate::platform::sim::{SimControllerKind, SimI2cBackend};
+
+        let backend = Arc::new(SimI2cBackend::with_controller(SimControllerKind::Pic16));
+        let mut owner = spawn_owned_sim_i2c_service(34, backend.clone(), Vec::new()).unwrap();
+        let handle = owner.request_handle();
+        let mailbox = handle.safe_off_mailbox.as_ref().unwrap();
+        let receipt = owner
+            .close_and_join_until(Instant::now() + Duration::from_secs(3))
+            .expect("close and join the original service before stale public requests");
+        assert_eq!(receipt.bus(), 34);
+        assert!(owner.worker.is_none());
+        let _opening_and_close_trace = backend.drain_trace().unwrap();
+        for firmware in [I2cPicFirmware::Stock, I2cPicFirmware::BraiinsOs] {
+            let generation = handle.safety.generation.load(Ordering::SeqCst);
+            let error = handle.disable_voltage(0x55, firmware).unwrap_err();
+            assert!(matches!(
+                error,
+                HalError::I2cSafetySuperseded { bus: 34, addr: 0x55, detail }
+                    if detail == "SafeOff request was not admitted: I2C service lifecycle close is in progress"
+            ));
+            assert!(handle.safety.generation.load(Ordering::SeqCst) > generation);
+            assert_eq!(mailbox.pending_endpoint_count(), 0);
+            assert_eq!(mailbox.pending_waiter_count(0x55), 0);
+            assert!(backend.drain_trace().unwrap().is_empty());
+        }
+    }
+
+    #[cfg(feature = "sim-hal")]
+    #[test]
+    fn closed_original_service_reserved_transaction_is_typed_not_admitted_without_wire() {
+        use crate::platform::sim::{SimControllerKind, SimI2cBackend};
+
+        let backend = Arc::new(SimI2cBackend::with_controller(SimControllerKind::Dspic));
+        let mut owner = spawn_owned_sim_i2c_service(35, backend.clone(), Vec::new()).unwrap();
+        let handle = owner.request_handle();
+        let mailbox = handle.safe_off_mailbox.as_ref().unwrap();
+        let receipt = owner
+            .close_and_join_until(Instant::now() + Duration::from_secs(3))
+            .expect("close and join the original service before stale reserved transactions");
+        assert_eq!(receipt.bus(), 35);
+        assert!(owner.worker.is_none());
+        let _opening_and_close_trace = backend.drain_trace().unwrap();
+        let generation = handle.safety.generation.load(Ordering::SeqCst);
+        let error = handle
+            .transaction_with_intent(
+                I2cOperationIntent::SafeOff,
+                0x20,
+                vec![I2cTransactionStep::Write(vec![
+                    0x55, 0xaa, 5, 0x15, 0, 0, 0x1a,
+                ])],
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            HalError::I2cSafetySuperseded { bus: 35, addr: 0x20, detail }
+                if detail == "SafeOff request was not admitted: I2C service lifecycle close is in progress"
+        ));
+        assert!(handle.safety.generation.load(Ordering::SeqCst) > generation);
+        assert_eq!(mailbox.pending_endpoint_count(), 0);
+        assert_eq!(mailbox.pending_waiter_count(0x20), 0);
+        assert!(backend.drain_trace().unwrap().is_empty());
+    }
+
     #[test]
     fn explicit_safe_off_transaction_on_raw_handle_submits_once_without_recursion() {
         let (handle, rx) = I2cServiceHandle::for_unit_tests();
@@ -10545,6 +11259,7 @@ mod i2c_service_deadline_tests {
                 admission: Duration::from_millis(5),
                 start: Duration::from_millis(10),
                 execution: Duration::from_millis(10),
+                absolute_limit: None,
             },
         );
         let rendered = result.unwrap_err().to_string();
@@ -10581,6 +11296,7 @@ mod i2c_service_deadline_tests {
                 admission: Duration::from_millis(5),
                 start: Duration::from_millis(10),
                 execution: Duration::from_millis(10),
+                absolute_limit: None,
             },
         );
         let rendered = result.unwrap_err().to_string();
@@ -11992,6 +12708,30 @@ pub(crate) fn spawn_owned_sim_i2c_service(
 #[cfg(feature = "sim-hal")]
 fn process_sim_i2c_request(i2c: &mut I2cBus, req: I2cRequest, permit: &I2cSafetyPermit) {
     match req {
+        I2cRequest::BbPicEnable {
+            mut operation,
+            reply_tx,
+        } => {
+            let result = operation.execute(i2c, permit);
+            operation.finalize(&result);
+            let _ = reply_tx.send(result);
+        }
+        I2cRequest::BbPicInitializationExchange {
+            mut operation,
+            reply_tx,
+        } => {
+            let result = operation.execute(i2c, permit);
+            operation.finalize(&result);
+            let _ = reply_tx.send(result);
+        }
+        I2cRequest::BbPicOptionalBridge {
+            mut operation,
+            reply_tx,
+        } => {
+            let result = operation.execute(i2c, permit);
+            operation.finalize(&result);
+            let _ = reply_tx.send(result);
+        }
         I2cRequest::Heartbeat {
             addr,
             firmware,
@@ -12097,6 +12837,18 @@ fn process_sim_i2c_request(i2c: &mut I2cBus, req: I2cRequest, permit: &I2cSafety
             let result = permit
                 .begin_stage(i2c.bus, addr, "hashboard EEPROM identity read")
                 .and_then(|_stage| i2c.read_protected_hashboard_eeprom_span(addr, span));
+            let _ = reply_tx.send(result);
+        }
+        I2cRequest::ReadClassicAmlPicLm75 { route, sensor, deadline, reply_tx, .. } => {
+            let result = aml_pic_lm75::execute(i2c, &route, sensor, &permit, deadline);
+            let _ = reply_tx.send(result);
+        }
+        I2cRequest::ClassicAmlPicApplication { route, operation, deadline, reply_tx, .. } => {
+            let result = aml_pic_application::execute(i2c, &route, operation, permit, deadline);
+            let _ = reply_tx.send(result);
+        }
+        I2cRequest::ReadClassicAmlFactoryPage { addr, deadline, reply_tx } => {
+            let result = aml_pic_application::execute_factory_page(i2c, addr, permit, deadline);
             let _ = reply_tx.send(result);
         }
         I2cRequest::ReadLm75TemperatureRegister { addr, reply_tx } => {
@@ -12667,6 +13419,40 @@ fn i2c_service_loop(
             continue;
         }
 
+        // A fixed enable cannot substitute a reopened bus for its original owner.
+        if i2c_bus.is_none() && matches!(&req, I2cRequest::BbPicEnable { .. }) {
+            reply_i2c_request_error(
+                req,
+                bus,
+                "BB fixed enable requires original live bus; automatic reopen refused",
+            );
+            state.store(I2C_REQUEST_FINISHED, Ordering::Release);
+            continue;
+        }
+
+        // A fixed phase cannot substitute a reopened bus for its original owner.
+        if i2c_bus.is_none()
+            && matches!(&req, I2cRequest::BbPicInitializationExchange { .. })
+        {
+            reply_i2c_request_error(
+                req,
+                bus,
+                "BB fixed initialization exchange requires original live bus; automatic reopen refused",
+            );
+            state.store(I2C_REQUEST_FINISHED, Ordering::Release);
+            continue;
+        }
+        // A fixed optional sweep cannot substitute a reopened bus for its original owner.
+        if i2c_bus.is_none() && matches!(&req, I2cRequest::BbPicOptionalBridge { .. }) {
+            reply_i2c_request_error(
+                req,
+                bus,
+                "BB fixed optional bridge sweep requires original live bus; automatic reopen refused",
+            );
+            state.store(I2C_REQUEST_FINISHED, Ordering::Release);
+            continue;
+        }
+
         // Reopen bus if previous operations lost the fd
         if i2c_bus.is_none() {
             i2c_bus = reopen_i2c_service_bus(
@@ -12686,6 +13472,30 @@ fn i2c_service_loop(
         let i2c = i2c_bus.as_mut().unwrap();
 
         match req {
+            I2cRequest::BbPicEnable {
+                mut operation,
+                reply_tx,
+            } => {
+                let result = operation.execute(i2c, &permit);
+                operation.finalize(&result);
+                let _ = reply_tx.send(result);
+            }
+            I2cRequest::BbPicInitializationExchange {
+                mut operation,
+                reply_tx,
+            } => {
+                let result = operation.execute(i2c, &permit);
+                operation.finalize(&result);
+                let _ = reply_tx.send(result);
+            }
+            I2cRequest::BbPicOptionalBridge {
+                mut operation,
+                reply_tx,
+            } => {
+                let result = operation.execute(i2c, &permit);
+                operation.finalize(&result);
+                let _ = reply_tx.send(result);
+            }
             I2cRequest::Pic16Admission {
                 plans,
                 batch,
@@ -12932,6 +13742,18 @@ fn i2c_service_loop(
                 } else {
                     consecutive_resets = 0;
                 }
+                let _ = reply_tx.send(result);
+            }
+            I2cRequest::ReadClassicAmlPicLm75 { route, sensor, deadline, reply_tx, .. } => {
+                let result = aml_pic_lm75::execute(i2c, &route, sensor, &permit, deadline);
+                let _ = reply_tx.send(result);
+            }
+            I2cRequest::ClassicAmlPicApplication { route, operation, deadline, reply_tx, .. } => {
+                let result = aml_pic_application::execute(i2c, &route, operation, &permit, deadline);
+                let _ = reply_tx.send(result);
+            }
+            I2cRequest::ReadClassicAmlFactoryPage { addr, deadline, reply_tx } => {
+                let result = aml_pic_application::execute_factory_page(i2c, addr, &permit, deadline);
                 let _ = reply_tx.send(result);
             }
             I2cRequest::ReadLm75TemperatureRegister { addr, reply_tx } => {
@@ -13387,6 +14209,24 @@ mod dspic_mv_clamp_tests {
         assert_eq!(clamp_dspic_mv(14_500), 14_500); // boundary
         assert_eq!(clamp_dspic_mv(15_000), 14_500); // over-cap → clamped
         assert_eq!(clamp_dspic_mv(15_140), 14_500); // dsPIC envelope max → clamped
+    }
+}
+
+fn execute_s17_dspic_disable(i2c: &mut I2cBus,addr: u8,permit: &I2cSafetyPermit) -> Result<()> {
+    let result=execute_transaction(i2c,addr,vec![
+        I2cTransactionStep::WriteByteByByte(vec![0x55,0xaa,5,0x15,0,0,0x1a]),
+        I2cTransactionStep::SleepMs(500),
+        I2cTransactionStep::Read(1), I2cTransactionStep::Read(1),
+    ],permit);
+    match result {
+        Ok(reads) if reads == [vec![0x15],vec![1]] => Ok(()),
+        Ok(_) => Err(HalError::PsuProtocol("S17 PIC disable acknowledgement missing or mismatched")),
+        Err(error) => {
+            // Flush the PIC parser after NACK using the same reserved owner;
+            // this fixed endpoint can never select a protected EEPROM.
+            let _=execute_transaction(i2c,addr,vec![I2cTransactionStep::WriteByteByByte(vec![0;16])],permit);
+            Err(error)
+        }
     }
 }
 
@@ -14062,3 +14902,21 @@ mod axi_iic_recovery_tests {
         assert!(AXI_IIC_SCL_TIER_LIMIT < AXI_IIC_GIVE_UP_AFTER);
     }
 }
+
+#[path = "i2c_bb_pic_keepalive.rs"]
+pub(crate) mod bb_pic_keepalive;
+
+#[path = "i2c_bb_pic_disable.rs"]
+pub(crate) mod bb_pic_disable;
+#[path = "i2c_bb_pic_initial_disable.rs"]
+pub(crate) mod bb_pic_initial_disable;
+
+
+#[path = "i2c_bb_pic_enable.rs"]
+pub(crate) mod bb_pic_enable;
+
+#[path = "i2c_bb_pic_initialization_exchange.rs"]
+pub(crate) mod bb_pic_initialization_exchange;
+
+#[path = "i2c_bb_pic_optional_bridge.rs"]
+pub(crate) mod bb_pic_optional_bridge;

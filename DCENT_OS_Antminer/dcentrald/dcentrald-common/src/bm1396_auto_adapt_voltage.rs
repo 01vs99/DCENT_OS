@@ -125,7 +125,14 @@ impl std::fmt::Display for Bm1396AutoAdaptVoltageError {
 impl std::error::Error for Bm1396AutoAdaptVoltageError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bm1396VoltagePhase {
+    PllAutoAdapt,
+    S17eFactoryWorking,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bm1396AutoAdaptVoltagePlan {
+    pub phase: Bm1396VoltagePhase,
     pub release: Bm1396FirmwareRelease,
     pub model: Bm1396Model,
     pub profile: Bm1396AutoAdaptProfile,
@@ -313,6 +320,7 @@ pub fn plan_bm1396_auto_adapt_voltage(
     let above_adc_threshold = frequency_mhz > BM1396_AUTO_ADAPT_POST_PLL_ADC_THRESHOLD_MHZ;
 
     Ok(Bm1396AutoAdaptVoltagePlan {
+        phase: Bm1396VoltagePhase::PllAutoAdapt,
         release,
         model,
         profile,

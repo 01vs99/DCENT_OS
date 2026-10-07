@@ -120,9 +120,19 @@ TOLERATED_ORPHANS = {
     "Apw12SmbusBackend": (
         "2026-08-03: complete APW12 SMBus driver (CV1835/AM335x/AML, "
         "psu_apw12_smbus.rs:380); all 16 constructions are #[cfg(test)]. "
-        "Both would-be orchestrators (cvitek_cold_boot.rs:523, "
-        "beaglebone_cold_boot.rs:392) are themselves production-unreachable. "
+        "Historical would-be orchestrators (retired cvitek_cold_boot.rs:523, "
+        "beaglebone_cold_boot.rs:392) were production-unreachable in that audit; CV runtime and markers retired in L17. "
         "Wiring = H4 G-PSU2, a rail-energization change gated separately."
+    ),
+    "S21DiscoverOnlyRail": (
+        "2026-09-15: L14 S21-family PSU discovery profile "
+        "(voltage_rail_adapters.rs:384) — DELIBERATELY production-unwired: "
+        "the reviewed design is passive discover-only bench cards "
+        "(dcentrald-asic/examples/s21_psu_discover.rs; no bus probe, no "
+        "PSU command, no fan write). SUPPORT_MATRIX.md S21-class ceiling "
+        "section records external-DAC as unsupported. Wiring becomes "
+        "legitimate only with a physical PSU protocol law (T21/S21+ stay "
+        "undriven; no sibling polarity inherited)."
     ),
     "Apw12PlusBackend": (
         "2026-08-03: complete APW12+ register driver (S21 family, "
@@ -148,7 +158,7 @@ TOLERATED_ORPHANS = {
         "2026-08-03: CV1835 PIC1704 controller (pic1704/service.rs:188); "
         "zero constructions anywhere, even tests (programmer.rs:554 notes a "
         "real one cannot be built without hardware). Only would-be callers "
-        "are commented-out blocks in beaglebone.rs:1394 and cvitek.rs:362. "
+        "were historical commented blocks in beaglebone.rs:1394 and now-retired cvitek.rs:362; CV markers are now test-only. "
         "Programmer variants are recovery-tool-gated by design."
     ),
     # -- DELIBERATE fail-closed recovery tokens (do NOT wire) ---------------
@@ -223,11 +233,10 @@ TOLERATED_ORPHANS = {
         "2026-08-03: psu.rs:193; volts-flavored setter, zero callers "
         "(production path uses set_voltage at psu.rs:2542)."
     ),
-    "ApwUartTunnel::read_status_0x03": (
-        "2026-08-03: psu_apw_uart_tunnel.rs:657; opcode-0x03 status read "
-        "whose meaning is not yet RE'd; zero callers. Diagnostic capability "
-        "parked pending RE."
-    ),
+    # 2026-09-10: read_status_0x03 removed from the zero-anywhere method
+    # ledger: raw_status_requires_complete_word_even_with_valid_frame_checksum
+    # now calls it in tests. This is raw-word/length coverage, not a
+    # production consumer, voltage interpretation, or readiness claim.
     "DspicController::from_endpoint": (
         "2026-08-03: dspic/mod.rs:1476; endpoint-session constructor path "
         "with zero callers (production constructs via services)."

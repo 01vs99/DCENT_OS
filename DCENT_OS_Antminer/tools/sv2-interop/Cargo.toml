@@ -1,0 +1,27 @@
+[package]
+name = "dcentos-sv2-interop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+
+# Deliberately isolated: SRI is an independent host-test oracle, never firmware.
+[workspace]
+resolver = "2"
+
+[dev-dependencies]
+dcentrald-stratum = { path = "../../dcentrald/dcentrald-stratum" }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+sha2 = "=0.10.9"
+bs58 = { version = "=0.5.1", features = ["check"] }
+secp256k1 = "=0.28.2"
+noise_sv2 = { git = "https://github.com/stratum-mining/stratum", rev = "d3a05cfa8b51c6923df81f42bdac7f76b2147830" }
+binary_sv2 = { git = "https://github.com/stratum-mining/stratum", rev = "d3a05cfa8b51c6923df81f42bdac7f76b2147830" }
+framing_sv2 = { git = "https://github.com/stratum-mining/stratum", rev = "d3a05cfa8b51c6923df81f42bdac7f76b2147830" }
+mining_sv2 = { git = "https://github.com/stratum-mining/stratum", rev = "d3a05cfa8b51c6923df81f42bdac7f76b2147830" }
+common_messages_sv2 = { git = "https://github.com/stratum-mining/stratum", rev = "d3a05cfa8b51c6923df81f42bdac7f76b2147830" }
+
+[profile.dev]
+debug = 0
+incremental = false

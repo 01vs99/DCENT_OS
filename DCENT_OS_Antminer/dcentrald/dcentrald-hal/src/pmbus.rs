@@ -639,7 +639,7 @@ impl PmbusTelemetryGate {
     /// `0`, `true`, garbage — leaves telemetry disabled. Experimental
     /// hardware features do not get to be enabled by accident.
     pub fn from_env() -> Self {
-        Self::from_raw(std::env::var(PMBUS_TELEMETRY_ENV).ok().as_deref())
+        Self::from_raw(dcentrald_common::lab_env::var(PMBUS_TELEMETRY_ENV).ok().as_deref())
     }
 
     /// Pure resolver for the gate, so the policy is testable without touching

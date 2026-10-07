@@ -1,0 +1,22 @@
+#!/bin/sh
+# Exact native executable; no GPIO button or shell-config override is imported.
+set -eu
+DAEMON=/usr/bin/dcentos-discovery
+PIDFILE=/run/dcentos-discovery.pid
+LOGFILE=/tmp/dcentos-discovery.log
+case "${1:-}" in
+    start)
+        /usr/bin/python3 /usr/libexec/dcentos/native-zynq-sd-storage.py --verify
+        [ -f "$DAEMON" ] && [ ! -L "$DAEMON" ] && [ -x "$DAEMON" ] || exit 1
+        [ "$(sha256sum "$DAEMON" | cut -d ' ' -f 1)" = \
+          "$(cat /etc/dcentos/dcentos-discovery.sha256)" ] || exit 1
+        start-stop-daemon -S -b -m -p "$PIDFILE" --exec "$DAEMON" -- \
+            --interval-seconds 60 --api-port 8080 >>"$LOGFILE" 2>&1
+        ;;
+    stop)
+        start-stop-daemon -K -q -p "$PIDFILE" --exec "$DAEMON" || exit 1
+        rm -f "$PIDFILE"
+        ;;
+    restart) "$0" stop && exec "$0" start ;;
+    *) exit 1 ;;
+esac

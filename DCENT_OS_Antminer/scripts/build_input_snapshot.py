@@ -19,6 +19,7 @@ import secrets
 import stat
 import sys
 import tempfile
+import held_assets
 from typing import (
     Any,
     BinaryIO,
@@ -136,8 +137,8 @@ def _validate_relative_path(value: str, label: str) -> Tuple[str, ...]:
 
 
 def _relative_to_root(root: pathlib.Path, path: pathlib.Path, label: str) -> str:
-    root_abs = pathlib.Path(os.path.abspath(str(root)))
-    path_abs = pathlib.Path(os.path.abspath(str(path)))
+    root_abs = pathlib.Path(os.path.abspath(host_path_text(str(root))))
+    path_abs = pathlib.Path(os.path.abspath(host_path_text(str(path))))
     try:
         relative = path_abs.relative_to(root_abs).as_posix()
     except ValueError:
@@ -153,7 +154,7 @@ def _is_windows_reparse(stat_result: os.stat_result) -> bool:
 
 
 def _validate_directory_root(path: pathlib.Path, label: str) -> pathlib.Path:
-    root = pathlib.Path(os.path.abspath(str(path)))
+    root = pathlib.Path(os.path.abspath(host_path_text(str(path))))
     metadata = os.lstat(root)
     if (
         not stat.S_ISDIR(metadata.st_mode)
@@ -228,12 +229,44 @@ def _open_posix_regular(
         raise
 
 
+def host_path_text(value: str) -> str:
+    """Rewrite Git-Bash (MSYS) drive paths (/d/dir) and long-path prefixes.
+
+    MSYS automatic argument conversion is per-argument and inconsistent on
+    long release command lines (see runs drop1-20260916-cyg3sjwi and
+    drop1-20260917-gnscaudk/c1e73bep). Normalizing at the lexical layer
+    makes the shell conversion behavior irrelevant. POSIX and native
+    inputs are returned unchanged; on non-Windows hosts this is identity.
+    """
+    if os.name != "nt" or not isinstance(value, str):
+        return value
+    text = value
+    if text.startswith("\\\\?\\UNC\\"):
+        text = "\\\\" + text[8:]
+    elif text.startswith("//?/UNC/"):
+        text = "//" + text[8:]
+    else:
+        for prefix in ("\\\\?\\", "//?/"):
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+                break
+    if (
+        len(text) >= 2
+        and text[0] == "/"
+        and text[1].isascii()
+        and text[1].isalpha()
+        and (len(text) == 2 or text[2] == "/")
+    ):
+        return text[1].upper() + ":/" + text[3:]
+    return text
+
+
 def _normalise_windows_final_path(value: str) -> pathlib.Path:
     if value.startswith("\\\\?\\UNC\\"):
         value = "\\\\" + value[8:]
     elif value.startswith("\\\\?\\"):
         value = value[4:]
-    return pathlib.Path(os.path.abspath(value))
+    return pathlib.Path(os.path.abspath(host_path_text(value)))
 
 
 def _open_windows_regular(
@@ -320,7 +353,7 @@ def _open_windows_regular(
         if get_final(handle, buffer, len(buffer), 0) == 0:
             raise ctypes.WinError(ctypes.get_last_error())
         final_path = _normalise_windows_final_path(buffer.value)
-        root_path = pathlib.Path(os.path.abspath(str(root)))
+        root_path = pathlib.Path(os.path.abspath(host_path_text(str(root))))
         common = os.path.normcase(os.path.commonpath((str(root_path), str(final_path))))
         if common != os.path.normcase(str(root_path)):
             fail(f"{label} resolved outside repository root")
@@ -349,7 +382,7 @@ def _open_windows_regular(
 
 def open_regular_no_follow(root: pathlib.Path, relative: str, label: str) -> BinaryIO:
     parts = _validate_relative_path(relative, label)
-    root = pathlib.Path(os.path.abspath(str(root)))
+    root = pathlib.Path(os.path.abspath(host_path_text(str(root))))
     if os.name == "nt":
         return _open_windows_regular(root, parts, label)
     return _open_posix_regular(root, parts, label)
@@ -391,7 +424,8 @@ def parse_manifest_bytes(raw: bytes) -> Dict[str, str]:
 
 
 def _load_selection_policy(
-    target: str, payload_root: Optional[pathlib.Path] = None
+    target: str, payload_root: Optional[pathlib.Path] = None,
+    assets: Optional[pathlib.Path] = None,
 ) -> Tuple[str, Tuple[str, ...]]:
     source_path = pathlib.Path(__file__).with_name("source_closure.py")
     spec = importlib.util.spec_from_file_location(
@@ -404,11 +438,11 @@ def _load_selection_policy(
     blocked = module.BLOCKED_BUILD_INPUT_TARGETS.get(target)
     if blocked is not None:
         fail(blocked)
-    if target in ("am2-s17pro", "am2-s17plus", "am2-t17", "am2-t17plus") and (
+    if module.AM2_S17_DONOR_RELATIVE_PATH in module.TARGET_BUILD_INPUTS.get(target, ()) and (
         payload_root is not None
     ):
         try:
-            evidence = module.discover_am2_s17_donor(payload_root)
+            evidence = module.discover_am2_s17_donor(payload_root, assets)
         except module.ClosureError as error:
             fail(f"AM2 S17 donor admission failed: {error}")
         if evidence.get("path") != module.AM2_S17_DONOR_RELATIVE_PATH:
@@ -816,6 +850,7 @@ def create_snapshot(
     after_manifest_open: Hook = None,
     after_input_open: Hook = None,
     selection_root: Optional[pathlib.Path] = None,
+    assets: Optional[pathlib.Path] = None,
 ) -> CreatedSnapshot:
     root = _validate_directory_root(repo_root, "repository payload root")
     split_authority = selection_root is not None
@@ -836,10 +871,12 @@ def create_snapshot(
     manifest_relative = _relative_to_root(
         manifest_root, manifest_path, "build-input manifest"
     )
-    policy, selected = _load_selection_policy(target, root)
+    if assets is not None:
+        assets = _validate_directory_root(assets, "held asset root")
+    policy, selected = _load_selection_policy(target, root, assets)
 
     parent = pathlib.Path(stage_parent or tempfile.gettempdir())
-    parent = pathlib.Path(os.path.abspath(str(parent)))
+    parent = pathlib.Path(os.path.abspath(host_path_text(str(parent))))
     parent_stat = os.lstat(parent)
     if (
         not stat.S_ISDIR(parent_stat.st_mode)
@@ -892,8 +929,9 @@ def create_snapshot(
             )
             destination = stage.joinpath(*staged_relative.parts)
             created_files.append(destination)
+            input_root, input_relative = held_assets.input_location(root, relative, assets)
             with open_regular_no_follow(
-                root, relative, "out-of-band build input"
+                input_root, input_relative, "out-of-band build input"
             ) as source:
                 source_before = _opened_regular_metadata(
                     source, "out-of-band build input"
@@ -989,7 +1027,7 @@ def verify_audit_descriptor(
 ) -> Dict[str, Any]:
     """Validate a retained descriptor without asserting live payload authority."""
 
-    path = pathlib.Path(os.path.abspath(str(descriptor_path)))
+    path = pathlib.Path(os.path.abspath(host_path_text(str(descriptor_path))))
     metadata = os.lstat(path)
     if (
         not stat.S_ISREG(metadata.st_mode)
@@ -1181,7 +1219,7 @@ def _read_owner_sentinel(stage: pathlib.Path, snapshot_id: str) -> Dict[str, Any
 def verify_snapshot(
     snapshot_path: pathlib.Path, expected_target: Optional[str] = None
 ) -> Dict[str, Any]:
-    snapshot_path = pathlib.Path(os.path.abspath(str(snapshot_path)))
+    snapshot_path = pathlib.Path(os.path.abspath(host_path_text(str(snapshot_path))))
     stage = snapshot_path.parent
     if (
         stage.name.startswith(STAGE_PREFIX) is False
@@ -1257,7 +1295,7 @@ def destroy_snapshot(snapshot_path: pathlib.Path, destroy_token: str) -> None:
     ):
         fail("snapshot destruction token is invalid")
     descriptor = verify_snapshot(snapshot_path)
-    stage = pathlib.Path(os.path.abspath(str(snapshot_path))).parent
+    stage = pathlib.Path(os.path.abspath(host_path_text(str(snapshot_path)))).parent
     sentinel = _read_owner_sentinel(stage, descriptor["snapshot_id"])
     if not secrets.compare_digest(
         sentinel["destroy_token_sha256"], sha256_bytes(destroy_token.encode("ascii"))
@@ -1347,7 +1385,7 @@ def query_verified_snapshot(
         fail("query-snapshot requires a split-authority v2 snapshot")
     if field == "stage":
         value: object = os.fspath(
-            pathlib.Path(os.path.abspath(str(snapshot_path))).parent
+            pathlib.Path(os.path.abspath(host_path_text(str(snapshot_path)))).parent
         )
     elif field == "snapshot_id":
         value = descriptor["snapshot_id"]
@@ -1383,6 +1421,8 @@ def parser() -> argparse.ArgumentParser:
     )
     create.add_argument("--target", required=True)
     create.add_argument("--stage-parent")
+    create.add_argument("--held-assets",
+                        help="resolved DCENT_HELD_ASSETS; pins and canonical snapshot paths stay unchanged")
     verify = commands.add_parser("verify", help="verify a staged input snapshot")
     verify.add_argument("--target")
     verify.add_argument("snapshot")
@@ -1418,9 +1458,27 @@ def parser() -> argparse.ArgumentParser:
     return top
 
 
+def normalize_host_path_args(args: argparse.Namespace) -> argparse.Namespace:
+    # ``file`` is intentionally excluded: it selects a manifest-internal
+    # relative path (queried with sha256/size/staged_path attributes), not
+    # a host path. ``target`` and ``token`` are non-path scalars.
+    for field in (
+        "repo_root",
+        "build_input_manifest",
+        "selection_root",
+        "stage_parent",
+        "snapshot",
+        "held_assets",
+    ):
+        value = getattr(args, field, None)
+        if isinstance(value, str):
+            setattr(args, field, host_path_text(value))
+    return args
+
+
 def main() -> int:
     try:
-        args = parser().parse_args()
+        args = normalize_host_path_args(parser().parse_args())
         if args.command == "create":
             created = create_snapshot(
                 pathlib.Path(args.repo_root),
@@ -1429,6 +1487,9 @@ def main() -> int:
                 pathlib.Path(args.stage_parent) if args.stage_parent else None,
                 selection_root=(
                     pathlib.Path(args.selection_root) if args.selection_root else None
+                ),
+                assets=(
+                    pathlib.Path(args.held_assets) if args.held_assets else None
                 ),
             )
             print(canonical_bytes(created.cli_result()).decode("ascii"), end="")

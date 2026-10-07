@@ -185,6 +185,20 @@ flash-braiinsos:
 # currently packageable: its mutable direct-build lane is intentionally blocked
 # until a separate lab capsule provides equivalent ownership and isolation.
 RELEASE_TARGET ?= s9
+.PHONY: beta beta-plan
+DROP ?= 1
+MINIMUM_VERSION ?=
+CHANNEL_BASE_URL ?=
+# Explicit make parameters become explicit signed build selections. Shell
+# expansion preserves their literal values; train validates before setup.
+beta: export MINIMUM_VERSION := $(MINIMUM_VERSION)
+beta: export CHANNEL_BASE_URL := $(CHANNEL_BASE_URL)
+beta:
+	@python3 $(CURDIR)/scripts/release_train.py --run --drop $(DROP) --repro --minimum-version "$$MINIMUM_VERSION" --channel-base-url "$$CHANNEL_BASE_URL"
+
+beta-plan:
+	@python3 $(CURDIR)/scripts/release_train.py --plan --drop $(DROP)
+
 release:
 	@if [ -z "$$DCENT_MANIFEST_PUBLIC_KEY_HEX" ]; then \
 		echo "ERROR: 'make release' requires DCENT_MANIFEST_PUBLIC_KEY_HEX (64 hex chars)."; \
@@ -197,14 +211,9 @@ release:
 		echo "       Generate with scripts/generate_release_keypair.sh."; \
 		exit 1; \
 	fi
-	@if [ "$(RELEASE_TARGET)" != "s9" ]; then \
-		echo "ERROR: release capsule v1 supports RELEASE_TARGET=s9 only."; \
-		echo "       Other targets remain fail-closed until their capsule port lands."; \
-		exit 1; \
-	fi
 	@echo "release: running local verification gate (make verify) before build..."
 	@$(MAKE) verify
-	@bash $(CURDIR)/scripts/build_s9_release_capsule.sh
+	@bash $(CURDIR)/scripts/build_release_capsule.sh --producer $(RELEASE_TARGET) --channel beta --output-root $(CURDIR)/output --result-json $(CURDIR)/output/$(RELEASE_TARGET)-producer-result.json
 
 # A direct lab package used to reuse mutable checkout, Cargo, and Buildroot
 # state. Binary receipt v4 intentionally rejects that weaker boundary. Keep the
@@ -302,21 +311,7 @@ verify:
 # hook-only emergency bypass for a local WIP commit/push; `make release` still
 # runs `make verify` and does not honor that bypass.
 install-hooks:
-	@REPO_ROOT="$$(cd "$(CURDIR)/../.." && pwd)"; \
-	PRE_COMMIT_SRC="$(CURDIR)/scripts/git-hooks/pre-commit"; \
-	PRE_PUSH_SRC="$(CURDIR)/scripts/git-hooks/pre-push"; \
-	PRE_COMMIT_DST="$$REPO_ROOT/.git/hooks/pre-commit"; \
-	PRE_PUSH_DST="$$REPO_ROOT/.git/hooks/pre-push"; \
-	if [ ! -d "$$REPO_ROOT/.git/hooks" ]; then \
-		echo "ERROR: $$REPO_ROOT/.git/hooks not found (not a git repo?)"; exit 1; \
-	fi; \
-	cp "$$PRE_COMMIT_SRC" "$$PRE_COMMIT_DST"; chmod +x "$$PRE_COMMIT_DST"; \
-	cp "$$PRE_PUSH_SRC" "$$PRE_PUSH_DST"; chmod +x "$$PRE_PUSH_DST"; \
-	echo "Installed pre-commit hook -> $$PRE_COMMIT_DST"; \
-	echo "  runs ci_offline_gates.sh --static-only before each commit"; \
-	echo "Installed pre-push hook -> $$PRE_PUSH_DST"; \
-	echo "  runs 'make verify' before each push"; \
-	echo "  DCENT_SKIP_VERIFY=1 is hook-only emergency bypass; release still runs make verify"
+	@sh "$(CURDIR)/scripts/install_git_hooks.sh"
 
 clean:
 	$(MAKE) -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXTERNAL) clean
@@ -343,7 +338,7 @@ help:
 	@echo "  deploy             - Quick deploy dcentrald binary via SSH (MINER_IP=x.x.x.x)"
 	@echo "  deploy-passthrough - (removed) set [mining] passthrough = true in /data/dcentrald.toml"
 	@echo "  flash-braiinsos    - Legacy/lab BraiinsOS-rootfs compatibility path"
-	@echo "  release            - Production S9 capsule only (requires signing key +"
+	@echo "  release            - Selected producer capsule (requires signing key +"
 	@echo "                       manifest public-key pin; RELEASE_TARGET=s9)"
 	@echo "  dev                - Image packaging disabled until a separate lab capsule exists"
 	@echo "  test               - Compile-gate all dcentrald workspace tests in Docker"

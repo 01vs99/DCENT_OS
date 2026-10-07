@@ -337,7 +337,7 @@ if [ "$IS_AM2" = "true" ]; then
     # /sys/class/gpio/gpioN/value path. Without the exports below,
     # those sysfs writes ENOENT silently and the long-hold reaches NOTHING
     # (only the brief ~20 ms devmem pre-pulse fires).  LIVE log
-    # captured 8 sysfs WRITE FAILED messages on .25 as direct evidence.
+    # captured 8 sysfs WRITE FAILED messages on a lab unit as direct evidence.
     #
     # We do NOT take ownership away from the kernel gpiochip — we only
     # export the individual lines so sysfs writes succeed. Reset polarity
@@ -399,7 +399,7 @@ fi
 # cleared THIGH/TLOW/TBUF to 0 (max I2C speed), causing PICs to NACK and
 # making 2/3 hash boards unreachable (0xFF on i2cdetect). This was the ROOT
 # CAUSE of the "loses 2 hashboards every time" bug.
-# See: ,
+# See: axi iic clock rule, i2c rdwr never use rule
 echo "[OK] I2C controller managed by kernel xiic-i2c driver"
 
 # --- Set hostname ---
@@ -415,7 +415,7 @@ hostname dcentos
 # (PWM 30); a proven powered-off/parked unit uses idle PWM 10.
 FAN_BASE=0x42800000
 FAN_IDLE_PWM=10
-# Platform dispatch:
+# Platform dispatch (am2 fan control devmem unreliable use uio mmap rule):
 # the am2 (S19/S19j Pro Zynq) fan-control IP @ 0x42800000 is UIO-bound, so
 # devmem reads/writes are a proven NO-OP on am2 (a /dev/mem shadow — fans
 # stay at hardware default). Reliable am2 fan control is the fan-control UIO mmap path,

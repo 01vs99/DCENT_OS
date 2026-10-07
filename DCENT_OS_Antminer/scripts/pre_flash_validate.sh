@@ -34,6 +34,15 @@ ZYNQ_GEOMETRY_HELPER="$SCRIPT_DIR/lib/sysupgrade_zynq_geometry.sh"
 }
 # shellcheck source=/dev/null
 . "$ZYNQ_GEOMETRY_HELPER"
+# First-install capacity admission for the am1-s9 first-install-only waiver
+# (stock two-reboot transaction hard volumes; see the lib header).
+AM1_S9_FIRST_INSTALL_CAPACITY_HELPER="$SCRIPT_DIR/lib/am1_s9_first_install_capacity.sh"
+[ -r "$AM1_S9_FIRST_INSTALL_CAPACITY_HELPER" ] || {
+    echo "FAIL: am1-s9 first-install capacity helper is missing: $AM1_S9_FIRST_INSTALL_CAPACITY_HELPER" >&2
+    exit 1
+}
+# shellcheck source=/dev/null
+. "$AM1_S9_FIRST_INSTALL_CAPACITY_HELPER"
 
 fail() {
     echo "FAIL: $1" >&2
@@ -108,6 +117,16 @@ payload_magic() {
     od -An -N4 -tx1 "$1" 2>/dev/null | tr -d ' \n'
 }
 
+# The Linux arm64 boot Image header carries the ASCII magic "ARM\x64" at
+# byte offset 0x38 (41524d64 as hex bytes). Every Amlogic lane ships the
+# donor vmlinux.bin raw — a uImage-wrapped kernel has never been produced
+# or consumed on these targets (see require-exact-build-inputs.sh pins).
+payload_magic_at() {
+    _pm_file=$1
+    _pm_offset=$2
+    od -An -N4 -tx1 -j "$_pm_offset" "$_pm_file" 2>/dev/null | tr -d ' \n'
+}
+
 assert_payload_fits_window() {
     label=$1
     size=$2
@@ -127,30 +146,34 @@ validate_board_payload_profile() {
     root_path=$3
     root_size=$4
     kernel_size=$5
+    install_mode=${6:-absent}
 
     case "$board" in
         # Amlogic targets with an evidence-backed host-driven rootfs-window
         # contract. Package-shape admission still does not authorize a write.
-        am3-s19jpro-aml|am3-s19jproplus|am3-s19k|am3-s21|am3-s21pro)
+        am3-s19k|am3-s21|am3-s21pro)
             [ -r "$AM3_GEOMETRY_HELPER" ] \
                 || fail "canonical AM3 geometry helper is missing: $AM3_GEOMETRY_HELPER"
             # shellcheck source=/dev/null
             . "$AM3_GEOMETRY_HELPER"
             ROOT_MAGIC=$(payload_magic "$root_path")
-            KERNEL_MAGIC=$(payload_magic "$kernel_path")
+            KERNEL_ARM64=$(payload_magic_at "$kernel_path" 56)
             [ "$ROOT_MAGIC" = "27051956" ] || fail "AM3 root payload is not a uImage (magic=$ROOT_MAGIC)"
-            [ "$KERNEL_MAGIC" = "27051956" ] || fail "AM3 kernel payload is not a uImage (magic=$KERNEL_MAGIC)"
-            pass "AM3 kernel/root uImage magic valid"
+            [ "$KERNEL_ARM64" = "41524d64" ] || fail "AM3 kernel payload is not a raw arm64 Image (magic@0x38=$KERNEL_ARM64)"
+            pass "AM3 root uImage + kernel arm64 Image magic valid"
             [ "$root_size" -le "$DCENT_AM3_ROOTFS_WINDOW_DEC" ] \
                 || fail "AM3 root payload exceeds am3 rootfs window (${root_size}B > ${DCENT_AM3_ROOTFS_WINDOW_DEC}B)"
             pass "AM3 root payload fits am3 rootfs window (${root_size}B <= ${DCENT_AM3_ROOTFS_WINDOW_DEC}B)"
             ;;
-        am3-s19xp|am3-s19jxp|am3-s21xp|am3-t21)
+        # Denied-contract boards: magic-only admission. These emit
+        # package_only_denied (PACKAGE_ONLY_DENIED_TARGETS) — no storage
+        # window or flash authority is claimed, so none is imported.
+        am3-s19xp|am3-s19jxp|am3-s21xp|am3-t21|am3-s19jproa|am3-s19jproplus|am3-s19jpro-aml|am3-s19kpro)
             ROOT_MAGIC=$(payload_magic "$root_path")
-            KERNEL_MAGIC=$(payload_magic "$kernel_path")
+            KERNEL_ARM64=$(payload_magic_at "$kernel_path" 56)
             [ "$ROOT_MAGIC" = "27051956" ] || fail "$board root payload is not a uImage (magic=$ROOT_MAGIC)"
-            [ "$KERNEL_MAGIC" = "27051956" ] || fail "$board kernel payload is not a uImage (magic=$KERNEL_MAGIC)"
-            pass "$board package uImage magic valid; no storage window or flash authority implied"
+            [ "$KERNEL_ARM64" = "41524d64" ] || fail "$board kernel payload is not a raw arm64 Image (magic@0x38=$KERNEL_ARM64)"
+            pass "$board root uImage + kernel arm64 Image magic valid; no storage window or flash authority implied"
             ;;
         am1-s9|am2-s19j|am2-s19jpro|am2-s19pro|am2-s17p)
             ROOT_MAGIC=$(payload_magic "$root_path")
@@ -186,8 +209,38 @@ validate_board_payload_profile() {
             if ! dcent_zynq_geometry_select "$board"; then
                 fail "no canonical Zynq payload geometry for board '$board'"
             fi
-            assert_payload_fits_window "$board kernel" "$kernel_size" "$ZYNQ_KERNEL_MAX_BYTES" "zynq kernel window"
-            assert_payload_fits_window "$board root" "$root_size" "$ZYNQ_ROOTFS_MAX_BYTES" "zynq rootfs window"
+            # AM1-A Drop-1 route scoping (owner adjudication
+            #
+            # Option A, ratified 2026-09-15): for am1-s9 the package windows
+            # are the live-sysupgrade (self-update) volume plan. A manifest
+            # carrying the typed first-install-only contract has explicitly
+            # DENIED self-update, so the self-update window admission is
+            # waived for that package (the first-install route's containment
+            # is the stock installer's own self-validating write path). Every
+            # other shape — including a legacy manifest with NO install_mode
+            # or one claiming target_sysupgrade — still fails closed here
+            # when oversized. The squashfs/FIT brick-safety magic checks
+            # above stay unconditional. AM2 boards are unchanged:
+            # unconditional windows.
+            ZYNQ_WINDOW_ADMISSION_ENFORCED=1
+            if [ "$board" = "am1-s9" ] && [ "$install_mode" = "first_install_only" ]; then
+                # The waiver is BOUNDED (merge-critic follow-up, both
+                # critics): the first-install route is the stock two-reboot
+                # transaction with HARD-SIZED phase-2 volumes (kernel -s
+                # 8MiB / rootfs -s 20MiB — stage1_builder.py:640/:642). A
+                # payload beyond those aborts MID-TRANSACTION (phase-1 flash
+                # + reboot already done), so an over-capacity payload keeps
+                # NO installable route and must fail closed here too.
+                if ! dcent_am1_s9_require_first_install_capacity "$kernel_size" "$root_size"; then
+                    fail "am1-s9 first-install-only waiver is bounded by the stock phase-2 hard volumes (8MiB kernel / 20MiB rootfs): payload has no installable route (self-update denied by contract, first-install transaction cannot take the payload)"
+                fi
+                ZYNQ_WINDOW_ADMISSION_ENFORCED=0
+                pass "am1-s9 first-install-only contract: self-update window admission waived (self-update explicitly denied; Drop-2 deferral per adjudication Option A)"
+            fi
+            if [ "$ZYNQ_WINDOW_ADMISSION_ENFORCED" = "1" ]; then
+                assert_payload_fits_window "$board kernel" "$kernel_size" "$ZYNQ_KERNEL_MAX_BYTES" "zynq kernel window"
+                assert_payload_fits_window "$board root" "$root_size" "$ZYNQ_ROOTFS_MAX_BYTES" "zynq rootfs window"
+            fi
             ;;
         *)
             fail "no package payload profile for board '$board'"
@@ -327,11 +380,42 @@ validate_package_only() {
         || fail "MANIFEST.json package_type must be sysupgrade"
     "$PYTHON3" "$MANIFEST_JSON_HELPER" verify-package-authority "$MANIFEST" "$EXPECTED_BOARD" \
         || fail "MANIFEST.json package authority is inconsistent with $EXPECTED_BOARD"
+    # Typed operator-route contract (AM1-A Drop-1 route scoping): the
+    # semantic helper admits exactly the known install_mode values and
+    # validates the first_install_only denial shape (update_command must be
+    # JSON null). "absent" keeps legacy manifests (no toolbox block) valid —
+    # they claim the historical dual route and the geometry windows below
+    # stay fully enforced for them.
+    PACKAGE_INSTALL_MODE=$("$PYTHON3" "$MANIFEST_JSON_HELPER" query-install-mode "$MANIFEST" 2>/dev/null || echo)
+    case "$PACKAGE_INSTALL_MODE" in
+        absent|target_sysupgrade|host_driven_rootfs_window_lab|first_install_only) ;;
+        package_only_denied)
+            # Denial is a typed contract here, not a contradiction: boards
+            # whose persistent-writer authority is unproven or incompatible
+            # (the PACKAGE_ONLY_DENIED_TARGETS set — am3-s19xp/s19jxp/
+            # s21xp/t21/s19jproa/s19jproplus) ship inspection-only
+            # archives through this same structural validation, pinned by
+            # the gates on their post-image scripts. The contradiction rule
+            # is a denied route paired with installable=true (the semantic
+            # helper enforces it first), and callers that need install
+            # authority demand it with DCENT_REQUIRE_INSTALLABLE_PACKAGE.
+            ;;
+        *)
+            fail "MANIFEST.json toolbox.install_mode '$PACKAGE_INSTALL_MODE' is not an admitted route contract"
+            ;;
+    esac
+    pass "MANIFEST.json toolbox route contract admitted (install_mode=$PACKAGE_INSTALL_MODE)"
     PACKAGE_INSTALLABLE=$(manifest_boolean_field installable "$MANIFEST" || echo)
     case "$PACKAGE_INSTALLABLE" in
         true|false) ;;
         *) fail "MANIFEST.json installable must be one exact JSON boolean" ;;
     esac
+    if [ "$PACKAGE_INSTALL_MODE" = "package_only_denied" ] && [ "$PACKAGE_INSTALLABLE" != false ]; then
+        # Defense-in-depth: the semantic helper at verify-package-authority
+        # already refuses this contradiction; keep the invariant visible at
+        # the shell layer in case admission order ever changes.
+        fail "MANIFEST.json package_only_denied must declare installable=false"
+    fi
     if is_truthy "${DCENT_REQUIRE_INSTALLABLE_PACKAGE:-0}" && \
        [ "$PACKAGE_INSTALLABLE" != true ]; then
         fail "caller requires installable=true; inspection-only package is not install authority"
@@ -359,7 +443,14 @@ validate_package_only() {
     esac
     pass "payload sizes are non-zero (kernel=${KERNEL_SIZE}B root=${ROOT_SIZE}B)"
 
-    validate_board_payload_profile "$EXPECTED_BOARD" "$SUP_DIR/kernel" "$SUP_DIR/root" "$ROOT_SIZE" "$KERNEL_SIZE"
+    # NOTE (merge-critic LOW-5, deliberately left as-is): the payload-profile
+    # admission — including the first-install-only waiver PASS lines — prints
+    # BEFORE the signature verification at the end of this function. Output
+    # order is not a behavior contract, and reordering the signature check
+    # ahead of the profile admission would change which failure surfaces
+    # first for a doubly-invalid package (e.g. bad signature + oversized
+    # payload); not a risk worth taking for cosmetics.
+    validate_board_payload_profile "$EXPECTED_BOARD" "$SUP_DIR/kernel" "$SUP_DIR/root" "$ROOT_SIZE" "$KERNEL_SIZE" "$PACKAGE_INSTALL_MODE"
 
     KERNEL_SHA=$(sha256sum "$SUP_DIR/kernel" | awk '{ print $1 }')
     ROOT_SHA=$(sha256sum "$SUP_DIR/root" | awk '{ print $1 }')
@@ -380,9 +471,19 @@ validate_package_only() {
         dcentos.sysupgrade-authority/v1)
             [ -n "${DCENT_RELEASE_PUBKEY_FILE:-}" ] \
                 || fail "DCENT_RELEASE_PUBKEY_FILE is required for authority-v1 package validation"
-            sh "$SCRIPT_DIR/verify_sysupgrade_signature.sh" \
-                "$PACKAGE_TARBALL" "$DCENT_RELEASE_PUBKEY_FILE" "$EXPECTED_BOARD" >/dev/null \
-                || fail "release signature verification failed"
+            # Denied-contract boards carry release-signed inspection-only
+            # manifests: pass the verifier its non-installable mode instead
+            # of the installable=true demand.
+            if [ "$PACKAGE_INSTALL_MODE" = "package_only_denied" ]; then
+                sh "$SCRIPT_DIR/verify_sysupgrade_signature.sh" \
+                    --package-only-noninstallable \
+                    "$PACKAGE_TARBALL" "$DCENT_RELEASE_PUBKEY_FILE" "$EXPECTED_BOARD" >/dev/null \
+                    || fail "release signature verification failed"
+            else
+                sh "$SCRIPT_DIR/verify_sysupgrade_signature.sh" \
+                    "$PACKAGE_TARBALL" "$DCENT_RELEASE_PUBKEY_FILE" "$EXPECTED_BOARD" >/dev/null \
+                    || fail "release signature verification failed"
+            fi
             pass "release signature verified against trusted key"
             ;;
         dcentos.sysupgrade-unsigned-lab/v1)

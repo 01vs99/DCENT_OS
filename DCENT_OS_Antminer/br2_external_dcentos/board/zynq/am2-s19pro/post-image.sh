@@ -284,6 +284,9 @@ DCENT_TOOLBOX_REQUIRES_INACTIVE_SLOT=true
 DCENT_TOOLBOX_INSTALL_MODE=target_sysupgrade
 DCENT_TARGET_SIDE_SYSUPGRADE=true
 DCENT_PACKAGE_STATUS="${DCENT_PACKAGE_STATUS:-unvalidated_target_sysupgrade}"
+. "$PROJECT_ROOT/scripts/lib/am2_native_ota_payload.sh"
+dcent_stage_am2_native_ota_payload || exit 1
+
 dcent_stage_release_key
 dcent_write_sysupgrade_manifest
 dcent_sign_sysupgrade_manifest

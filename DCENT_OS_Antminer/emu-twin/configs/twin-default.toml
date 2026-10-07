@@ -1,0 +1,73 @@
+# emu-twin default configuration (I2-owned).
+#
+# Consumed by harness/scenario_run.py and usable by the sibling modules.
+# All networking is LOCALHOST ONLY by policy (campaign desk-only rule).
+# Fault injectors default OFF; they exist to feed the tuner fault-injection
+# suite (WS3/WS4) and must never be on in a baseline evidence run.
+
+[stratum]
+host = "127.0.0.1"
+port = 17001                 # 0 = ephemeral (tests use ephemeral ports)
+difficulty = 0.0001          # <1.0 is stub-easier (host scenarios); >=1.0 for daemon-parity pdiff
+extranonce2_size = 4
+version_mask = 0x1FFFE000    # BIP320 mask advertised via mining.configure
+
+[chain]
+# backend: "auto" uses I1's chain_server when importable+adapted, else the
+# built-in chain stub (real sha256d search over TCP, see harness/scenario_run.py)
+backend = "auto"
+port = 17002
+# Chip geometry pointers (truth: dcentrald-common/src/board_desc.rs) — the
+# builtin chain stub does not model chips yet; I1's chain_server owns geometry.
+model = "am2-s19jpro-bm1362"
+chains = 3
+chips_per_chain = 126        # S19j Pro BM1362; S19k = 77/chain, S9 = 63 x 3
+
+[i2c_sidecar]
+host = "127.0.0.1"
+port = 17003
+lm75_addresses = [0x48, 0x49, 0x4A, 0x4B]                 # am3 bus-1 direct sensors
+eeprom_addresses = [0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57]  # G1 denylist span
+dspic_addresses = [0x20, 0x21, 0x22]                      # S19j Pro voltage PICs
+eeprom_preamble = 0x04       # BHB-class identity preamble byte
+
+[i2c_sidecar.psu]
+address = 0x58               # APW3++/APW10/APW11 PMBus (pmbus.rs); alt = 0x59
+vout_mode_exponent = -9      # ULINEAR16 exponent for READ_VOUT
+vin_v = 230.0
+vout_v = 13.2
+iout_a = 100.0
+pout_w = 1320.0
+pin_w = 1440.0
+
+[i2c_sidecar.apw12]
+address = 0x10               # APW12 SMBus opcode PSU (psu_apw12_smbus.rs)
+fw_version = 0x0103          # EXPECTED_FW_VER
+telemetry_block_len = 32
+voltage_max_mv = 1600
+
+[i2c_sidecar.fan]
+address = 0x2F               # EMC2305-class controller (class model, not bit-exact)
+fan_count = 5
+pulses_per_rev = 2           # amlogic/mod.rs PULSES_PER_REV (tach semantics)
+max_rpm = 6000.0
+tach_window_s = 1.0
+
+[i2c_sidecar.dspic]
+fw_default = 0x89            # S19j admission; set 0x86 in G2-refusal scenarios
+
+[i2c_sidecar.faults]         # DEFAULTS OFF — baseline evidence must run clean
+readback_lag_seconds = 0.0
+readback_lie_scale = 1.0
+readback_lie_offset = 0.0
+stuck_value = false
+
+[physics]
+# Pointer only: coefficients live in I1's physics.py (a2 report section D,
+# provenance-carrying rows; unknown -> None, never guessed).
+params_module = "physics.py"
+params_source = "dcentrald-silicon-profiles/src/{efficiency,operating_points}.rs"
+
+[harness]
+evidence_dir = "harness/evidence"   # gitignored run artifacts
+scenario_difficulty = 0.0001

@@ -1,0 +1,542 @@
+{
+  "schema": "dcentos.amlogic-gpio437/v1",
+  "gpio": 437,
+  "sources": {
+    "braiins-am3-production": {
+      "vendor": "braiins",
+      "artifact": "",
+      "sha256": "64e120df8c8011aa5199c87ebbd30276766ec3c746d597ab67a6119cf1c3cbe1"
+    },
+    "vnish-s19xp-startup": {
+      "vendor": "vnish",
+      "artifact": "",
+      "sha256": "bbc25a2137fd35ff97d6aa545992d21e4d7d35303fe5650b1b226fdd94b249c4"
+    },
+    "vnish-s19j-xp-startup": {
+      "vendor": "vnish",
+      "artifact": "",
+      "sha256": "bbc25a2137fd35ff97d6aa545992d21e4d7d35303fe5650b1b226fdd94b249c4"
+    },
+    "vnish-s19jpro-a-startup": {
+      "vendor": "vnish",
+      "artifact": "",
+      "sha256": "bbc25a2137fd35ff97d6aa545992d21e4d7d35303fe5650b1b226fdd94b249c4"
+    },
+    "vnish-s19jpro-plus-startup": {
+      "vendor": "vnish",
+      "artifact": "",
+      "sha256": "bbc25a2137fd35ff97d6aa545992d21e4d7d35303fe5650b1b226fdd94b249c4"
+    },
+    "vnish-s19jpro-startup": {
+      "vendor": "vnish",
+      "artifact": "",
+      "sha256": "bbc25a2137fd35ff97d6aa545992d21e4d7d35303fe5650b1b226fdd94b249c4"
+    },
+    "vnish-s19xp-hwscan": {
+      "vendor": "vnish",
+      "artifact": "",
+      "sha256": "dcd1e869dd96150775e09f7a5181e53844b7140dd75e9679e0d03aff0ee0da6f"
+    },
+    "vnish-s19j-xp-hwscan": {
+      "vendor": "vnish",
+      "artifact": "",
+      "sha256": "425e99950e9f8539caa209f88b472090c400d27dbe6555124e8e69537ab96909"
+    },
+    "vnish-am3-production-1-2-6": {
+      "vendor": "vnish",
+      "artifact": "",
+      "sha256": "6f90b49d4047f9e329140ae5bc0918129aa36be1de8262fb6aeeb7ea69f489e1"
+    },
+    "vnish-am3-production-1-2-7": {
+      "vendor": "vnish",
+      "artifact": "",
+      "sha256": "69e7134530eed4e6182eb937c2025d52eb86f5b84405f5b1fc1bf1a0e94bebaf"
+    },
+    "epic-amlogic-production-1-22-0": {
+      "vendor": "epic",
+      "artifact": "",
+      "sha256": "3bae7f924823c22b604a594f432a06fd474eeb6c892d8f401557a8ebe042b8ed"
+    },
+    "epic-amlogic-kernel-1-22-0": {
+      "vendor": "epic",
+      "artifact": "",
+      "sha256": "7082909a47f4262784831f0a80bc800de584ec8b424c61df6c9c5675cf42a67d"
+    },
+    "epic-amlogic-dtb-1-22-0": {
+      "vendor": "epic",
+      "artifact": "",
+      "sha256": "85379f43a7e417f06e665b88d7e68432d89287f10267035abfdc5778959bae8f"
+    }
+  },
+  "profiles": [
+    {
+      "board_target": "am3-s19k",
+      "note": "Two distinct vendor exact-model production compositions cover both listed revisions. Raw0=ON/raw1=OFF. This explicit policy entry supplies parameters only; it creates no board alias, signed admission, or physical measurement.",
+      "evidence": [
+        {
+          "board_target": "am3-s19k",
+          "hashboard_names": [
+            "BHB56902",
+            "BHB56903"
+          ],
+          "source": "vnish-am3-production-1-2-7",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "BHB56902/BHB56903 constants VA0x57c7f7(keyc8)/0x57c80a(key17), executed XOR writes0x7d6e4/0x7d7a8, comparator references0x66058/0x66090 select model IDs26/27. Production descriptor0x57ee98 has init+08=0xa4d30->0x701c0 and start+28=0x70e3c. Main invokes descriptor init at0x37990. Init stores descriptor at device+4(0x70cc8), runtime at device+14(0x70ccc), registers0x34478. Main stores device at thread+24(0x381fc), invokes descriptor start(0x38218). Start follows thread+24->device+14 and spawns callback0x79214 at0x71700; callback calls model parser0x6506c with the same runtime at0x792b8. Parser compares the hashboard name after successful loader0x52468 and writes model enum at runtime+18 through hashboard+1c. Classifier0x5a318 accepts IDs26..58, selecting profile0x57fe28(count2) via GOT0x5761a4, so all listed IDs follow the positive profile. Parser calls semantic OFF0x69d74 at0x65160 and, after successful setup, semantic ON0x6a6f8 at0x687fc with the same runtime. Package filename is not the model join.",
+          "trace": "Initializer0x701c0 explicitly passes controller2 at0x703a4/0x703a8 to0xe6d64. Case2 binds semantic ON global0x5c6b70 to raw callback0x109de0 and OFF global0x5c6b74 to0x109f14 (assignments0xe73f8/0xe740c). Power ON0x6a6f8->wrapper0xe9188->ON global->GPIO437 raw0; Power OFF0x69d74->wrapper0xe9210->OFF global->GPIO437 raw1. Both call0x112074, whose actual sysfs writer formats /sys/class/gpio/gpio%u/value and %d(raw!=0); constants VA0x585922 XORa2 and0x585960 XORe2. Semantic strings VA0x57cb13 XOR0c (Power ON) and0x57c70c XORe3 (Power OFF). Ghidra5.10.0-headless decomposition and original ARM/data byte checks,2026-09-13; vendor executable never run. Software evidence only, no DMM measurement."
+        },
+        {
+          "board_target": "am3-s19k",
+          "hashboard_names": [
+            "BHB56902",
+            "BHB56903"
+          ],
+          "source": "braiins-am3-production",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "Exact BHB56902/03 name pointers VA0x198bd70/0x198bd90 resolve plaintext0x12dbcc0/0x12dbcc8. Constructor0x6f7f74 passes four-entry name table0x198bd70 at0x6f7f9c and chip profile GOT0x1aad5a0->global0x1abb0e0->constructor0x828740 to model wrapper0x70a5a4. Wrapper retains the names/count in x19/x21 and supplies them at0x70a710/0x70a714 to common model constructor0x7ac0ec at0x70a718. Chip constructor0x828740 emits77 chips at0x828aa0 and selector1 at0x828a30/0x828a58 before0x830abc at0x828ac0. The resulting model voltage field+0x188 selects factory0x8c7a10 entry1->0x87c528 PsuAsVoltageController on the AM3 key3 controller. This is the actual production composition in a held AML binary, not attribution from its S21 capture filename. Original AArch64 and pointer bytes checked2026-09-13.",
+          "trace": "Enable 0x86ef78/0x86efc0 passes false at 0x86f000; disable 0x86f084/0x86f0cc passes true at 0x86f110. Pin forwarding 0x9363c8/0x936e1c reaches raw sysfs setter 0xbed8fc; rodata 0x1394e8c is value10. AM3 key3 descriptor 0x1abdd60 names GPIO437 and PSU provider 0x8640ac. Retained disassembly:  and r13/am3-s21-production-psu.asm. Software trace only; no DMM claim."
+        }
+      ],
+      "hashboard_names": [
+        "BHB56902",
+        "BHB56903"
+      ]
+    },
+    {
+      "board_target": "am3-s19kpro",
+      "note": "Two distinct vendor exact-model production compositions cover both listed revisions. Raw0=ON/raw1=OFF. This explicit policy entry supplies parameters only; it creates no board alias, signed admission, or physical measurement.",
+      "evidence": [
+        {
+          "board_target": "am3-s19kpro",
+          "hashboard_names": [
+            "BHB56902",
+            "BHB56903"
+          ],
+          "source": "vnish-am3-production-1-2-7",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "BHB56902/BHB56903 constants VA0x57c7f7(keyc8)/0x57c80a(key17), executed XOR writes0x7d6e4/0x7d7a8, comparator references0x66058/0x66090 select model IDs26/27. Production descriptor0x57ee98 has init+08=0xa4d30->0x701c0 and start+28=0x70e3c. Main invokes descriptor init at0x37990. Init stores descriptor at device+4(0x70cc8), runtime at device+14(0x70ccc), registers0x34478. Main stores device at thread+24(0x381fc), invokes descriptor start(0x38218). Start follows thread+24->device+14 and spawns callback0x79214 at0x71700; callback calls model parser0x6506c with the same runtime at0x792b8. Parser compares the hashboard name after successful loader0x52468 and writes model enum at runtime+18 through hashboard+1c. Classifier0x5a318 accepts IDs26..58, selecting profile0x57fe28(count2) via GOT0x5761a4, so all listed IDs follow the positive profile. Parser calls semantic OFF0x69d74 at0x65160 and, after successful setup, semantic ON0x6a6f8 at0x687fc with the same runtime. Package filename is not the model join.",
+          "trace": "Initializer0x701c0 explicitly passes controller2 at0x703a4/0x703a8 to0xe6d64. Case2 binds semantic ON global0x5c6b70 to raw callback0x109de0 and OFF global0x5c6b74 to0x109f14 (assignments0xe73f8/0xe740c). Power ON0x6a6f8->wrapper0xe9188->ON global->GPIO437 raw0; Power OFF0x69d74->wrapper0xe9210->OFF global->GPIO437 raw1. Both call0x112074, whose actual sysfs writer formats /sys/class/gpio/gpio%u/value and %d(raw!=0); constants VA0x585922 XORa2 and0x585960 XORe2. Semantic strings VA0x57cb13 XOR0c (Power ON) and0x57c70c XORe3 (Power OFF). Ghidra5.10.0-headless decomposition and original ARM/data byte checks,2026-09-13; vendor executable never run. Software evidence only, no DMM measurement."
+        },
+        {
+          "board_target": "am3-s19kpro",
+          "hashboard_names": [
+            "BHB56902",
+            "BHB56903"
+          ],
+          "source": "braiins-am3-production",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "Exact BHB56902/03 name pointers VA0x198bd70/0x198bd90 resolve plaintext0x12dbcc0/0x12dbcc8. Constructor0x6f7f74 passes four-entry name table0x198bd70 at0x6f7f9c and chip profile GOT0x1aad5a0->global0x1abb0e0->constructor0x828740 to model wrapper0x70a5a4. Wrapper retains the names/count in x19/x21 and supplies them at0x70a710/0x70a714 to common model constructor0x7ac0ec at0x70a718. Chip constructor0x828740 emits77 chips at0x828aa0 and selector1 at0x828a30/0x828a58 before0x830abc at0x828ac0. The resulting model voltage field+0x188 selects factory0x8c7a10 entry1->0x87c528 PsuAsVoltageController on the AM3 key3 controller. This is the actual production composition in a held AML binary, not attribution from its S21 capture filename. Original AArch64 and pointer bytes checked2026-09-13.",
+          "trace": "Enable 0x86ef78/0x86efc0 passes false at 0x86f000; disable 0x86f084/0x86f0cc passes true at 0x86f110. Pin forwarding 0x9363c8/0x936e1c reaches raw sysfs setter 0xbed8fc; rodata 0x1394e8c is value10. AM3 key3 descriptor 0x1abdd60 names GPIO437 and PSU provider 0x8640ac. Retained disassembly:  and r13/am3-s21-production-psu.asm. Software trace only; no DMM claim."
+        }
+      ],
+      "hashboard_names": [
+        "BHB56902",
+        "BHB56903"
+      ]
+    },
+    {
+      "board_target": "am3-aml-s19kpro",
+      "note": "Two distinct vendor exact-model production compositions cover both listed revisions. Raw0=ON/raw1=OFF. This explicit policy entry supplies parameters only; it creates no board alias, signed admission, or physical measurement.",
+      "evidence": [
+        {
+          "board_target": "am3-aml-s19kpro",
+          "hashboard_names": [
+            "BHB56902",
+            "BHB56903"
+          ],
+          "source": "vnish-am3-production-1-2-7",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "BHB56902/BHB56903 constants VA0x57c7f7(keyc8)/0x57c80a(key17), executed XOR writes0x7d6e4/0x7d7a8, comparator references0x66058/0x66090 select model IDs26/27. Production descriptor0x57ee98 has init+08=0xa4d30->0x701c0 and start+28=0x70e3c. Main invokes descriptor init at0x37990. Init stores descriptor at device+4(0x70cc8), runtime at device+14(0x70ccc), registers0x34478. Main stores device at thread+24(0x381fc), invokes descriptor start(0x38218). Start follows thread+24->device+14 and spawns callback0x79214 at0x71700; callback calls model parser0x6506c with the same runtime at0x792b8. Parser compares the hashboard name after successful loader0x52468 and writes model enum at runtime+18 through hashboard+1c. Classifier0x5a318 accepts IDs26..58, selecting profile0x57fe28(count2) via GOT0x5761a4, so all listed IDs follow the positive profile. Parser calls semantic OFF0x69d74 at0x65160 and, after successful setup, semantic ON0x6a6f8 at0x687fc with the same runtime. Package filename is not the model join.",
+          "trace": "Initializer0x701c0 explicitly passes controller2 at0x703a4/0x703a8 to0xe6d64. Case2 binds semantic ON global0x5c6b70 to raw callback0x109de0 and OFF global0x5c6b74 to0x109f14 (assignments0xe73f8/0xe740c). Power ON0x6a6f8->wrapper0xe9188->ON global->GPIO437 raw0; Power OFF0x69d74->wrapper0xe9210->OFF global->GPIO437 raw1. Both call0x112074, whose actual sysfs writer formats /sys/class/gpio/gpio%u/value and %d(raw!=0); constants VA0x585922 XORa2 and0x585960 XORe2. Semantic strings VA0x57cb13 XOR0c (Power ON) and0x57c70c XORe3 (Power OFF). Ghidra5.10.0-headless decomposition and original ARM/data byte checks,2026-09-13; vendor executable never run. Software evidence only, no DMM measurement."
+        },
+        {
+          "board_target": "am3-aml-s19kpro",
+          "hashboard_names": [
+            "BHB56902",
+            "BHB56903"
+          ],
+          "source": "braiins-am3-production",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "Exact BHB56902/03 name pointers VA0x198bd70/0x198bd90 resolve plaintext0x12dbcc0/0x12dbcc8. Constructor0x6f7f74 passes four-entry name table0x198bd70 at0x6f7f9c and chip profile GOT0x1aad5a0->global0x1abb0e0->constructor0x828740 to model wrapper0x70a5a4. Wrapper retains the names/count in x19/x21 and supplies them at0x70a710/0x70a714 to common model constructor0x7ac0ec at0x70a718. Chip constructor0x828740 emits77 chips at0x828aa0 and selector1 at0x828a30/0x828a58 before0x830abc at0x828ac0. The resulting model voltage field+0x188 selects factory0x8c7a10 entry1->0x87c528 PsuAsVoltageController on the AM3 key3 controller. This is the actual production composition in a held AML binary, not attribution from its S21 capture filename. Original AArch64 and pointer bytes checked2026-09-13.",
+          "trace": "Enable 0x86ef78/0x86efc0 passes false at 0x86f000; disable 0x86f084/0x86f0cc passes true at 0x86f110. Pin forwarding 0x9363c8/0x936e1c reaches raw sysfs setter 0xbed8fc; rodata 0x1394e8c is value10. AM3 key3 descriptor 0x1abdd60 names GPIO437 and PSU provider 0x8640ac. Retained disassembly:  and r13/am3-s21-production-psu.asm. Software trace only; no DMM claim."
+        }
+      ],
+      "hashboard_names": [
+        "BHB56902",
+        "BHB56903"
+      ]
+    },
+    {
+      "board_target": "am3-s21",
+      "note": "Two distinct vendor exact-model production compositions cover BHB68603 and BHB68606. Raw0=ON/raw1=OFF. This establishes software parameters only, not a physical measurement or signed runtime authority.",
+      "evidence": [
+        {
+          "board_target": "am3-s21",
+          "source": "braiins-am3-production",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "Exact S21 production provider: PSU: Enable descriptor 0x19db240 at 0xb799f4..0xb7d1ac invokes vtable 0x19a67b0 slot +0x28; PSU: Disable descriptor 0x19db298 at 0xb7d1ac..0xb7d654 invokes slot +0x30. See r13/production-psu.md and am3-s21-production-psu.asm under  Exact constructor0x6f85ac passes four-entry name table0x198bfd8 at0x6f871c/0x6f8740 to0x7ac0ec at0x6f8748. Table pointers0x198bfd8 and0x198bff8 resolve BHB68603 at0x12dbd40 and BHB68606 at0x12dbd48. Chip GOT0x1aaf098->global0x1abba20->constructor0x829de0 emits selector1 at0x82a0d0/0x82a0f8 before common profile0x830abc at0x82a160; factory0x8c7a10 entry1->0x87c528. Original AArch64 and pointer bytes checked2026-09-13.",
+          "trace": "Enable 0x86ef78/0x86efc0 passes false at 0x86f000; disable 0x86f084/0x86f0cc passes true at 0x86f110. Pin forwarding 0x9363c8/0x936e1c reaches raw sysfs setter 0xbed8fc; rodata 0x1394e8c is value10. AM3 key3 descriptor 0x1abdd60 names GPIO437 and PSU provider 0x8640ac. Retained disassembly:  and r13/am3-s21-production-psu.asm. Software trace only; no DMM claim.",
+          "hashboard_names": [
+            "BHB68603",
+            "BHB68606"
+          ]
+        },
+        {
+          "board_target": "am3-s21",
+          "hashboard_names": [
+            "BHB68603",
+            "BHB68606"
+          ],
+          "source": "vnish-am3-production-1-2-7",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "BHB68603/BHB68606 constants VA0x57c836(keye1)/0x57c849(key7b), executed XOR writes0x7d978/0x7da34, comparator references0x662f0/0x663d0 select model IDs29/30; BHB68603 comparison0x662ec branches0x662f4->0x66428, which writes29 via0x66124. Production descriptor0x57ee98 has init+08=0xa4d30->0x701c0 and start+28=0x70e3c. Main invokes descriptor init at0x37990. Init stores descriptor at device+4(0x70cc8), runtime at device+14(0x70ccc), registers0x34478. Main stores device at thread+24(0x381fc), invokes descriptor start(0x38218). Start follows thread+24->device+14 and spawns callback0x79214 at0x71700; callback calls model parser0x6506c with the same runtime at0x792b8. Parser compares the hashboard name after successful loader0x52468 and writes model enum at runtime+18 through hashboard+1c. Classifier0x5a318 accepts IDs26..58, selecting profile0x57fe28(count2) via GOT0x5761a4, so all listed IDs follow the positive profile. Parser calls semantic OFF0x69d74 at0x65160 and, after successful setup, semantic ON0x6a6f8 at0x687fc with the same runtime. Package filename is not the model join.",
+          "trace": "Initializer0x701c0 explicitly passes controller2 at0x703a4/0x703a8 to0xe6d64. Case2 binds semantic ON global0x5c6b70 to raw callback0x109de0 and OFF global0x5c6b74 to0x109f14 (assignments0xe73f8/0xe740c). Power ON0x6a6f8->wrapper0xe9188->ON global->GPIO437 raw0; Power OFF0x69d74->wrapper0xe9210->OFF global->GPIO437 raw1. Both call0x112074, whose actual sysfs writer formats /sys/class/gpio/gpio%u/value and %d(raw!=0); constants VA0x585922 XORa2 and0x585960 XORe2. Semantic strings VA0x57cb13 XOR0c (Power ON) and0x57c70c XORe3 (Power OFF). Ghidra5.10.0-headless decomposition and original ARM/data byte checks,2026-09-13; vendor executable never run. Software evidence only, no DMM measurement."
+        }
+      ],
+      "hashboard_names": [
+        "BHB68603",
+        "BHB68606"
+      ]
+    },
+    {
+      "board_target": "am3-s21pro",
+      "note": "Two distinct vendor production model compositions cover every listed hashboard revision. Raw0=ON/raw1=OFF; software evidence supplies immutable parameters, not release authority or physical measurement.",
+      "evidence": [
+        {
+          "board_target": "am3-s21pro",
+          "source": "braiins-am3-production",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "A3HB70601/A3HB70602 model constructor 0x6f6870 selects chip profile 0x824ce0 (65 chips), voltage selector1 at +0x188 -> factory0x8c7a10 -> PSU controller0x87c528. See r14/production-model-psu-selection.asm under ",
+          "trace": "Enable 0x86ef78/0x86efc0 passes false at 0x86f000; disable 0x86f084/0x86f0cc passes true at 0x86f110. Pin forwarding 0x9363c8/0x936e1c reaches raw sysfs setter 0xbed8fc; rodata 0x1394e8c is value10. AM3 key3 descriptor 0x1abdd60 names GPIO437 and PSU provider 0x8640ac. Retained disassembly:  and r13/am3-s21-production-psu.asm. Software trace only; no DMM claim.",
+          "hashboard_names": [
+            "A3HB70601",
+            "A3HB70602"
+          ]
+        },
+        {
+          "board_target": "am3-s21pro",
+          "hashboard_names": [
+            "A3HB70601",
+            "A3HB70602"
+          ],
+          "source": "vnish-am3-production-1-2-7",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "A3HB70601/A3HB70602 constants VA0x57c8ad(key36)/0x57c8b7(key5a), executed XOR writes0x7dd9c/0x7ddf0, comparator references0x66868/0x66884 select model IDs41/42. Production descriptor0x57ee98 has init+08=0xa4d30->0x701c0 and start+28=0x70e3c. Main invokes descriptor init at0x37990. Init stores descriptor at device+4(0x70cc8), runtime at device+14(0x70ccc), registers0x34478. Main stores device at thread+24(0x381fc), invokes descriptor start(0x38218). Start follows thread+24->device+14 and spawns callback0x79214 at0x71700; callback calls model parser0x6506c with the same runtime at0x792b8. Parser compares the hashboard name after successful loader0x52468 and writes model enum at runtime+18 through hashboard+1c. Classifier0x5a318 accepts IDs26..58, selecting profile0x57fe28(count2) via GOT0x5761a4, so all listed IDs follow the positive profile. Parser calls semantic OFF0x69d74 at0x65160 and, after successful setup, semantic ON0x6a6f8 at0x687fc with the same runtime. Package filename is not the model join.",
+          "trace": "Initializer0x701c0 explicitly passes controller2 at0x703a4/0x703a8 to0xe6d64. Case2 binds semantic ON global0x5c6b70 to raw callback0x109de0 and OFF global0x5c6b74 to0x109f14 (assignments0xe73f8/0xe740c). Power ON0x6a6f8->wrapper0xe9188->ON global->GPIO437 raw0; Power OFF0x69d74->wrapper0xe9210->OFF global->GPIO437 raw1. Both call0x112074, whose actual sysfs writer formats /sys/class/gpio/gpio%u/value and %d(raw!=0); constants VA0x585922 XORa2 and0x585960 XORe2. Semantic strings VA0x57cb13 XOR0c (Power ON) and0x57c70c XORe3 (Power OFF). Ghidra5.10.0-headless decomposition and original ARM/data byte checks,2026-09-13; vendor executable never run. Software evidence only, no DMM measurement."
+        }
+      ],
+      "hashboard_names": [
+        "A3HB70601",
+        "A3HB70602"
+      ]
+    },
+    {
+      "board_target": "am3-s21xp",
+      "note": "Two distinct vendor production model compositions cover every listed hashboard revision. Raw0=ON/raw1=OFF; software evidence supplies immutable parameters, not release authority or physical measurement.",
+      "evidence": [
+        {
+          "board_target": "am3-s21xp",
+          "source": "braiins-am3-production",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "A3HB70501/A3HB70502/A3HB70503 model constructor0x6f9b88 -> chip profile0x825c94 (91 chips), voltage selector1 at +0x188 -> factory0x8c7a10 -> PSU controller0x87c528. See r14/production-model-psu-selection.asm under ",
+          "trace": "Enable 0x86ef78/0x86efc0 passes false at 0x86f000; disable 0x86f084/0x86f0cc passes true at 0x86f110. Pin forwarding 0x9363c8/0x936e1c reaches raw sysfs setter 0xbed8fc; rodata 0x1394e8c is value10. AM3 key3 descriptor 0x1abdd60 names GPIO437 and PSU provider 0x8640ac. Retained disassembly:  and r13/am3-s21-production-psu.asm. Software trace only; no DMM claim.",
+          "hashboard_names": [
+            "A3HB70501",
+            "A3HB70502",
+            "A3HB70503"
+          ]
+        },
+        {
+          "board_target": "am3-s21xp",
+          "hashboard_names": [
+            "A3HB70501",
+            "A3HB70502",
+            "A3HB70503"
+          ],
+          "source": "vnish-am3-production-1-2-7",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "A3HB70501/A3HB70502/A3HB70503 constants VA0x57c8cb(key6c)/0x57c8d5(key73)/0x57c8df(key95), executed XOR writes0x7dedc/0x7df48/0x7df74, comparator references0x668bc/0x668d8/0x668f4 select model IDs44/45/46. Production descriptor0x57ee98 has init+08=0xa4d30->0x701c0 and start+28=0x70e3c. Main invokes descriptor init at0x37990. Init stores descriptor at device+4(0x70cc8), runtime at device+14(0x70ccc), registers0x34478. Main stores device at thread+24(0x381fc), invokes descriptor start(0x38218). Start follows thread+24->device+14 and spawns callback0x79214 at0x71700; callback calls model parser0x6506c with the same runtime at0x792b8. Parser compares the hashboard name after successful loader0x52468 and writes model enum at runtime+18 through hashboard+1c. Classifier0x5a318 accepts IDs26..58, selecting profile0x57fe28(count2) via GOT0x5761a4, so all listed IDs follow the positive profile. Parser calls semantic OFF0x69d74 at0x65160 and, after successful setup, semantic ON0x6a6f8 at0x687fc with the same runtime. Package filename is not the model join.",
+          "trace": "Initializer0x701c0 explicitly passes controller2 at0x703a4/0x703a8 to0xe6d64. Case2 binds semantic ON global0x5c6b70 to raw callback0x109de0 and OFF global0x5c6b74 to0x109f14 (assignments0xe73f8/0xe740c). Power ON0x6a6f8->wrapper0xe9188->ON global->GPIO437 raw0; Power OFF0x69d74->wrapper0xe9210->OFF global->GPIO437 raw1. Both call0x112074, whose actual sysfs writer formats /sys/class/gpio/gpio%u/value and %d(raw!=0); constants VA0x585922 XORa2 and0x585960 XORe2. Semantic strings VA0x57cb13 XOR0c (Power ON) and0x57c70c XORe3 (Power OFF). Ghidra5.10.0-headless decomposition and original ARM/data byte checks,2026-09-13; vendor executable never run. Software evidence only, no DMM measurement."
+        }
+      ],
+      "hashboard_names": [
+        "A3HB70501",
+        "A3HB70502",
+        "A3HB70503"
+      ]
+    },
+    {
+      "board_target": "am3-s19xp",
+      "note": "Two agreeing independent vendor software traces cover each exact listed hashboard revision on the AM3 production controller. Raw0=ON/raw1=OFF. This is not a physical measurement or permission to energize; runtime identity and retained ownership remain required.",
+      "evidence": [
+        {
+          "board_target": "am3-s19xp",
+          "source": "braiins-am3-production",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "BHB56801/BHB56802 model constructor0x6f82d0 (110 chips) -> exact chip profile -> factory0x8c7a10 -> PsuAsVoltageController. See r12/s19xp-modern-psu-selection.asm and r14/production-model-psu-selection.asm under ",
+          "trace": "Enable 0x86ef78/0x86efc0 passes false at 0x86f000; disable 0x86f084/0x86f0cc passes true at 0x86f110. Pin forwarding 0x9363c8/0x936e1c reaches raw sysfs setter 0xbed8fc; rodata 0x1394e8c is value10. AM3 key3 descriptor 0x1abdd60 names GPIO437 and PSU provider 0x8640ac. Retained disassembly:  and r13/am3-s21-production-psu.asm. Software trace only; no DMM claim.",
+          "hashboard_names": [
+            "BHB56801",
+            "BHB56802"
+          ]
+        },
+        {
+          "board_target": "am3-s19xp",
+          "source": "vnish-s19xp-startup",
+          "kind": "startup-only",
+          "on_raw": null,
+          "off_raw": null,
+          "model_join": "",
+          "trace": "config_gpios lines14..17 exports437, directionout, writesraw1. stop arm performs no power action. Identical script bytes appear in all five model packages. Package name and startup raw1 do not establish semantic OFF or an exact runtime model join.",
+          "hashboard_names": []
+        },
+        {
+          "board_target": "am3-s19xp",
+          "source": "vnish-s19xp-hwscan",
+          "kind": "shared-backend-only",
+          "on_raw": null,
+          "off_raw": null,
+          "model_join": "",
+          "trace": "ARM hwscan functions0x0faf4c and0x0fafe0 write GPIO437 raw0 andraw1 via0x0fe338; errors name src/aml/psu.c. Callback joins to semantic enable/disable and exact model selection remain untraced. These same hwscan bytes also occur in classic/A model packages, so package naming is not an exact-model proof.",
+          "hashboard_names": []
+        },
+        {
+          "board_target": "am3-s19xp",
+          "hashboard_names": [
+            "BHB56801",
+            "BHB56802"
+          ],
+          "source": "vnish-am3-production-1-2-6",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "BHB56801/BHB56802 constants VA0x51ef5e(key91)/0x51ef67(key1c); executed XOR loops0x7c1bc/0x7c214; comparisons0x6340c/0x634a0 select runtime model IDs11/12. Production driver descriptor0x5215c8 contains init+08=0xa35a8->0x6e894 and start+28=0x6f590. Main0x36218 invokes init; init stores descriptor at device+4 and runtime at device+14 before registration0x331e8. Main0x368a4 places device at thread+24 and0x368c0 invokes start, which follows thread+24->device+14 and spawns0x78124->parser0x62acc with that runtime. Hashboard+1c points back to runtime. Decoder0xe0d40 feeds hashboard+4b0 from 256-byte EEPROM read, and parser compares its name. The exact IDs are accepted by the switch; table0x515364 selects nonzero profile0x522558(count2) for each. Parser invokes semantic ON0x67c5c at0x65820 with the same runtime. This is an executable model/controller composition, not package filename attribution.",
+          "trace": "Initializer0x6e894 passes controller enum2 at0x6ead8/0x6eadc to0xe8da4; jump-table arm0xe91b4 selects AML assignments: global0x5678b0=0x10b7b8, global0x5678b4=0x10b910. Semantic Power ON0x67c5c->0xf0c7c->0xebaac->first global->GPIO437 raw0; Power OFF0x67398->0xf0c80->0xebabc->second global->GPIO437 raw1. Both call writer0x113a4c, which formats /sys/class/gpio/gpio%u/value and %d(raw!=0), constants VA0x5280de XORdd and0x52811c XOR02. Ghidra5.10.0-headless control-flow decomposition and original ARM/data byte checks, 2026-09-13. No vendor binary execution and no physical/DMM measurement."
+        }
+      ],
+      "hashboard_names": [
+        "BHB56801",
+        "BHB56802"
+      ]
+    },
+    {
+      "board_target": "am3-s19jxp",
+      "note": "Two agreeing independent vendor software traces cover each exact listed hashboard revision on the AM3 production controller. Raw0=ON/raw1=OFF. This is not a physical measurement or permission to energize; runtime identity and retained ownership remain required.",
+      "evidence": [
+        {
+          "board_target": "am3-s19jxp",
+          "source": "braiins-am3-production",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "BHB56804 model constructor0x6f77ec (110 chips) -> exact chip profile -> factory0x8c7a10 -> PsuAsVoltageController. See r12/s19jxp-modern-psu-selection.asm and r14/production-model-psu-selection.asm under ",
+          "trace": "Enable 0x86ef78/0x86efc0 passes false at 0x86f000; disable 0x86f084/0x86f0cc passes true at 0x86f110. Pin forwarding 0x9363c8/0x936e1c reaches raw sysfs setter 0xbed8fc; rodata 0x1394e8c is value10. AM3 key3 descriptor 0x1abdd60 names GPIO437 and PSU provider 0x8640ac. Retained disassembly:  and r13/am3-s21-production-psu.asm. Software trace only; no DMM claim.",
+          "hashboard_names": [
+            "BHB56804"
+          ]
+        },
+        {
+          "board_target": "am3-s19jxp",
+          "source": "vnish-s19j-xp-startup",
+          "kind": "startup-only",
+          "on_raw": null,
+          "off_raw": null,
+          "model_join": "",
+          "trace": "config_gpios lines14..17 exports437, directionout, writesraw1. stop arm performs no power action. Identical script bytes appear in all five model packages. Package name and startup raw1 do not establish semantic OFF or an exact runtime model join.",
+          "hashboard_names": []
+        },
+        {
+          "board_target": "am3-s19jxp",
+          "source": "vnish-s19j-xp-hwscan",
+          "kind": "shared-backend-only",
+          "on_raw": null,
+          "off_raw": null,
+          "model_join": "",
+          "trace": "ARM hwscan functions0x0faf4c and0x0fafe0 write GPIO437 raw0 andraw1 via0x0fe338; errors name src/aml/psu.c. Callback joins to semantic enable/disable and exact model selection remain untraced. These same hwscan bytes also occur in classic/A model packages, so package naming is not an exact-model proof.",
+          "hashboard_names": []
+        },
+        {
+          "board_target": "am3-s19jxp",
+          "hashboard_names": [
+            "BHB56804"
+          ],
+          "source": "vnish-am3-production-1-2-6",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "Exact BHB56804 constant VA0x51ef70(keyb8), executed XOR0x7c27c; comparison0x634f8 selects runtime model ID13. Production driver descriptor0x5215c8 contains init+08=0xa35a8->0x6e894 and start+28=0x6f590. Main0x36218 invokes init; init stores descriptor at device+4 and runtime at device+14 before registration0x331e8. Main0x368a4 places device at thread+24 and0x368c0 invokes start, which follows thread+24->device+14 and spawns0x78124->parser0x62acc with that runtime. Hashboard+1c points back to runtime. Decoder0xe0d40 feeds hashboard+4b0 from 256-byte EEPROM read, and parser compares its name. The exact IDs are accepted by the switch; table0x515364 selects nonzero profile0x522558(count2) for each. Parser invokes semantic ON0x67c5c at0x65820 with the same runtime. This is an executable model/controller composition, not package filename attribution.",
+          "trace": "Initializer0x6e894 passes controller enum2 at0x6ead8/0x6eadc to0xe8da4; jump-table arm0xe91b4 selects AML assignments: global0x5678b0=0x10b7b8, global0x5678b4=0x10b910. Semantic Power ON0x67c5c->0xf0c7c->0xebaac->first global->GPIO437 raw0; Power OFF0x67398->0xf0c80->0xebabc->second global->GPIO437 raw1. Both call writer0x113a4c, which formats /sys/class/gpio/gpio%u/value and %d(raw!=0), constants VA0x5280de XORdd and0x52811c XOR02. Ghidra5.10.0-headless control-flow decomposition and original ARM/data byte checks, 2026-09-13. No vendor binary execution and no physical/DMM measurement."
+        }
+      ],
+      "hashboard_names": [
+        "BHB56804"
+      ]
+    },
+    {
+      "board_target": "am3-s19jproa",
+      "note": "Two agreeing independent vendor software traces cover each exact listed hashboard revision on the AM3 production controller. Raw0=ON/raw1=OFF. This is not a physical measurement or permission to energize; runtime identity and retained ownership remain required.",
+      "evidence": [
+        {
+          "board_target": "am3-s19jproa",
+          "source": "braiins-am3-production",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "BHB42603/BHB42631/BHB42651 wrapper0x6f7acc -> helper0x709eb4 -> chip0x82a360 (126 chips, voltage selector1) -> model0x7ac0ec -> factory0x8c7a10 -> PSU0x87c528. AM3 ASIC provider0x8606f0 explicitly registers BM1362. See r10/bm1362-modern-factory.asm and bm1362-aml-production-power.asm under ",
+          "trace": "Enable 0x86ef78/0x86efc0 passes false at 0x86f000; disable 0x86f084/0x86f0cc passes true at 0x86f110. Pin forwarding 0x9363c8/0x936e1c reaches raw sysfs setter 0xbed8fc; rodata 0x1394e8c is value10. AM3 key3 descriptor 0x1abdd60 names GPIO437 and PSU provider 0x8640ac. Retained disassembly:  and r13/am3-s21-production-psu.asm. Software trace only; no DMM claim.",
+          "hashboard_names": [
+            "BHB42603",
+            "BHB42631",
+            "BHB42651"
+          ]
+        },
+        {
+          "board_target": "am3-s19jproa",
+          "source": "vnish-s19jpro-a-startup",
+          "kind": "startup-only",
+          "on_raw": null,
+          "off_raw": null,
+          "model_join": "",
+          "trace": "config_gpios lines14..17 exports437, directionout, writesraw1. stop arm performs no power action. Identical script bytes appear in all five model packages. Package name and startup raw1 do not establish semantic OFF or an exact runtime model join.",
+          "hashboard_names": []
+        },
+        {
+          "board_target": "am3-s19jproa",
+          "hashboard_names": [
+            "BHB42603",
+            "BHB42631",
+            "BHB42651"
+          ],
+          "source": "vnish-am3-production-1-2-6",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "Exact BHB42603/31/51 constants VA0x51ef1f(key97)/0x51ef4c(keye6)/0x51ef28(keyde); executed XOR0x7be98/0x7c0a0/0x7bef8; comparisons via literals0x64140/0x642e4/0x64230 select runtime model IDs3/8/4. Production driver descriptor0x5215c8 contains init+08=0xa35a8->0x6e894 and start+28=0x6f590. Main0x36218 invokes init; init stores descriptor at device+4 and runtime at device+14 before registration0x331e8. Main0x368a4 places device at thread+24 and0x368c0 invokes start, which follows thread+24->device+14 and spawns0x78124->parser0x62acc with that runtime. Hashboard+1c points back to runtime. Decoder0xe0d40 feeds hashboard+4b0 from 256-byte EEPROM read, and parser compares its name. The exact IDs are accepted by the switch; table0x515364 selects nonzero profile0x522558(count2) for each. Parser invokes semantic ON0x67c5c at0x65820 with the same runtime. This is an executable model/controller composition, not package filename attribution.",
+          "trace": "Initializer0x6e894 passes controller enum2 at0x6ead8/0x6eadc to0xe8da4; jump-table arm0xe91b4 selects AML assignments: global0x5678b0=0x10b7b8, global0x5678b4=0x10b910. Semantic Power ON0x67c5c->0xf0c7c->0xebaac->first global->GPIO437 raw0; Power OFF0x67398->0xf0c80->0xebabc->second global->GPIO437 raw1. Both call writer0x113a4c, which formats /sys/class/gpio/gpio%u/value and %d(raw!=0), constants VA0x5280de XORdd and0x52811c XOR02. Ghidra5.10.0-headless control-flow decomposition and original ARM/data byte checks, 2026-09-13. No vendor binary execution and no physical/DMM measurement."
+        }
+      ],
+      "hashboard_names": [
+        "BHB42603",
+        "BHB42631",
+        "BHB42651"
+      ]
+    },
+    {
+      "board_target": "am3-s19jproplus",
+      "note": "Two agreeing independent vendor software traces cover each exact listed hashboard revision on the AM3 production controller. Raw0=ON/raw1=OFF. This is not a physical measurement or permission to energize; runtime identity and retained ownership remain required.",
+      "evidence": [
+        {
+          "board_target": "am3-s19jproplus",
+          "source": "braiins-am3-production",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "Exact BHB42612 wrapper0x6f776c -> helper0x70a104 -> chip0x827df0 (120 chips, voltage selector1) -> model0x7ac0ec -> factory0x8c7a10 -> PSU0x87c528. AM3 ASIC provider0x8606f0 explicitly registers BM1362. BHB42611 is not substituted. See r10/bm1362-modern-factory.asm and bm1362-aml-production-power.asm under ",
+          "trace": "Enable 0x86ef78/0x86efc0 passes false at 0x86f000; disable 0x86f084/0x86f0cc passes true at 0x86f110. Pin forwarding 0x9363c8/0x936e1c reaches raw sysfs setter 0xbed8fc; rodata 0x1394e8c is value10. AM3 key3 descriptor 0x1abdd60 names GPIO437 and PSU provider 0x8640ac. Retained disassembly:  and r13/am3-s21-production-psu.asm. Software trace only; no DMM claim.",
+          "hashboard_names": [
+            "BHB42612"
+          ]
+        },
+        {
+          "board_target": "am3-s19jproplus",
+          "source": "vnish-s19jpro-plus-startup",
+          "kind": "startup-only",
+          "on_raw": null,
+          "off_raw": null,
+          "model_join": "",
+          "trace": "config_gpios lines14..17 exports437, directionout, writesraw1. stop arm performs no power action. Identical script bytes appear in all five model packages. Package name and startup raw1 do not establish semantic OFF or an exact runtime model join.",
+          "hashboard_names": []
+        },
+        {
+          "board_target": "am3-s19jproplus",
+          "hashboard_names": [
+            "BHB42612"
+          ],
+          "source": "vnish-am3-production-1-2-6",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "Exact BHB42612 constant VA0x51ef82(key86), executed XOR0x7c338; comparison via literal0x644c4 selects runtime model ID15. BHB42611 is not substituted. Production driver descriptor0x5215c8 contains init+08=0xa35a8->0x6e894 and start+28=0x6f590. Main0x36218 invokes init; init stores descriptor at device+4 and runtime at device+14 before registration0x331e8. Main0x368a4 places device at thread+24 and0x368c0 invokes start, which follows thread+24->device+14 and spawns0x78124->parser0x62acc with that runtime. Hashboard+1c points back to runtime. Decoder0xe0d40 feeds hashboard+4b0 from 256-byte EEPROM read, and parser compares its name. The exact IDs are accepted by the switch; table0x515364 selects nonzero profile0x522558(count2) for each. Parser invokes semantic ON0x67c5c at0x65820 with the same runtime. This is an executable model/controller composition, not package filename attribution.",
+          "trace": "Initializer0x6e894 passes controller enum2 at0x6ead8/0x6eadc to0xe8da4; jump-table arm0xe91b4 selects AML assignments: global0x5678b0=0x10b7b8, global0x5678b4=0x10b910. Semantic Power ON0x67c5c->0xf0c7c->0xebaac->first global->GPIO437 raw0; Power OFF0x67398->0xf0c80->0xebabc->second global->GPIO437 raw1. Both call writer0x113a4c, which formats /sys/class/gpio/gpio%u/value and %d(raw!=0), constants VA0x5280de XORdd and0x52811c XOR02. Ghidra5.10.0-headless control-flow decomposition and original ARM/data byte checks, 2026-09-13. No vendor binary execution and no physical/DMM measurement."
+        }
+      ],
+      "hashboard_names": [
+        "BHB42612"
+      ]
+    },
+    {
+      "board_target": "am3-s19jpro-aml",
+      "note": "Two independent vendor software compositions cover exact BHB42601/BHB42621/BHB42641 on the AM3 controller: GPIO437 raw0=ON/raw1=OFF. Classic retains its PIC route. This supplies parameters only; it grants no admission, creates no alias and is not an electrical measurement (measured=false).",
+      "evidence": [
+        {
+          "board_target": "am3-s19jpro-aml",
+          "source": "braiins-am3-production",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "Classic BHB42601/BHB42621/BHB42641 wrapper0x6fa580 -> helper0x709eb4 -> chip0x8273a8 (126 chips, voltage selector0/PIC). The separate AM3 registry0x767090/descriptor0x1abdd60 selects shared physical PSU0x8640ac and explicitly registered BM1362 provider0x8606f0; this does not make classic a NoPic model. See r10/bm1362-modern-factory.asm and bm1362-aml-production-power.asm under ",
+          "trace": "Enable 0x86ef78/0x86efc0 passes false at 0x86f000; disable 0x86f084/0x86f0cc passes true at 0x86f110. Pin forwarding 0x9363c8/0x936e1c reaches raw sysfs setter 0xbed8fc; rodata 0x1394e8c is value10. AM3 key3 descriptor 0x1abdd60 names GPIO437 and PSU provider 0x8640ac. Retained disassembly:  and r13/am3-s21-production-psu.asm. Software trace only; no DMM claim.",
+          "hashboard_names": [
+            "BHB42601",
+            "BHB42621",
+            "BHB42641"
+          ]
+        },
+        {
+          "board_target": "am3-s19jpro-aml",
+          "source": "vnish-s19jpro-startup",
+          "kind": "startup-only",
+          "on_raw": null,
+          "off_raw": null,
+          "model_join": "",
+          "trace": "config_gpios lines14..17 exports437, directionout, writesraw1. stop arm performs no power action. Identical script bytes appear in all five model packages. Package name and startup raw1 do not establish semantic OFF or an exact runtime model join.",
+          "hashboard_names": []
+        },
+        {
+          "board_target": "am3-s19jpro-aml",
+          "hashboard_names": [
+            "BHB42601",
+            "BHB42621",
+            "BHB42641"
+          ],
+          "source": "epic-amlogic-production-1-22-0",
+          "kind": "complete-model-trace",
+          "on_raw": 0,
+          "off_raw": 1,
+          "model_join": "Addresses are original ELF VA+0x100000. Exact parser0xa55b04 compares BHB42601/21/41 at0xa55cdc/0xa55d4c/0xa55da0 and returns enums0x0e/0x12/0x15. Profile constructor0xa577bc table0x111e746 sends all three to profile4 at0xa58174; its default has_pic=true is output+0x1d6, explicitly named by serializer0xb43d08 and loaded0xb43d1c. Actual EEPROM decoder0xa50b10 calls that constructor at0xa50e7c/0xa516c0. Production-spawned EEPROM task0x97f42c->0x2de414->0x2e08b4->0x2dfda0 invokes decoder0x2e0340; successful profile result is serialized0xb427ac at0x2e1e5c to /tmp/eeprom_data. Reader0x40a0d4 names that exact path at0x40a148, parses0x80e544 at0x40a8ec and updates the profile cache consumed by0x3bd058. Instance custody: App constructor0x3198e0 clones DataArc future+0x278 at0x31fb3c into MinerCtl future+0xd8 at0x31fc0c, installs vtable0x1536a88->0x4f9684, which preserves DataArc at output+0xd8. Arc wrapping0x31fcdc/0x31fd10 places it at MinerCtl+0xe8. The same DataArc is App+0x130 at0x3221b0; startup0x97a088/0x97a090 clones its detector+0xc0 into task vtables0x1540330/0x153f8e0->0x70ee50/0x6d1d64->0x97f42c. Production start0x9873c0 reads this exact Data cache at0x98b110 and stores decoded config at future+0x218. It obtains PSU collection0x99161c->0x992c30->0x99309c, passes the same collection through0x9877dc/vtable0x154a660->production constructor0x844f20, output+0x68; Arc0x652cdc moves it to controller+0x78. Tester vtable0x154b368 is excluded.",
+          "trace": "Production ON0x85ae30 takes controller+0x78, collection0x4fcdc4/vtable0x1545e90->poll0x795968 calls writer0xab7ee0(handle+0x10,0). Production OFF0x8612d0->0x4fd220/vtable0x1545ee0->0x795b54 calls the same writer with1. Factory0x99309c selects /dev/gpiochip1:26; request constructor0x4fc8c8 sets active_low byte0 at0x4fc968. Selector0xab9be8 and hash insertion0xab6bb4 copy all24 config bytes unchanged; only direction/value/edge/timeout change before0xab8318. v1 conversion0xab9794/0xab979c and v2 conversion0xab7048/0xab7050 leave ACTIVE_LOW clear. Writer uses v1 ioctl0xc040b409 or v2 ioctl0xc010b40f, so semantic0/1 are raw0/1. GPIO437 numeric proof is scoped to the separately pinned ePIC1.22.0 kernel and DTB, not an arbitrary controller roster: DT has only enabled AXG AO and periphs GPIO banks, no PCA953 binding; kernel descriptors at file0xd49178/0xd491e0 have15/86 pins, periphs pin26 at0x7be200 is GPIOA_0. Probe0x51df54 requests dynamic base -1 and0x51df84 calls gpiochip_add_data0x33b3c0. Its0x33b45c allocates zero-based chip IDs,0x33b470 names gpiochip%d, and0x33b628..0x33b630 allocates global bases downward from512. A successful required gpiochip1:26 request must be the second/periphs bank (AO only has15 lines), hence base512-15-86=411 and26+411=437. This derivation is evidence for the held image; production DCENT callers use the exact target table and physical identity, never recompute437 from another roster. Original ARM/data bytes and bounded Ghidra decomposition checked2026-09-13; no full-analysis success, vendor process execution or DMM measurement claimed."
+        }
+      ],
+      "hashboard_names": [
+        "BHB42601",
+        "BHB42621",
+        "BHB42641"
+      ]
+    }
+  ]
+}

@@ -32,7 +32,7 @@ EXPECTED_DEFAULT_COUNTS = {
     "bm1362": 79,
     "bm1366": 37,
     "bm1368": 28,
-    "bm1370": 21,
+    "bm1370": 22,
     "bm1385": 2,
     "bm1387": 9,
     "bm1390": 14,
@@ -47,20 +47,30 @@ EXPECTED_DEFAULT_COUNTS = {
     "energize_gate": 26,
     "gdtuner": 13,
     "gpio_maps": 18,
-    "hashboard_catalog": 13,
-    "hashboard_topology": 16,
+    "hashboard_catalog": 15,
+    "hashboard_topology": 18,
     "hashboards": 14,
+    "hydro_fleet": 13,
     "operating_points": 17,
     "pic1704_crc": 4,
     "pic_heartbeat": 10,
     "pics": 13,
     "power_topology": 12,
-    "psus": 12,
+    "psus": 13,
     "registry": 38,
     "s19k_nopic_admission": 14,
+    # B5b/B6 stock transcription modules — registered retroactively by B9
+    # 2026-09-02 (the merges declared them in lib.rs but this registry
+    # lagged; pre-existing main drift cured).
+    "s19_family_stock": 11,
+    "s19_family_stock_topol": 9,
     "scrypt_stock_topology": 17,
-    "sensor_topology": 13,
+    "sensor_topology": 14,
     "staggered_powerup": 12,
+    # B9 T21 stock contracts module (2026-09-02).
+    "t21_stock_topol": 11,
+    # B10 S21 air family stock contracts + controller adjudication (2026-09-02).
+    "s21_family_stock_topol": 12,
     "vnish_thermal": 11,
 }
 EXPECTED_FEATURE_ONLY = {"bm1360": 5, "bm1373": 5, "bm1491": 6}
@@ -117,13 +127,13 @@ class DcentraldSiliconProfilesModuleRegistryTests(unittest.TestCase):
             if row["default_enabled"]
         }
         self.assertEqual(default_observed, EXPECTED_DEFAULT_COUNTS)
-        self.assertEqual(sum(EXPECTED_DEFAULT_COUNTS.values()), 582)
+        self.assertEqual(sum(EXPECTED_DEFAULT_COUNTS.values()), 645)
         self.assertEqual(
             self.registry["crate_root_test_prefixes"],
             [{"prefix": "tests", "tests": 6}],
         )
-        self.assertEqual(self.registry["default_module_tests"], 582)
-        self.assertEqual(self.registry["default_tests"], 588)
+        self.assertEqual(self.registry["default_module_tests"], 645)
+        self.assertEqual(self.registry["default_tests"], 651)
         for name, count in EXPECTED_FEATURE_ONLY.items():
             row = self.modules[name]
             self.assertFalse(row["default_enabled"])
@@ -131,9 +141,9 @@ class DcentraldSiliconProfilesModuleRegistryTests(unittest.TestCase):
             self.assertEqual(row["default_tests"], 0)
             self.assertEqual(row["feature_tests"], count)
         self.assertEqual(sum(EXPECTED_FEATURE_ONLY.values()), 16)
-        self.assertEqual(self.registry["experimental_chips_tests"], 604)
-        self.assertEqual(self.registry["declared_public_modules"], 38)
-        self.assertEqual(self.registry["default_enabled_modules"], 35)
+        self.assertEqual(self.registry["experimental_chips_tests"], 667)
+        self.assertEqual(self.registry["declared_public_modules"], 43)
+        self.assertEqual(self.registry["default_enabled_modules"], 40)
 
     def test_source_retains_high_risk_non_authority_boundaries(self) -> None:
         sources = {
@@ -154,7 +164,8 @@ class DcentraldSiliconProfilesModuleRegistryTests(unittest.TestCase):
         self.assertIn("#![forbid(unsafe_code)]", sources["lib"])
         for module in ("bm1360", "bm1373", "bm1491"):
             self.assertIn("ChipStatus::RegisterMappedFromRE", sources[module])
-        self.assertIn("env_strict_refuse_default_off", sources["energize"])
+        self.assertIn("env_strict_refuse_default_on", sources["energize"])
+        self.assertIn("env_accept_degraded_default_off", sources["energize"])
         self.assertIn("This table authorizes nothing", sources["catalog"])
         self.assertIn("Nothing in this crate can construct a driver", sources["power"])
 

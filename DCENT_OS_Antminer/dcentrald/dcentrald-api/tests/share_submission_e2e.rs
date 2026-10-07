@@ -296,8 +296,8 @@ async fn spawn_validation_pool() -> MockPool {
                                     "params": [
                                         "mock-job",
                                         "00".repeat(32),
-                                        "01000000",
-                                        "ffffffff",
+                                        format!("0100000001{}ffffffff08", "00".repeat(32)),
+                                        "ffffffff010000000000000000015100000000",
                                         [],
                                         "20000000",
                                         "1d00ffff",
@@ -539,6 +539,7 @@ fn apply_mutation(mut share: ValidShare, mutation: Mutation) -> ValidShare {
 
 fn build_stratum_config(pool_url: String, worker: &str) -> StratumConfig {
     StratumConfig {
+        v1_policy: Default::default(),
         pool1: PoolConfig {
             url: pool_url,
             worker: worker.to_string(),

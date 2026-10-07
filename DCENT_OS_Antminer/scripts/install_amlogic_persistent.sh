@@ -891,9 +891,9 @@ if [ "$BACKUP_ONLY" = true ] && { [ "$VARIANT" = s19kpro ] || [ "$VARIANT" = s19
             # the Amlogic boot partition carries factory-locked pages the NAND
             # driver refuses at stream level (ENODEV at a fixed page), so the
             # fast full-stream dump can never complete for mtd0 on this
-            # hardware. Reconstruct on the unit — per-eraseblock windows,
+            # hardware. Reconstruct on the unit -- per-eraseblock windows,
             # per-page retry only inside failing blocks, unreadable pages
-            # padded 0xFF with byte offsets recorded — for BOTH passes, then
+            # padded 0xFF with byte offsets recorded -- for BOTH passes, then
             # stream the two images and the page list back. Bad blocks (none
             # observed on this unit; counters recorded around capture) would
             # surface identically and are named in the same page list.

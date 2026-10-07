@@ -2,6 +2,131 @@ use serde::{Deserialize, Serialize};
 
 pub const UPDATE_SCHEMA_VERSION: u8 = 1;
 
+pub const CHANNEL_FEED_PROFILE: &str = "dcentos.signed-channel-feed/v1";
+pub const CHANNEL_FEED_SCHEMA: u8 = 1;
+pub const MAX_CHANNEL_FEED_BYTES: usize = 1024 * 1024;
+pub const MAX_CHANNEL_FEED_TARGETS: usize = 256;
+
+/// Ed25519 signature over the exact UTF-8 bytes of `payload`.
+///
+/// Keeping the signed document as a string avoids cross-language JSON
+/// reserialization differences. Consumers must verify with their independently
+/// trusted release key before deserializing the payload as ChannelFeedPayload.
+/// This wire type alone grants no download or installation authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelFeed {
+    pub profile: String,
+    pub payload: String,
+    /// Exactly 128 lowercase hex characters: the 64-byte Ed25519 signature.
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    Beta,
+    Stable,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChannelArtifactKind {
+    #[serde(rename = "sysupgrade-tar")]
+    SysupgradeTar,
+    #[serde(rename = "native-sd-image")]
+    NativeSdImage,
+    #[serde(rename = "sd-payload-tar")]
+    SdPayloadTar,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelInstallRoute {
+    FirstInstallAndSelfUpdate,
+    SelfUpdateOnly,
+    SdTrialBootOnly,
+    OperatorStaged,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelFeedPayload {
+    pub schema: u8,
+    pub product: String,
+    pub release_channel: UpdateChannel,
+    pub source_commit: String,
+    pub targets: Vec<ChannelFeedTarget>,
+}
+
+/// One exact board's published primary artifact. Local runtime policy and
+/// verified package authority must independently permit an in-device update.
+/// A signed SD-only or operator-staged row never acquires that permission.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelFeedTarget {
+    pub board_target: String,
+    pub version: String,
+    pub minimum_version: String,
+    pub release_channel: UpdateChannel,
+    pub artifact_kind: ChannelArtifactKind,
+    pub install_route: ChannelInstallRoute,
+    pub hardware_recipe: String,
+    pub sha256: String,
+    pub url: String,
+    pub size: u64,
+}
+
+/// Host Toolbox discovery uses the same signed-byte ChannelFeed envelope.
+/// These types are separate from firmware targets and grant no install authority.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ToolboxFeedProduct {
+    #[serde(rename = "DCENT_TOOLBOX")]
+    Toolbox,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ToolboxPlatformTarget {
+    #[serde(rename = "windows-x86_64")]
+    WindowsX86_64,
+    #[serde(rename = "macos-x86_64")]
+    MacosX86_64,
+    #[serde(rename = "macos-arm64")]
+    MacosArm64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ToolboxArtifactKind {
+    #[serde(rename = "windows-installer")]
+    WindowsInstaller,
+    #[serde(rename = "macos-pkg")]
+    MacosPkg,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolboxChannelFeedPayload {
+    pub schema: u8,
+    pub product: ToolboxFeedProduct,
+    pub release_channel: UpdateChannel,
+    pub source_commit: String,
+    pub targets: Vec<ToolboxChannelFeedTarget>,
+}
+
+/// Consumers must join artifact kind to the exact process platform, validate
+/// bounded HTTPS/size/digest/semver fields and authenticate before selection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolboxChannelFeedTarget {
+    pub platform_target: ToolboxPlatformTarget,
+    pub version: String,
+    pub minimum_version: String,
+    pub release_channel: UpdateChannel,
+    pub artifact_kind: ToolboxArtifactKind,
+    pub sha256: String,
+    pub url: String,
+    pub size: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallIntent {
@@ -99,6 +224,88 @@ pub struct UpdateMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CHANNEL_FIXTURE: &str = include_str!("../tests/fixtures/channel_feed.json");
+
+    #[test]
+    fn signed_channel_fixture_preserves_exact_payload_and_separate_install_routes() {
+        let feed: ChannelFeed = serde_json::from_str(CHANNEL_FIXTURE).unwrap();
+        assert_eq!(feed.profile, CHANNEL_FEED_PROFILE);
+        assert_eq!(feed.signature.len(), 128);
+        assert!(feed.payload.ends_with('\n'));
+        let encoded = serde_json::to_vec(&feed).unwrap();
+        let recovered: ChannelFeed = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(recovered.payload.as_bytes(), feed.payload.as_bytes());
+        let payload: ChannelFeedPayload = serde_json::from_str(&feed.payload).unwrap();
+        assert_eq!(payload.schema, CHANNEL_FEED_SCHEMA);
+        assert_eq!(payload.release_channel, UpdateChannel::Beta);
+        assert_eq!(payload.targets[0].board_target, "am1-s9");
+        assert_eq!(payload.targets[0].minimum_version, "0.9.0");
+        assert_eq!(
+            payload.targets[0].artifact_kind,
+            ChannelArtifactKind::SysupgradeTar
+        );
+        assert_eq!(
+            payload.targets[0].install_route,
+            ChannelInstallRoute::FirstInstallAndSelfUpdate
+        );
+        assert_eq!(
+            payload.targets[1].artifact_kind,
+            ChannelArtifactKind::NativeSdImage
+        );
+        assert_eq!(
+            payload.targets[1].install_route,
+            ChannelInstallRoute::SdTrialBootOnly
+        );
+        assert_eq!(payload.targets[1].size, 2_147_483_648);
+    }
+
+    #[test]
+    fn channel_wire_refuses_duplicate_unknown_missing_or_coerced_authority_fields() {
+        let feed: ChannelFeed = serde_json::from_str(CHANNEL_FIXTURE).unwrap();
+        let original: serde_json::Value = serde_json::from_str(&feed.payload).unwrap();
+        for (field, value) in [
+            ("release_channel", serde_json::json!("lab")),
+            ("artifact_kind", serde_json::json!("unknown")),
+            ("install_route", serde_json::json!("automatic")),
+            ("size", serde_json::json!(-1)),
+            ("size", serde_json::json!("1048576")),
+            ("size", serde_json::json!(1048576.5)),
+            ("minimum_version", serde_json::Value::Null),
+            ("unsigned_allowed", serde_json::json!(true)),
+        ] {
+            let mut changed = original.clone();
+            changed["targets"][0][field] = value;
+            assert!(
+                serde_json::from_value::<ChannelFeedPayload>(changed).is_err(),
+                "{field}"
+            );
+        }
+        for field in [
+            "board_target",
+            "minimum_version",
+            "hardware_recipe",
+            "sha256",
+            "url",
+            "size",
+        ] {
+            let mut changed = original.clone();
+            changed["targets"][0].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<ChannelFeedPayload>(changed).is_err(),
+                "{field}"
+            );
+        }
+        let duplicated = feed.payload.replace(
+            "\"board_target\": \"am1-s9\"",
+            "\"board_target\": \"am1-s9\", \"board_target\": \"am2-s17e\"",
+        );
+        assert_ne!(duplicated, feed.payload);
+        assert!(serde_json::from_str::<ChannelFeedPayload>(&duplicated).is_err());
+        let mut envelope: serde_json::Value = serde_json::from_str(CHANNEL_FIXTURE).unwrap();
+        envelope["public_key"] = serde_json::json!("untrusted feed-selected key");
+        assert!(serde_json::from_value::<ChannelFeed>(envelope).is_err());
+    }
 
     #[test]
     fn schema_version_is_pinned() {

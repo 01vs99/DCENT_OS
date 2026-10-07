@@ -40,17 +40,29 @@
 //!
 //! # Known ambiguities (deliberately NOT resolved by guessing)
 //!
-//! * **Byte 1.** The jig labels it `zhiju_information_length` and a real S19 Pro board
-//!   reads `0x11` (17). That does not equal this block's ~66-byte span, so "length" may
-//!   count a sub-section, or be a version/format code. Independently,
-//!   [`crate::eeprom_record`] documents byte 1 as "algorithm nibble 0x1 (XXTEA) + key
-//!   index 0x1". Both readings are recorded; neither is enforced. The byte is exposed raw
-//!   as [`ZhijuInformationBlock::zhiju_information_length`].
+//! * **Byte 1.** The jig labels it `zhiju_information_length`. The live S19 Pro
+//!   capture (bench-20260902-nbp1901, BM1398-generation pages) reads `0x42` (66)
+//!   — exactly this block's span, supporting the "length" reading on this
+//!   generation. The previously recorded `0x11` (17) values belong to the
+//!   deployed-format pages (`04 11` / `05 11`, [`crate::deployed_eeprom`]) where
+//!   byte 1 is the algorithm/key selector (XXTEA nibble 0x1 + key index 0x1),
+//!   not to a BM1398-generation zhiju page. Both readings are recorded; neither
+//!   is enforced. The byte is exposed raw as
+//!   [`ZhijuInformationBlock::zhiju_information_length`].
 //! * **CRC5.** The trailing byte at `+0x41` is `zhiju_information_crc5` in the jig, but the
 //!   polynomial/init/width over which it is computed was not recovered. It is exposed raw
 //!   and **not** validated. Do not invent a CRC check here — a wrong check would reject
-//!   good boards.
+//!   good boards. (The recovered [`bitmain_crc5`] + fail-open [`Crc5Check`] surface below
+//!   recomputes but never rejects; it matched both live-captured blocks,
+//!   bench-20260902-nbp1901.)
 //! * **`+0x3F`/`+0x40`** are not printed by the jig dumper and are treated as reserved.
+//! * **Trailing die/marking codes (live pages).** On the live NBP1901 pages the
+//!   bytes at `[0x14..0x23)` read `ED` + `A13X20AU01` (boards 1/2) and `ED` +
+//!   `H13X20BV1L` (board 3) — `chip_die` + `chip_marking` in the jig field map.
+//!   Bitmain's semantics for these part/date codes are pinned by NO held
+//!   factory source; the offsets and raw values are facts, and any meaning
+//!   beyond them is a labeled HYPOTHESIS (B6 dossier §12). Do not build logic
+//!   on the code characters.
 //!
 //! Cipher note: [`decode_zhiju_block`] consumes **plaintext**, matching
 //! [`crate::eeprom_record::dispatch`]. Boards whose payload is enciphered must be run
@@ -108,7 +120,13 @@ pub const ZHIJU_BLOCK_MIN_LEN: usize = offset::ZHIJU_INFORMATION_CRC5 + 1;
 /// Decoded Bitmain zhiju hashboard-EEPROM block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZhijuInformationBlock {
-    /// Raw byte 0. Selects the cipher/key generation (`0x04` BHB42xxx, `0x05` BHB56xxx).
+    /// Raw byte 0. Selects the cipher/key generation (`0x04` BHB42xxx, `0x05`
+    /// BHB56xxx — both desk-derived rows). LIVE-PROVEN third row: `0x11` on the
+    /// bench-20260902-nbp1901 BM1398-generation pages (nibbles XXTEA=1/slot-1),
+    /// which decode under the AMTC jig table's slot-1 key `uileynimggnagnau`
+    /// and under NO `KEY_LARGE` slot — see the G3 evidence rows at
+    /// [`crate::deployed_eeprom::LIVE_PROVEN_BM1398_GENERATION_SLOT1_KEY`].
+    /// Evidence record only; decode stays keyed by explicit key selection.
     pub algorithm_and_key_version: u8,
     /// Raw byte 1. See the module-level ambiguity note — NOT interpreted here.
     pub zhiju_information_length: u8,
@@ -328,8 +346,10 @@ impl ZhijuInformationBlock {
     /// vector (see [`bitmain_crc5`]'s test).
     ///
     /// **Returns a status, never rejects.** Callers MUST treat [`Crc5Check::Mismatch`]
-    /// as a WARN, not a board rejection — a wrong check rejects good boards. Do not
-    /// gate hardware on this until it is validated against one captured plaintext block.
+    /// as a WARN, not a board rejection — a wrong check rejects good boards. Validated
+    /// 2026-09-02 against the two live-captured NBP1901 plaintext blocks (both `Match`,
+    /// bench-20260902-nbp1901; still fail-open: n=1 unit, and a 5-bit CRC accepts a
+    /// wrong page 1 time in 32 by construction).
     pub fn verify_crc5(&self, data: &[u8]) -> Crc5Check {
         // Fail-safe on short input: nothing to check rather than panic.
         if data.len() <= offset::ZHIJU_INFORMATION_CRC5 {
@@ -604,5 +624,198 @@ mod tests {
         assert!(!XXTEA_PAYLOAD_RANGE.contains(&offset::ALGORITHM_AND_KEY_VERSION));
         assert!(!XXTEA_PAYLOAD_RANGE.contains(&offset::ZHIJU_INFORMATION_LENGTH));
         assert!(XXTEA_PAYLOAD_RANGE.contains(&offset::ZHIJU_INFORMATION_CRC5));
+    }
+
+    // ---- G2 bench capture: real deployed NBP1901 pages (2026-09-02) --------
+    //
+    // Read-only I2C capture from the operator's S19 Pro bench unit (Zynq am2,
+    // BM1398, on BraiinsOS) at EEPROMs 0x50/0x51/0x52, sha256-pinned in
+    //
+    // Boards 1/2 carry byte-identical pages (shared factory serial, corroborated
+    // by the Braiins boot table printing the same S/N for both); board 3 differs.
+    // Decode: XXTEA over XXTEA_PAYLOAD_RANGE with the BM1398-generation factory
+    // slot-1 key `uileynimggnagnau` (pinned in dcentrald-silicon-profiles
+    // s19_family_stock::AMTC_S19PRO_JIG_XXTEA_KEY_TABLE slot 1 — exactly the
+    // candidate the B6 desk ladder predicted for deployed BM1398 pages).
+    // The header declares algorithm_and_key_version 0x11 — a generation outside
+    // the desk tables (0x04 BHB42xxx, 0x05 BHB56xxx): the first real G3
+    // mapping-table datum. Oracle: the Braiins boot table serials, byte-exact.
+    //
+    // Operator authorization note: the BraiinsOS image ships no i2c-tools; the
+    // operator authorized (interactive, 2026-09-02) a tmpfs-resident static
+    // reader that issues only EEPROM read transactions (pointer-set + read,
+    // i2cdump-equivalent); deleted from the unit after the capture.
+
+    const G2_PAGE_BOARDS_1_2_HEX: &str = concat!(
+        "11422213c85248cf1657052522c82540d466dda751d68d4d5cfe15d56138b98f",
+        "8cd7565a7b393d3894ec7f42e1beeef92aeb6b75955ed63d80be85f6a8131757",
+        "ade4ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    );
+    const G2_PAGE_BOARD_3_HEX: &str = concat!(
+        "1142fe6b91b8ec624ae7e16b905fa3281759f33497fec9efd0c14460646f9c88",
+        "b2a0fafeeb1ec7fa7b470e52b5636dbe928f3bab3eb86b048dd0e4aa985e6221",
+        "5d91ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    );
+
+    fn g2_from_hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex digit"))
+            .collect()
+    }
+
+    fn g2_decode_live_page(page_hex: &str) -> ZhijuInformationBlock {
+        decode_zhiju_block(&g3_live_plaintext_block(page_hex)).expect("live page decodes")
+    }
+
+    /// The full plaintext block of a live page: the two header bytes kept
+    /// plaintext + the XXTEA window `[2..0x42)` decrypted with the G3
+    /// evidence-const key (so the fixtures and the mapping row cannot drift
+    /// apart).
+    fn g3_live_plaintext_block(page_hex: &str) -> Vec<u8> {
+        let page = g2_from_hex(page_hex);
+        let key = crate::deployed_eeprom::key_words(
+            &crate::deployed_eeprom::LIVE_PROVEN_BM1398_GENERATION_SLOT1_KEY,
+        );
+        let mut block = page[..2].to_vec();
+        let plain = crate::deployed_eeprom::decrypt_region(&page, 2, 0x42, &key);
+        block.extend_from_slice(&plain);
+        block
+    }
+
+    #[test]
+    fn g2_nbp1901_live_pages_decode_with_bm1398_factory_slot1() {
+        let d12 = g2_decode_live_page(G2_PAGE_BOARDS_1_2_HEX);
+        assert_eq!(d12.algorithm_and_key_version, 0x11);
+        assert_eq!(d12.hashboard_sn, "HQDZYI3BJJDBG0566");
+        let d3 = g2_decode_live_page(G2_PAGE_BOARD_3_HEX);
+        assert_eq!(d3.algorithm_and_key_version, 0x11);
+        assert_eq!(d3.hashboard_sn, "E015YI3BJAAAH0013");
+        // Braiins boot table (same session, logread) printed S/N
+        // HQDZYI3BJJDBG0566 for hashboards #1 and #2 and E015YI3BJAAAH0013
+        // for #3 — the oracle these asserts pin against.
+    }
+
+    #[test]
+    fn g2_live_pages_have_distinct_serials_and_same_generation() {
+        let d12 = g2_decode_live_page(G2_PAGE_BOARDS_1_2_HEX);
+        let d3 = g2_decode_live_page(G2_PAGE_BOARD_3_HEX);
+        assert_ne!(d12.hashboard_sn, d3.hashboard_sn);
+        assert_eq!(d12.algorithm_and_key_version, d3.algorithm_and_key_version);
+    }
+
+    // ---- G3: version→key mapping row + residual fields (2026-09-02) --------
+    //
+    // The live pages' header (0x11/0x42) is the FIRST datum whose key-version
+    // byte lies outside the desk-derived 0x04/0x05 rows. The row is recorded
+    // as EVIDENCE (dossier B6 §12 + the consts in deployed_eeprom.rs):
+    // 0x11 → XXTEA nibble 1 + slot-1 nibble, empirically the BM1398-generation
+    // factory slot-1 key `uileynimggnagnau` (AMTC jig table slot 1). Caveats:
+    // n=1 unit, 2 distinct boards (boards 1/2 byte-identical pages), single
+    // generation sample; arbitration was by the serial oracle, not the header.
+
+    /// The core G3 pin: both live pages carry the mapped header, its nibbles
+    /// read XXTEA/slot-1, byte 1 equals the full block span (the jig
+    /// "information length" corroboration), and the row's key is the one the
+    /// fixtures actually decrypt with (via the evidence const).
+    #[test]
+    fn g3_live_header_pins_the_mapping_row() {
+        for page_hex in [G2_PAGE_BOARDS_1_2_HEX, G2_PAGE_BOARD_3_HEX] {
+            let page = g2_from_hex(page_hex);
+            assert_eq!(
+                page[..2],
+                crate::deployed_eeprom::BM1398_GENERATION_LIVE_HEADER[..],
+                "live pages must carry the pinned G3 header"
+            );
+            let d = g2_decode_live_page(page_hex);
+            assert_eq!(d.algorithm_and_key_version, 0x11);
+            assert_eq!(d.algorithm_and_key_version >> 4, 0x1, "algorithm nibble = XXTEA");
+            assert_eq!(d.algorithm_and_key_version & 0x0F, 0x1, "key nibble = slot 1");
+            assert_eq!(
+                d.zhiju_information_length as usize, ZHIJU_BLOCK_MIN_LEN,
+                "byte 1 equals the full block span on the live pages"
+            );
+        }
+        // The evidence-const key is the AMTC jig slot-1 key, byte-exact — and
+        // NOT any shipped KEY_LARGE slot (pinned separately in deployed_eeprom).
+        assert_eq!(
+            crate::deployed_eeprom::LIVE_PROVEN_BM1398_GENERATION_SLOT1_KEY,
+            *b"uileynimggnagnau"
+        );
+    }
+
+    /// First real-plaintext validation of the fail-open CRC5 framing: both live
+    /// blocks' stored bytes equal the recompute over `[..0x41]`.
+    #[test]
+    fn g3_live_pages_crc5_recompute_matches() {
+        for page_hex in [G2_PAGE_BOARDS_1_2_HEX, G2_PAGE_BOARD_3_HEX] {
+            let block = g3_live_plaintext_block(page_hex);
+            let d = decode_zhiju_block(&block).expect("live page decodes");
+            assert_eq!(d.verify_crc5(&block), Crc5Check::Match);
+        }
+    }
+
+    /// Residual G2 fields: the trailing 12-char part/date codes are exactly
+    /// `chip_die[2] @0x14` + `chip_marking[13] @0x16` (NUL-padded) — already in
+    /// the jig field map. Pinned here with the live values and byte extents.
+    /// Semantics are NOT pinned by any held factory source — HYPOTHESIS only,
+    /// see the module docs and B6 §12; do not build logic on the characters.
+    #[test]
+    fn g3_trailing_part_date_code_fields_pinned() {
+        let b12 = g3_live_plaintext_block(G2_PAGE_BOARDS_1_2_HEX);
+        let b3 = g3_live_plaintext_block(G2_PAGE_BOARD_3_HEX);
+        // Byte extents: significant chars at [0x14..0x20), NUL pad [0x20..0x23).
+        assert_eq!(&b12[offset::CHIP_DIE..offset::CHIP_DIE + CHIP_DIE_LEN], b"ED");
+        assert_eq!(&b12[0x14..0x20], b"EDA13X20AU01");
+        assert!(b12[0x20..0x23].iter().all(|&b| b == 0), "NUL padding after the 12th char");
+        assert_eq!(&b3[0x14..0x20], b"EDH13X20BV1L");
+        assert!(b3[0x20..0x23].iter().all(|&b| b == 0));
+        // And the decoded struct fields carry the same values.
+        let d12 = decode_zhiju_block(&b12).expect("decode");
+        let d3 = decode_zhiju_block(&b3).expect("decode");
+        assert_eq!(d12.chip_die, "ED");
+        assert_eq!(d12.chip_marking, "A13X20AU01");
+        assert_eq!(d3.chip_die, "ED");
+        assert_eq!(d3.chip_marking, "H13X20BV1L");
+        assert_eq!(format!("{}{}", d12.chip_die, d12.chip_marking), "EDA13X20AU01");
+        assert_eq!(format!("{}{}", d3.chip_die, d3.chip_marking), "EDH13X20BV1L");
+    }
+
+    /// The G3 row confers NO decode authority on `decode_deployed_eeprom`: a
+    /// 256-byte page built from the live capture (0xFF fill + 0x5A sentinel per
+    /// the session-receipt page shape) still refuses — the BM1398-generation
+    /// page is a zhiju-window page, not a 3-region deployed page. Pins that the
+    /// mapping is evidence-recorded, not a dispatch.
+    #[test]
+    fn g3_mapping_row_adds_no_deployed_dispatch() {
+        for page_hex in [G2_PAGE_BOARDS_1_2_HEX, G2_PAGE_BOARD_3_HEX] {
+            let captured = g2_from_hex(page_hex);
+            let mut page = vec![0xFFu8; crate::deployed_eeprom::RAW_PAGE_LEN];
+            page[..captured.len()].copy_from_slice(&captured);
+            page[crate::deployed_eeprom::SENTINEL_OFFSET] =
+                crate::deployed_eeprom::SENTINEL_VALUE;
+            assert_eq!(
+                crate::deployed_eeprom::decode_deployed_eeprom(&page),
+                Err(crate::deployed_eeprom::DeployedEepromError::UnsupportedAlgorithm {
+                    algo_nibble: 0x4
+                })
+            );
+        }
+    }
+
+    /// Live V/F corroboration of the big-endian decode: 525 MHz matches the
+    /// stock NBP1901 ladder (B6 §2) and the session-receipt live idle reading
+    /// (12.80 V / 525 MHz). The +0x35 u16 decodes to 1280 — 12.80 V under the
+    /// deployed format's centivolt convention and inside the stock 12.60–13.00 V
+    /// band; under this struct's millivolt field label it would be a physically
+    /// nonsensical 1.28 V. Unit-label discrepancy recorded (B6 §12); the raw
+    /// value exposure of the struct is deliberately unchanged.
+    #[test]
+    fn g3_live_vf_fields_match_stock_ladder_and_live_idle() {
+        for page_hex in [G2_PAGE_BOARDS_1_2_HEX, G2_PAGE_BOARD_3_HEX] {
+            let d = g2_decode_live_page(page_hex);
+            assert_eq!(d.frequency_mhz, 525);
+            assert_eq!(d.voltage_mv, 1280);
+        }
     }
 }

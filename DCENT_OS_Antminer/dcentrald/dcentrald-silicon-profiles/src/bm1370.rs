@@ -131,6 +131,41 @@ pub const BM1370_CHAIN_COUNT_S21_PRO: u32 = 3;
 /// air-cooled S21 Pro uses 3 chains scaled appropriately).
 pub const BM1370_CHAIN_COUNT_S21_PRO_BAXE: u32 = 1;
 
+// --- S21 XP / S21+ geometry (Lane J, 2026-09-01) -------------------------
+// Resolved from two independent held sources that agree first-hand, closing
+// BETA_ROSTER conflict #2 and the stale "4x220+" MASTER_MODEL_CATALOG cells:
+//  - bosminer model-list.json (num_per_hb / num_domains / num_per_domain):
+//
+//    model-list.json, SHA-256 c79f56e2...
+//  - ePIC jig hashboard DB (chain_num, ePIC-transcribed corroboration only):
+//
+//    epic-jig-hashboard-db-50models.json
+// These are geometry only; they grant NO controller/energize authority (no
+// live BM1370 unit; GPIO437 DMM-unverified; controller unresolved).
+
+/// BM1370 chips on ONE Antminer S21 XP hashboard chain (91 = 13 domains x 7).
+/// Held A3HB70501 (bosminer num_per_hb=91, num_domains=13, num_per_domain=7;
+/// ePIC A3HB705xx chain_asic_num=91). model.rs `s21xp` -> hint Some(91).
+pub const BM1370_CHIPS_PER_CHAIN_S21_XP: u32 = 91;
+
+/// Standard Antminer S21 XP hashboard/chain count (3; ttyS3/ttyS2/ttyS1).
+/// ePIC A3HB705xx chain_num=3; production UART route is three chains.
+pub const BM1370_CHAIN_COUNT_S21_XP: u32 = 3;
+
+/// Whole-unit BM1370 chip count for a standard 3-board S21 XP (273 = 3 x 91).
+pub const BM1370_CHIPS_TOTAL_S21_XP: u32 = 273;
+
+/// BM1370 chips on ONE Antminer S21+ hashboard chain (55 = 11 domains x 5).
+/// Held A3HB70701 (bosminer num_per_hb=55, num_domains=11, num_per_domain=5;
+/// ePIC A3HB707xx chain_asic_num=55). model.rs `s21plus` -> hint Some(55).
+pub const BM1370_CHIPS_PER_CHAIN_S21_PLUS: u32 = 55;
+
+/// Standard Antminer S21+ hashboard/chain count (3; ePIC A3HB707xx chain_num=3).
+pub const BM1370_CHAIN_COUNT_S21_PLUS: u32 = 3;
+
+/// Whole-unit BM1370 chip count for a standard 3-board S21+ (165 = 3 x 55).
+pub const BM1370_CHIPS_TOTAL_S21_PLUS: u32 = 165;
+
 /// Operational baud after baud-upgrade (Bitmain firmware path).
 pub const BM1370_OPERATIONAL_BAUD: u32 = 3_125_000;
 
@@ -496,6 +531,39 @@ mod tests {
             BM1370_CHIPS_PER_CHAIN_S21_PRO, BM1370_CHIPS_TOTAL_S21_PRO,
             "per-chain must never be re-aliased to the unit total"
         );
+    }
+
+    /// S21 XP and S21+ resolved geometry (Lane J, 2026-09-01). Two independent
+    /// held sources agree: bosminer model-list.json per-board counts (91/55) and
+    /// the ePIC jig hashboard DB chain_num=3. Pin the per-chain x chain-count =
+    /// unit-total relationship so the falsified "4x220+" cannot return.
+    #[test]
+    fn s21xp_and_s21plus_geometry_is_three_boards_times_the_held_per_board_count() {
+        // S21 XP: A3HB70501, 13 domains x 7 = 91/board, 3 boards = 273.
+        assert_eq!(BM1370_CHIPS_PER_CHAIN_S21_XP, 91);
+        assert_eq!(BM1370_CHAIN_COUNT_S21_XP, 3);
+        assert_eq!(
+            BM1370_CHIPS_PER_CHAIN_S21_XP * BM1370_CHAIN_COUNT_S21_XP,
+            BM1370_CHIPS_TOTAL_S21_XP,
+            "3 x 91 BM1370 must equal the 273-chip S21 XP full SKU"
+        );
+        assert_ne!(BM1370_CHIPS_PER_CHAIN_S21_XP, BM1370_CHIPS_TOTAL_S21_XP);
+
+        // S21+: A3HB70701, 11 domains x 5 = 55/board, 3 boards = 165.
+        assert_eq!(BM1370_CHIPS_PER_CHAIN_S21_PLUS, 55);
+        assert_eq!(BM1370_CHAIN_COUNT_S21_PLUS, 3);
+        assert_eq!(
+            BM1370_CHIPS_PER_CHAIN_S21_PLUS * BM1370_CHAIN_COUNT_S21_PLUS,
+            BM1370_CHIPS_TOTAL_S21_PLUS,
+            "3 x 55 BM1370 must equal the 165-chip S21+ full SKU"
+        );
+
+        // The three BM1370 air SKUs are distinct per-board geometries; none is
+        // the falsified 220-chip machine.
+        assert_ne!(BM1370_CHIPS_PER_CHAIN_S21_PRO, BM1370_CHIPS_PER_CHAIN_S21_XP);
+        assert_ne!(BM1370_CHIPS_PER_CHAIN_S21_XP, BM1370_CHIPS_PER_CHAIN_S21_PLUS);
+        assert_ne!(BM1370_CHIPS_TOTAL_S21_XP, 220);
+        assert_ne!(BM1370_CHIPS_TOTAL_S21_PLUS, 220);
     }
 
     #[test]

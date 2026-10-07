@@ -520,9 +520,10 @@ assert "$OUTPUT_DIR/" not in cleanup
 assert driver.count("dcent_release_require_publication_absent") == 1
 assert "this inner process never deletes publication pathnames" in driver
 assert "direct Buildroot packaging is disabled" in driver
-assert '${CAPSULE_SOURCE_SNAPSHOT_MOUNT}:/dcent-capsule-source:ro' in driver
-assert '${GIT_OBJECT_REPO_MOUNT}:/dcent-git-object-repo:ro' in driver
-assert driver.count('DCENT_PROVENANCE_HELPER="/build/dcentos/scripts/source_snapshot.py"') == 2
+assert '${CAPSULE_SOURCE_STAGE_MOUNT}:/dcentos-source-snapshot-release:ro' in driver
+assert '${GIT_COMMON_DIR_MOUNT}:/dcent-git-object-repo/.git:ro' in driver
+assert '-e GIT_CONFIG_VALUE_0=/dcent-git-object-repo' in driver
+assert driver.count('DCENT_PROVENANCE_HELPER="/build/DCENT_OS_Antminer/scripts/source_snapshot.py"') == 2
 assert 'RELEASE_SIGNATURE_PATH="${RELEASE_COPY}.sig"' in driver
 assert 'verify_sd_image.sh" "$RELEASE_COPY"' in driver
 assert 'if dcent_release_provenance_required; then\n        echo "ERROR: release build has no canonical publication name' in driver

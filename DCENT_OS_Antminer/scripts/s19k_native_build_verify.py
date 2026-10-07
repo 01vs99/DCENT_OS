@@ -72,6 +72,8 @@ SEMANTIC_SOURCE_PATHS = (
     "DCENT_OS_Antminer/dcentrald/dcentrald-common/src/s19k_bm1366_nopic_beta.rs",
     "DCENT_OS_Antminer/dcentrald/dcentrald-hal/src/platform/amlogic/mod.rs",
     "DCENT_OS_Antminer/dcentrald/dcentrald/src/serial_mining.rs",
+    "DCENT_OS_Antminer/dcentrald/dcentrald/src/serial_mining/s19k_native_identity.rs",
+    "DCENT_OS_Antminer/dcentrald/dcentrald-hal/src/i2c.rs",
     "DCENT_OS_Antminer/dcentrald/rust-toolchain.toml",
     "DCENT_OS_Antminer/dcentrald/.cargo/config.toml",
     "DCENT_OS_Antminer/dcentrald/Cargo.lock",
@@ -130,7 +132,9 @@ LOCAL_PACKAGE_MANIFESTS = {
 }
 COMPILE_ENVIRONMENT = {
     "AR_aarch64_unknown_linux_musl": "/usr/local/bin/zig-ar",
+    "CARGO_BUILD_JOBS": "2",
     "CARGO_BUILD_PROFILE": "release",
+    "CARGO_INCREMENTAL": "0",
     "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER": "rust-lld",
     "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS": "-C linker=rust-lld",
     "CARGO_TARGET_DIR": "/cargo-target",

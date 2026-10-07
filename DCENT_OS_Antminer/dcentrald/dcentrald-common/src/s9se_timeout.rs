@@ -86,9 +86,9 @@ mod tests {
     fn two_hundred_eight_cores_ceil_to_256_and_timeout_is_integer() {
         assert_eq!(calculate_core_number(208).unwrap(), 256);
         assert_eq!(calculate_asic_number(60).unwrap(), 64);
-        // 50 * (2 * (16777216/256) / 400) / 100 = 163
-        assert_eq!(stock_timeout_s9se(400).unwrap(), 163);
-        assert_eq!(timeout_control_word(163, 1), 163 | 0x8000_0000);
+        // 50 * (4 * (16777216/256) / 400) / 100 = 327 (integer operations).
+        assert_eq!(stock_timeout_s9se(400).unwrap(), 327);
+        assert_eq!(timeout_control_word(327, 1), 327 | 0x8000_0000);
         assert_eq!(WORKING_BAUDDIV, 1);
         assert_eq!(DEFAULT_TICKET_MASK, 0x3F);
         assert_eq!(

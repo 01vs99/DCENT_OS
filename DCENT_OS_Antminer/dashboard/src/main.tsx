@@ -16,7 +16,7 @@ import './styles/common.css';
 import './styles/charts.css';
 import './styles/responsive.css';
 import './styles/motion.css';
-// Claude-Design handoff visual recreation — loaded LAST so it re-skins
+// Design-system handoff visual recreation — loaded LAST so it re-skins
 // every mode (foundation VR1; per-mode structural recreation VR2–VR5).
 import './styles/handoff-skin.css';
 // Per-mode handoff recreation skins (VR2/VR3/VR4) — each scoped to its

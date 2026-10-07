@@ -15,6 +15,9 @@ import unittest
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BUILDER = SCRIPT_DIR / "build_am2_s19jpro_sd_disk_image.sh"
+BAKED_CONFIG = (
+    SCRIPT_DIR.parent / "dcentrald/configs/dcentrald_s19jpro_xil_baked_default.toml"
+)
 
 
 class Am2S19jproSdBuilderHardeningTests(unittest.TestCase):
@@ -68,6 +71,7 @@ class Am2S19jproSdBuilderHardeningTests(unittest.TestCase):
             "BOOT.bin": b"B" * 20_000,
             "uImage": b"\x27\x05\x19\x56" + b"K" * 65_532,
             "devicetree.dtb": b"\xd0\x0d\xfe\xed" + b"D" * 60,
+            "system.bit": b"isolated-bitstream-input-fixture",
         }
         records: dict[str, object] = {}
         for name, value in values.items():
@@ -109,6 +113,8 @@ class Am2S19jproSdBuilderHardeningTests(unittest.TestCase):
                 payload.as_posix(),
                 "--artifacts",
                 artifacts.as_posix(),
+                "--bitstream",
+                (artifacts / "system.bit").as_posix(),
                 *extra,
                 "--validate-inputs-only",
             ],
@@ -167,6 +173,57 @@ class Am2S19jproSdBuilderHardeningTests(unittest.TestCase):
             self.assertFalse(
                 (root / "output/sd_card_am2_s19jpro/dcentos-am2-s19jpro.img").exists()
             )
+
+    def test_declared_origin_consistency_preserves_legacy_and_handoff(self) -> None:
+        baked = BAKED_CONFIG.read_text(encoding="utf-8")
+        mining_section = "[mining]\n"
+        passthrough_line = "passthrough = false\n"
+        self.assertNotIn('am2_boot_origin =', baked)
+        self.assertEqual(baked.count(mining_section), 1)
+        self.assertEqual(baked.count(passthrough_line), 1)
+        cases = (
+            ("native", '"native_cold"', "false", True),
+            ("native_literal_string", "'native_cold'", "false", True),
+            ("native_default_passthrough", '"native_cold"', None, True),
+            ("native_passthrough_conflict", '"native_cold"', "true", False),
+            ("native_invalid_passthrough_type", '"native_cold"', '"false"', False),
+            ("unknown_origin", '"stock_warm"', "false", False),
+            ("unknown_origin_with_embedded_space", '"native_ cold"', "false", False),
+            ("invalid_origin_type", "false", "false", False),
+            ("empty_declared_origin", '""', "false", False),
+            ("absent_legacy_origin", None, "true", True),
+            ("fresh_generic_origin", None, "false", True),
+            ("explicit_handoff", '"inherited_handoff"', "true", True),
+            ("handoff_rail_selection_remains_runtime_owned", '"inherited_handoff"', "false", True),
+        )
+        for label, origin, passthrough, admitted in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                payload = self.stage_payload(root)
+                artifacts = self.stage_artifacts(root)
+                config = root / "selected.toml"
+                text = baked.replace(
+                    mining_section, mining_section + ("" if origin is None else f"am2_boot_origin = {origin}\n")
+                ).replace(
+                    passthrough_line,
+                    "" if passthrough is None else f"passthrough = {passthrough}\n",
+                )
+                config.write_text(text, encoding="utf-8", newline="\n")
+
+                result = self.run_preflight(
+                    root, payload, artifacts, "--xil-config", config.as_posix()
+                )
+
+                if admitted:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("AM2_S19JPRO_SD_INPUTS_READY", result.stdout)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("am2_boot_origin", result.stderr)
+                    self.assertNotIn("AM2_S19JPRO_SD_INPUTS_READY", result.stdout)
+                self.assertFalse(
+                    (root / "output/sd_card_am2_s19jpro/dcentos-am2-s19jpro.img").exists()
+                )
 
     def test_manifest_retains_authority_and_provenance_contract(self) -> None:
         text = BUILDER.read_text(encoding="utf-8")

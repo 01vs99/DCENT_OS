@@ -121,9 +121,34 @@ fn redact(text: &str) -> String {
 /// This is the one place every bundle section must funnel through so a wallet
 /// can never reach the support download (the bundle is a one-click export an
 /// operator emails to support / posts in a forum).
-fn scrub(text: &str) -> String {
+pub(crate) fn scrub(text: &str) -> String {
     let masked = dcentrald_common::wallet_mask::mask_in_string(text);
-    redact(&masked)
+    let mut private_key = false;
+    // Logs are free-form, including compact JSON, headers and URL userinfo.
+    // Drop the complete line when a later field could escape the KV parser.
+    masked.lines().map(|line| {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("-----begin ") && lower.contains("private key-----") { private_key = true; }
+        if private_key {
+            if lower.contains("-----end ") && lower.contains("private key-----") { private_key = false; }
+            return "<redacted private key material>\n".to_owned();
+        }
+        let sensitive_header = ["authorization", "cookie", "bearer ", "basic "]
+            .iter().any(|needle| lower.contains(needle));
+        let userinfo = lower.split("://").skip(1)
+            .any(|url| url.split('/').next().unwrap_or("").contains('@'));
+        let secret_later = SECRET_KEY_PATTERNS.iter().any(|key| {
+            lower.contains(&format!("\"{key}\"")) || lower.contains(&format!("{key}="))
+                || lower.contains(&format!("{key}:"))
+        });
+        let ssh_key = ["ssh-rsa ", "ssh-ed25519 ", "ecdsa-sha2-"].iter().any(|s| lower.contains(s));
+        // A bounded tail can start in the middle of a PEM/OpenSSH key block.
+        let encoded_material = line.trim().len() >= 32 && line.trim().bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b));
+        if sensitive_header || userinfo || secret_later || ssh_key || encoded_material {
+            "<redacted credential-bearing log line>\n".to_owned()
+        } else { redact(line) }
+    }).collect()
 }
 
 fn redact_line(line: &str) -> String {
@@ -719,26 +744,27 @@ const LOG_PATHS: &[&str] = &[
 const TAIL_BYTES: usize = 256 * 1024; // 256 KiB tail per source.
 
 fn read_tail(path: &str, max_bytes: usize) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
-    let start = bytes.len().saturating_sub(max_bytes);
-    Some(String::from_utf8_lossy(&bytes[start..]).into_owned())
+    use std::io::{Read, Seek, SeekFrom};
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() { return None; }
+    file.seek(SeekFrom::Start(metadata.len().saturating_sub(max_bytes as u64))).ok()?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes as u64).read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 async fn get_log_backup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let mut bundle = String::with_capacity(64 * 1024);
-
-    bundle.push_str("# DCENT_OS log backup bundle\n");
-    bundle.push_str("# RE2 §15.2 create_log_backup.cgi parity. Redacted via key-pattern match.\n");
-    bundle.push_str(&format!(
-        "# Generated at unix_ts={}\n\n",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    ));
-
-    // Section 1: miner state snapshot (JSON-redacted).
-    bundle.push_str("===== miner state snapshot =====\n");
+    let diagnostics = crate::diagnostics::snapshot().await;
+    let logs = tokio::task::spawn_blocking(|| LOG_PATHS.iter()
+        .filter_map(|path| read_tail(path, TAIL_BYTES).map(|tail| (*path, tail)))
+        .collect::<Vec<_>>()).await.unwrap_or_default();
     let miner = state.state_rx.borrow().clone();
     let snapshot_json = serde_json::to_string_pretty(&serde_json::json!({
         "firmware": "DCENTos",
@@ -755,44 +781,8 @@ async fn get_log_backup(State(state): State<Arc<AppState>>) -> impl IntoResponse
         })).collect::<Vec<_>>(),
     }))
     .unwrap_or_else(|_| "{}".to_string());
-    // SEC-W24-2: mask wallet addresses + redact secret KV pairs.
-    bundle.push_str(&scrub(&snapshot_json));
-    bundle.push_str("\n\n");
-
-    // Section 2: daemon log tail (last 256 KiB of any matching file).
-    bundle.push_str("===== daemon log tail =====\n");
-    let mut found_log = false;
-    for path in LOG_PATHS {
-        if let Some(tail) = read_tail(path, TAIL_BYTES) {
-            bundle.push_str(&format!("--- {path} ---\n"));
-            // SEC-W24-2: mask wallet addresses + redact secret KV pairs.
-            bundle.push_str(&scrub(&tail));
-            bundle.push('\n');
-            found_log = true;
-        }
-    }
-    if !found_log {
-        bundle.push_str("(no daemon log files readable)\n");
-    }
-    bundle.push('\n');
-
-    // Section 3: kernel ring buffer (best-effort).
-    bundle.push_str("===== dmesg tail =====\n");
-    match std::process::Command::new("dmesg").arg("-T").output() {
-        Ok(out) if out.status.success() => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            // Cap dmesg to 64 KiB tail to keep bundle bounded.
-            let start = text.len().saturating_sub(64 * 1024);
-            // SEC-W24-2: dmesg was previously pushed RAW. The kernel ring can
-            // carry a wallet that userspace logged via /dev/kmsg — route it
-            // through the same mask+redact pipeline as the other sections.
-            bundle.push_str(&scrub(&text[start..]));
-        }
-        _ => {
-            bundle.push_str("(dmesg unavailable)\n");
-        }
-    }
-    bundle.push('\n');
+    let bundle = render_bundle(&snapshot_json,
+        &serde_json::to_string_pretty(&diagnostics).unwrap_or_default(), logs, &kernel_log_tail().await);
 
     let filename = format!(
         "dcentos-log-bundle-{}.txt",
@@ -827,11 +817,93 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/network/hostname", post(post_network_hostname))
         .route("/api/miner/type", get(get_miner_type))
         .route("/api/log/backup", get(get_log_backup))
+        .route("/api/diagnostics", get(|| async { Json(crate::diagnostics::snapshot().await) }))
+}
+
+fn render_bundle(snapshot_json: &str, diagnostics_json: &str, logs: Vec<(&str, String)>, kernel: &str) -> String {
+    let mut bundle = String::with_capacity(64 * 1024);
+
+    bundle.push_str("# DCENT_OS log backup bundle\n");
+    bundle.push_str("# RE2 §15.2 create_log_backup.cgi parity. Redacted via key-pattern match.\n");
+    bundle.push_str(&format!(
+        "# Generated at unix_ts={}\n\n",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    ));
+
+    // Section 1: miner state snapshot (JSON-redacted).
+    bundle.push_str("===== miner state snapshot =====\n");
+    // SEC-W24-2: mask wallet addresses + redact secret KV pairs.
+    bundle.push_str(&scrub(&snapshot_json));
+    bundle.push_str("\n\n");
+
+    bundle.push_str("===== build and last crash diagnostics =====\n");
+    bundle.push_str(&scrub(diagnostics_json));
+
+    // Section 2: daemon log tail (last 256 KiB of any matching file).
+    bundle.push_str("===== daemon log tail =====\n");
+    let mut found_log = false;
+    for (path, tail) in logs {
+            bundle.push_str(&format!("--- {path} ---\n"));
+            // SEC-W24-2: mask wallet addresses + redact secret KV pairs.
+            bundle.push_str(&scrub(&tail));
+            bundle.push('\n');
+            found_log = true;
+    }
+    if !found_log {
+        bundle.push_str("(no daemon log files readable)\n");
+    }
+    bundle.push('\n');
+
+    // Section 3: kernel ring buffer (best-effort).
+    bundle.push_str("===== dmesg tail =====\n");
+    bundle.push_str(&scrub(kernel));
+    bundle.push('\n');
+
+    bundle
+}
+
+async fn kernel_log_tail() -> String {
+    use tokio::io::AsyncReadExt;
+    let read = async {
+        let mut child = tokio::process::Command::new("dmesg").args(["-T", "-s", "65536"])
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null())
+            .kill_on_drop(true).spawn().ok()?;
+        let mut bytes = Vec::new();
+        child.stdout.take()?.take(65537).read_to_end(&mut bytes).await.ok()?;
+        if bytes.len() > 65536 { let _ = child.kill().await; return None; }
+        if !child.wait().await.ok()?.success() { return None; }
+        Some(scrub(&String::from_utf8_lossy(&bytes)))
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), read).await.ok().flatten()
+        .unwrap_or_else(|| "(dmesg unavailable)\n".into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emitted_problem_bundle_bounds_real_log_reads_and_removes_credentials() {
+        let path = std::env::temp_dir().join(format!("dcent-support-{}", uuid::Uuid::new_v4()));
+        let secrets = concat!("pool=stratum+tcp://alice:pool-secret@example:3333\n{\"ok\":1,\"password\":\"json-secret\"}\nAuthorization: Bearer bearer-secret\nCookie: sid=cookie-secret\nssh-ed25519 public-key-material\n-----BEGIN OPENSSH ", "PRIVATE KEY-----\nprivate-key-material\n-----END OPENSSH PRIVATE KEY-----\n");
+        fs::write(&path, format!("{}\n{secrets}", "x".repeat(TAIL_BYTES * 2))).unwrap();
+        let tail = read_tail(path.to_str().unwrap(), TAIL_BYTES).unwrap();
+        assert!(tail.len() <= TAIL_BYTES);
+        let bundle = render_bundle("{\"version\":\"1.2.3\"}",
+            "{\n\"board_target\":\"am3-s21\",\n\"last_panic\":\"token=panic-secret\"\n}",
+            vec![("daemon", tail)], "api_key=kernel-secret");
+        for secret in ["pool-secret", "json-secret", "bearer-secret", "cookie-secret",
+            "public-key-material", "private-key-material", "panic-secret", "kernel-secret"] {
+            assert!(!bundle.contains(secret), "leaked {secret}");
+        }
+        assert!(bundle.contains("am3-s21"));
+        assert!(bundle.contains("1.2.3"));
+        assert!(bundle.len() < TAIL_BYTES + 4096);
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn redact_password_eq_form() {

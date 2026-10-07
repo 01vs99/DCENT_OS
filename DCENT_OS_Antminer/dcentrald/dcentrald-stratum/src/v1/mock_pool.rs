@@ -143,8 +143,8 @@ fn notify(config: &MockV1PoolConfig) -> Value {
         "params": [
             config.job_id,
             "00".repeat(32),
-            "01000000",
-            "ffffffff",
+            format!("0100000001{}ffffffff08", "00".repeat(32)),
+            "ffffffff010000000000000000015100000000",
             [],
             "20000000",
             "1d00ffff",

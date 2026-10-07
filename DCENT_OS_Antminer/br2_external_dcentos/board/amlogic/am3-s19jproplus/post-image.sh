@@ -1,12 +1,4 @@
 #!/bin/sh
-#
-# DCENTos post-image script - am3-s19jproplus (S19j Pro+ Amlogic exact package lane).
-#
-# S19j Pro+ reuses the shared A113D rootfs-window package writer while carrying
-# its own overlay, defconfig, exact build-input binding, and output identity.
-#
-
-set -e
-
+set -eu
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
-exec "$SCRIPT_DIR/../am3-s21/post-image.sh" "$@"
+exec "$SCRIPT_DIR/../am3-bm1362-nopic/post-image.sh" "$@"

@@ -25,7 +25,7 @@ use crate::led_patterns;
 /// Platform LED writer used by [`LedEngine`].
 ///
 /// S9/Zynq uses the AXI [`GpioController`] (Linux LED-class sysfs).
-/// Amlogic / BeagleBone / CViTek have no AXI GPIO map; VNish `blink` and
+/// Amlogic / BeagleBone have no AXI GPIO map; VNish `blink` and
 /// `S11board` drive the front-panel pair through sysfs GPIO (AML 438/453,
 /// live-confirmed on S21 `a lab unit`). The engine must own those writes — overlay
 /// scripts must not open a parallel locate loop.
@@ -59,7 +59,6 @@ impl LedIo for GpioController {
 pub enum SysfsLedPlatform {
     Amlogic,
     BeagleBone,
-    Cvitek,
 }
 
 /// Map a logical LED onto the Amlogic red/green sysfs pair.
@@ -114,47 +113,94 @@ impl LedIo for BeagleBoneSysfsLed {
     }
 }
 
-/// CViTek CV1835 front-panel LEDs.
-pub struct CvitekSysfsLed;
-
-impl LedIo for CvitekSysfsLed {
-    fn set_led(&self, led: Led, on: bool) {
-        match led {
-            Led::Green => crate::platform::cvitek::set_led_green(on),
-            Led::Red => crate::platform::cvitek::set_led_red(on),
-            Led::RedInternal | Led::D8 => {}
-        }
-    }
-    fn read_led(&self, _led: Led) -> bool {
-        false
-    }
-    fn init_leds(&self) {
-        crate::platform::cvitek::set_led_green(false);
-        crate::platform::cvitek::set_led_red(false);
-    }
-}
-
-/// Pick a sysfs LED backend when AXI GPIO is absent (Amlogic/BB/CV).
+/// Pick a sysfs LED backend when AXI GPIO is absent (Amlogic/BB).
 ///
 /// Probe order is fail-closed: never assume Amlogic pins on a Zynq board
 /// that already has `/sys/class/leds/Green LED` (S9 LED-class path).
 pub fn sysfs_status_led_kind() -> Option<SysfsLedPlatform> {
-    if Path::new("/sys/class/leds/Green LED").exists() {
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    let compatible =
+        std::fs::read_to_string("/sys/firmware/devicetree/base/compatible").unwrap_or_default();
+    let model = std::fs::read_to_string("/proc/device-tree/model").unwrap_or_default();
+    sysfs_status_led_from_evidence(
+        &cpuinfo,
+        &compatible,
+        &model,
+        Path::new("/sys/module/uart_trans").exists(),
+        Path::new("/sys/class/leds/Green LED").exists(),
+        crate::platform::cv1835_retirement::cv1835_child_identity(Path::new(
+            "/sys/firmware/devicetree/base",
+        )),
+    )
+}
+
+fn sysfs_status_led_from_evidence(
+    cpuinfo: &str,
+    compatible: &str,
+    model: &str,
+    uart_trans_loaded: bool,
+    has_axi_led: bool,
+    cv1835_children: bool,
+) -> Option<SysfsLedPlatform> {
+    crate::platform::cv1835_retirement::require_supported_controller(
+        cpuinfo,
+        compatible,
+        model,
+        uart_trans_loaded,
+        cv1835_children,
+    )
+    .ok()?;
+    if has_axi_led {
         return None;
     }
-    if Path::new("/sys/module/uart_trans").exists() {
-        return Some(SysfsLedPlatform::Cvitek);
+    // ttyS1 and uart_trans are shared across these controllers. In particular,
+    // the AM335x mainline ttyS naming must never select Amlogic GPIO438/453.
+    match crate::platform::classify_soc_evidence(cpuinfo, compatible) {
+        Some(crate::platform::BoardType::BeagleBone) => Some(SysfsLedPlatform::BeagleBone),
+        Some(crate::platform::BoardType::Amlogic) => Some(SysfsLedPlatform::Amlogic),
+        _ => None,
     }
-    if Path::new("/dev/ttyO1").exists() && !Path::new("/dev/uio0").exists() {
-        return Some(SysfsLedPlatform::BeagleBone);
+}
+
+#[cfg(test)]
+mod controller_identity_tests {
+    use super::*;
+
+    #[test]
+    fn shared_uart_module_preserves_the_actual_led_controller() {
+        for loaded in [false, true] {
+            assert_eq!(
+                sysfs_status_led_from_evidence("Hardware: AM33XX", "", "", loaded, false, false),
+                Some(SysfsLedPlatform::BeagleBone)
+            );
+            assert_eq!(
+                sysfs_status_led_from_evidence("", "amlogic,meson-axg", "", loaded, false, false),
+                Some(SysfsLedPlatform::Amlogic)
+            );
+        }
     }
-    if Path::new("/sys/class/gpio/gpio438").exists()
-        || Path::new("/sys/class/gpio/gpio453").exists()
-        || (Path::new("/dev/ttyS1").exists() && !Path::new("/dev/uio0").exists())
-    {
-        return Some(SysfsLedPlatform::Amlogic);
+
+    #[test]
+    fn retired_unknown_and_axi_controllers_never_get_guessed_sysfs_leds() {
+        for loaded in [false, true] {
+            assert_eq!(
+                sysfs_status_led_from_evidence("", "cvitek,cv1835", "", loaded, false, false),
+                None
+            );
+            assert_eq!(
+                sysfs_status_led_from_evidence("", "linux,dummy-virt", "", loaded, false, true),
+                None
+            );
+            assert_eq!(
+                sysfs_status_led_from_evidence("", "", "", loaded, false, false),
+                None
+            );
+            assert_eq!(
+                sysfs_status_led_from_evidence("", "xlnx,zynq-7000", "", loaded, true, false),
+                None
+            );
+        }
     }
-    None
 }
 
 /// Construct the sysfs LED backend for the probed platform, if any.
@@ -162,7 +208,6 @@ pub fn sysfs_status_led_backend() -> Option<Arc<dyn LedIo>> {
     match sysfs_status_led_kind() {
         Some(SysfsLedPlatform::Amlogic) => Some(Arc::new(AmlogicSysfsLed)),
         Some(SysfsLedPlatform::BeagleBone) => Some(Arc::new(BeagleBoneSysfsLed)),
-        Some(SysfsLedPlatform::Cvitek) => Some(Arc::new(CvitekSysfsLed)),
         None => None,
     }
 }

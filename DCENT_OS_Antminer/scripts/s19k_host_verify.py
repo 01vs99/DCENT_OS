@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import struct
+import subprocess
+import tempfile
 import sys
 from pathlib import Path
 import zlib
@@ -31,6 +33,30 @@ def resp_crc5(data: bytes, init: int) -> int:
                 | feedback
             )
     return crc
+
+
+def check_ota08_exact_identity(source: str) -> None:
+    """Exercise the read-only identity function; never source the OTA executor."""
+    begin = source.index("require_amlogic_ota08_identity() {")
+    function = source[begin:source.index("\n}", begin) + 2]
+    for platform, target, expected in (
+        ("am3-aml-s19k", "am3-s19k", True),
+        ("am3-aml-s21", "am3-s21", True),
+        ("am3-aml-s19k", "am3-s19kpro", False),
+        ("am3-aml-s19kpro", "am3-aml-s19kpro", False),
+        ("am3-aml-s21", "am3-s19k", False),
+        ("am3-unknown", "am3-unknown", False),
+        (None, "am3-s19k", False),
+        ("am3-aml-s19k", None, False),
+    ):
+        with tempfile.TemporaryDirectory(prefix="dcent-ota08-identity-") as directory:
+            root = Path(directory)
+            for name, value in (("platform", platform), ("board_target", target)):
+                if value is not None:
+                    (root / name).write_text(value, encoding="utf-8")
+            script = function + '\nPLATFORM_FILE="$1/platform"\nBOARD_TARGET_FILE="$1/board_target"\nrequire_amlogic_ota08_identity\n'
+            result = subprocess.run(["sh", "-c", script, "fixture", directory], capture_output=True, text=True, timeout=5)
+            assert (result.returncode == 0) == expected, (platform, target, result.stdout, result.stderr)
 
 
 def main() -> int:
@@ -83,13 +109,21 @@ def main() -> int:
         ROOT
         / "br2_external_dcentos/board/amlogic/rootfs-overlay/etc/init.d/S37board_setup"
     ).read_text(encoding="utf-8", errors="replace")
-    assert "am3-s19k|am3-s19kpro|am3-aml-s19kpro)" in s37
-    assert 'set_gpio_value_checked "$PWR_GPIO" 1' in s37
-    assert 'set_gpio_value_checked "$PWR_GPIO" 0' in s37
-    assert "WANT_SAFE_OFF=1" in s37
+    # The generated authority owns levels; S37 has no independent SKU list.
+    spec = importlib.util.spec_from_file_location("gpio437_policy", ROOT / "scripts/generate_amlogic_gpio437.py")
+    assert spec is not None and spec.loader is not None
+    policy_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(policy_module)
+    policy = policy_module.load_policy()
+    for target in ("am3-s19k", "am3-s19kpro", "am3-aml-s19kpro"):
+        row = next(row for row in policy["profiles"] if row["board_target"] == target)
+        assert policy_module.decision(row, policy["sources"]) == ("qualified", 2, (0, 1))
+    assert 'read_psu_recipe || return 1' in s37
+    assert 'set_gpio_value_checked "$PWR_GPIO" "$PWR_OFF_VALUE"' in s37
+    assert 'set_gpio_direction_checked "$PWR_GPIO" "$PWR_OFF_DIRECTION" out' in s37
+    assert 'set_gpio_direction_checked "$PWR_GPIO" in in' in s37
     assert "IDENTITY_ROOT/board_target" in s37
     assert "GPIO437 refuse: missing or unsealed board_target=" in s37
-    assert "am3-s19jpro-aml|am3-s21|am3-s21pro|am3-s21xp)" in s37
 
     job = (ROOT / "dcentrald/dcentrald-common/src/s19k_braiins_job.rs").read_text(
         encoding="utf-8"
@@ -1508,7 +1542,10 @@ def main() -> int:
         "2xBHB56903@2,3+addr1-undetected-placeholder+"
         "eeprom-0x50-absent-0x51-0x52-0511" in deploy_rs_text
     )
-    assert "resets=454:0,455:0,456:0 psu=437:1" in deploy_rs_text
+    # 2026-08-30 runner binds the Track-1 reset set through EXPECTED_SAFEOFF_RESETS;
+    # the contract pins that exact else-branch block.
+    assert "EXPECTED_SAFEOFF_RESETS=454:0,455:0,456:0" in deploy_rs_text
+    assert "resets=$EXPECTED_SAFEOFF_RESETS psu=437:1" in deploy_rs_text
     assert "resets=472:0,473:0,474:0 psu=437:1" not in deploy_rs_text
     assert (
         "live_identity_profile_held78_three_bhb56902_slots_1_2_3="
@@ -6882,7 +6919,7 @@ def main() -> int:
     assert "AMLOGIC_RAW_NAND_RECOVERY_FLAG_EXCEPTION" in s99
     assert "require_amlogic_ota08_identity" in s99
     assert "missing live $BOARD_TARGET_FILE" in s99
-    assert "am3-s19k|am3-s19kpro|am3-aml-s19kpro" in s99
+    check_ota08_exact_identity(s99)
     assert "am3-aml-s19k:am3-s19k" in s99
     assert "am3-aml-s19jpro:am3-s19jpro-aml" in s99
     assert "am3-aml-s21:am3-s21" in s99
@@ -7104,13 +7141,27 @@ def main() -> int:
     assert 'exec 6< "$STARTUP_DAEMON_TRANSCRIPT"' in remote_trial
     assert '"$@" 6>&- 9>&-' in remote_trial
     assert remote_trial.count("clear_runtime_obligation_after_safeoff ||") >= 2
-    assert remote_trial.count("publish_handoff_no_work_transcript_receipt") >= 3
-    assert remote_trial.count("publish_bounded_work_transcript_receipt") >= 3
+    # 2026-08-30 closure (f2d3b9bc6) consolidated the two per-mode inline receipt
+    # publishes into one fail-closed publish_mode_specific_receipts_after_safeoff()
+    # that publishes install-custody + handoff-no-work + bounded-work receipts and is
+    # invoked on every checked-SafeOff exit path (stronger coverage than the two old
+    # inline sites). Re-anchored 2026-09-01 to the consolidated structure — the
+    # handoff-no-work receipt still publishes fail-closed on every no-work exit.
+    assert remote_trial.count("publish_handoff_no_work_transcript_receipt") >= 2
+    assert remote_trial.count("publish_bounded_work_transcript_receipt") >= 2
+    assert remote_trial.count("publish_install_custody_transcript_receipt") >= 2
+    assert remote_trial.count("publish_mode_specific_receipts_after_safeoff") >= 4
+    for receipt in (
+        'publish_install_custody_transcript_receipt "$MODE_WRAPPER_EXIT_STATUS"',
+        'publish_handoff_no_work_transcript_receipt "$MODE_WRAPPER_EXIT_STATUS"',
+        'publish_bounded_work_transcript_receipt "$MODE_WRAPPER_EXIT_STATUS"',
+    ):
+        assert receipt in remote_trial
     for closeout in (
         "clear_runtime_obligation_after_safeoff || exit 1\n"
-        '        publish_handoff_no_work_transcript_receipt "$EXIT_CODE"',
+        '        publish_mode_specific_receipts_after_safeoff "$EXIT_CODE"',
         "clear_runtime_obligation_after_safeoff || exit 1\n"
-        '    publish_handoff_no_work_transcript_receipt "$CHILD_STATUS"',
+        '    publish_mode_specific_receipts_after_safeoff "$CHILD_STATUS"',
     ):
         assert closeout in remote_trial
     assert 'ENDURANCE_EVIDENCE_DIR="$TRIAL_DIR/endurance_evidence"' in remote_trial
@@ -7428,13 +7479,22 @@ def main() -> int:
     hal = (ROOT / "dcentrald/dcentrald-hal/src/platform/amlogic/mod.rs").read_text(
         encoding="utf-8"
     )
-    assert "s19k_board_target_is_live_alias" in hal
+    # GPIO437 drive parameters now come from the qualified common table.
+    # Track-1 retains its exact row for cutoff; a mutable marker cannot change it.
     assert "boot_safe_handoff_s19k_requires_commanded_value_1" in hal
-    assert "am3-s19k T6 SafeOff" in hal
-    assert "am3-s19k T6 active-low enable" in hal
-    assert "s19k_board_target_is_live_alias" in hal
-    assert 'fs::write(&dir_path, "high")' in hal
-    assert "GPIO437 refuse: missing /etc/dcentos/board_target" in hal
+    track1_cut = hal.split("pub fn disable_s19k_track1_psu_checked()", 1)[1].split("\n}", 1)[0]
+    assert 'amlogic_gpio437::resolve_drive_recipe("am3-s19k")' in track1_cut
+    assert "disable_psu_checked_for_recipe(recipe)" in track1_cut
+    assert "read_to_string" not in track1_cut
+    standalone_recipe = hal.split("fn amlogic_marker_drive_recipe()", 1)[1].split("\n}", 1)[0]
+    assert 'fs::read_to_string("/etc/dcentos/board_target")' in standalone_recipe
+    assert "amlogic_gpio437::resolve_drive_recipe(target.trim())" in standalone_recipe
+    assert "GPIO437 standalone polarity refused" in standalone_recipe
+    gpio437_driver = hal.split("fn drive_psu_checked_at(", 1)[1].split("\n}", 1)[0]
+    assert gpio437_driver.index('write(&base.join("direction"), recipe.off_direction())') < gpio437_driver.index('write(&base.join("value"), &raw.to_string())')
+    assert "read_psu_active_low_disabled_checked_at(gpio_root, n)?" in gpio437_driver
+    assert "read_psu_enabled_on_with_recipe_at(gpio_root, n, recipe)? != on" in gpio437_driver
+    assert "gpio437_population_recipe_is_required_and_cannot_be_rebound" in hal
     cfg_rs = (ROOT / "dcentrald/dcentrald-hal/src/platform/config.rs").read_text(
         encoding="utf-8"
     )
@@ -8438,7 +8498,7 @@ def main() -> int:
     hybrid = (ROOT / "dcentrald/dcentrald/src/s19j_hybrid_mining.rs").read_text(
         encoding="utf-8"
     )
-    hybrid_i = hybrid.find("fn reset_asic_baud(serial_device: &str)")
+    hybrid_i = hybrid.find("fn reset_asic_baud(serial_device: &str, uart_preference: SerialBackendPreference)")
     assert hybrid_i != -1
     hybrid_win = hybrid[hybrid_i : hybrid_i + 1800]
     assert "HotStartHostClass::Zynq" in hybrid_win
@@ -8448,12 +8508,12 @@ def main() -> int:
     companion_i = hybrid.find("let companion_dev = am2_dual_chain_second_uart()")
     assert companion_i != -1
     companion_win = hybrid[companion_i : companion_i + 2500]
-    assert "SerialChainBackend::open(0, &companion_dev, 115_200)" in companion_win
+    assert "SerialChainBackend::open_with_preference(0, &companion_dev, 115_200, uart_preference)" in companion_win
     assert "assert_mcr_out2" in companion_win
     assert "require_bm1366_response_body" not in companion_win
     assert "open_passthrough_bm1366" not in companion_win
     assert "BM1366_UART_RESP_BODY_LEN" not in companion_win
-    relay_i = hybrid.find("dcentrald_hal::serial_chain::SerialChainBackend::open(")
+    relay_i = hybrid.find("match SerialChainBackend::open_with_preference(\n")
     assert relay_i != -1
     relay_win = hybrid[relay_i : relay_i + 1800]
     assert "maybe_write_bm1362_uart_relay" in relay_win
@@ -8467,7 +8527,7 @@ def main() -> int:
     init_head = hybrid[init_asic_i : init_asic_i + 800]
     assert "=== BM1362 ASIC INIT" in init_head
     init_open_i = hybrid.find(
-        "let mut serial = SerialChainBackend::open(0, serial_device, 115_200)",
+        "let mut serial = SerialChainBackend::open_with_preference(0, serial_device, 115_200, uart_preference)",
         init_asic_i,
     )
     assert init_open_i != -1
@@ -8488,7 +8548,7 @@ def main() -> int:
     pt_i = hybrid.find("PASSTHROUGH: skipping Phase 1-7 (bosminer owns PIC+chain init)")
     assert pt_i != -1
     pt_win = hybrid[pt_i : pt_i + 800]
-    assert "open_passthrough(0, &serial_device)" in pt_win
+    assert "open_passthrough_with_preference(0, &serial_device, uart_preference)" in pt_win
     assert "BM1362_RESP_BODY_LEN" in pt_win
     assert "require_bm1366_response_body" not in pt_win
     assert "open_passthrough_bm1366" not in pt_win
@@ -8769,9 +8829,22 @@ def main() -> int:
     assert "S19K_LIVE410_S1_LAST_RX_MS: u32 = 116_990" in discover
     assert "S19K_LIVE410_S2_LAST_RX_MS: u32 = 117_231" in discover
     main_rs = (ROOT / "dcentrald/dcentrald/src/main.rs").read_text(encoding="utf-8")
-    assert "Track-1 Braiins leftover" in main_rs
-    assert "live409 parked this path" in main_rs
-    assert 'board_desc.board_target == "am3-s19k"' in main_rs
+    # Current dispatch authority joins the exact BM1366 profile and ASIC
+    # protocol; Track-1 custody remains a separate, explicitly bound CLI route.
+    assert "bm1366_dispatch_admitted_serial_platform(" in main_rs
+    assert "let asic_protocol_admission = board_desc.admit_asic_protocol(" in main_rs
+    assert "asic_protocol: Some(asic_protocol_admission)" in main_rs
+    bm1366_profiles = (ROOT / "dcentrald/dcentrald-common/src/bm1366_serial_platform.rs").read_text(
+        encoding="utf-8"
+    )
+    assert "Some(profile) if profile.dispatch_admitted => Ok(profile)" in bm1366_profiles
+    assert 'None => Err("board target has no BM1366 serial platform profile")' in bm1366_profiles
+    assert "fn am3_s19k_serial_bm1366_is_track1_leftover_not_native()" in main_rs
+    assert "s19k_stock_handoff_identity.is_some() == s19k_track1_receipt_authority.is_some()" in main_rs
+    assert "s19k_stock_handoff_identity.is_some() == s19k_track1_j3_lease.is_some()" in main_rs
+    assert "lease.require_context(authority, identity)?" in main_rs
+    assert "lease.require_install_custody_safeoff_policy(s19k_install_custody_safeoff)?" in main_rs
+    assert "!s19k_install_custody_safeoff || s19k_stock_handoff_identity.is_some()" in main_rs
     assert "s19k_discover_skip_rx_when_leftover_baud_not_track1_3m" in serial
     assert "skip drain/GetAddress" in serial
     assert "BM1366_PASSTHROUGH_REARM_EVERY_S" in serial
@@ -9137,33 +9210,31 @@ def main() -> int:
     assert "I2C_SCL=476" in s37t and "I2C_SDA=477" in s37t
     assert "for GPIO in 453 438" in s37t
     assert "for GPIO in 476 477" in s37t
-    dis = hal_aml.find("fn disable_psu_checked_at(")
-    dis_end = hal_aml.find("pub fn disable_psu()", dis)
+    dis = hal_aml.find("fn drive_psu_checked_at(")
+    dis_end = hal_aml.find("fn read_psu_active_low_disabled_checked_at(", dis)
     assert dis != -1 and dis_end != -1 and dis < dis_end
     dis_body = hal_aml[dis:dis_end]
     assert 'gpio_root.join("export")' in dis_body
-    assert "still unexported after export" in dis_body
-    assert 'fs::write(&dir_path, "high")' in dis_body
-    assert 'fs::write(&gpio_path, "1")' in dis_body
+    assert 'write(&base.join("direction"), recipe.off_direction())' in dis_body
+    assert 'write(&base.join("value"), &raw.to_string())' in dis_body
+    assert "read_psu_enabled_on_with_recipe_at(gpio_root, n, recipe)? != on" in dis_body
     assert "enable_psu_gpio()?;" not in dis_body
     assert "let _ = enable_psu_gpio" not in dis_body
-    assert (
-        "disable_psu_checked_for_polarity(amlogic_board_target_is_s19k()?)" in dis_body
-    )
-    assert "disable_psu_checked_for_polarity(true)" in dis_body
-    assert dis_body.find('gpio_root.join("export")') < dis_body.find(
-        'fs::write(&gpio_path, "1")'
-    )
+    assert dis_body.index('gpio_root.join("export")') < dis_body.index(
+        'write(&base.join("direction"), recipe.off_direction())'
+    ) < dis_body.index('write(&base.join("value"), &raw.to_string())')
     profile = hal_aml[hal_aml.find("impl AmlogicNoPicProfile") : hal_aml.find(
         "pub struct AmlogicNoPicAdmission"
     )]
-    assert "fn psu_is_active_low(self) -> bool" in profile
-    assert "matches!(self, Self::S19k)" in profile
+    assert "fn board_target(self) -> &'static str" in profile
+    assert "fn psu_is_active_low" not in profile
     authority = hal_aml[hal_aml.find("struct AmlogicPsuCommitAuthority") : hal_aml.find(
         "fn amlogic_psu_enable_superseded"
     )]
-    assert "s19k_active_low: profile.psu_is_active_low()" in authority
-    assert "disable_psu_checked_for_polarity(self.s19k_active_low)" in authority
+    assert "board_target: profile.board_target()" in authority
+    assert "recipe: OnceLock<Gpio437DriveRecipe>" in authority
+    assert "amlogic_gpio437::resolve_population_recipe(self.board_target, &names)" in authority
+    assert "self.recipe().and_then(disable_psu_checked_for_recipe)" in authority
     assert "disable_psu_checked()" not in authority
     assert "amlogic_board_target_is_s19k" not in authority
     lifecycle = hal_aml[
@@ -9172,7 +9243,7 @@ def main() -> int:
         )
     ]
     assert (
-        "disable_psu_checked_for_polarity(self.psu_commit.s19k_active_low())"
+        "disable_psu_checked_for_recipe(self.psu_commit.recipe()?)?"
         in lifecycle
     )
     assert "disable_psu_checked()" not in lifecycle
@@ -9181,14 +9252,18 @@ def main() -> int:
             "impl AmlogicThermalPort"
         )
     ]
-    assert "AmlogicPsuGpioRollback::armed(s19k_active_low)" in power_operation
-    assert "enable_psu_gpio_for_polarity(s19k_active_low)" in power_operation
+    assert "AmlogicPsuGpioRollback::armed(recipe)" in power_operation
+    assert "enable_psu_gpio_for_recipe(recipe)" in power_operation
     assert "fn enable_psu_gpio() -> Result<()>" not in hal_aml
-    assert "disable_psu_checked_for_polarity(self.s19k_active_low)" in power_operation
+    assert "disable_psu_checked_for_recipe(self.recipe)" in power_operation
     assert "disable_psu_checked()" not in power_operation
     assert "if amlogic_board_target_is_s19k" not in power_operation
-    assert "admission.populated_slots(), admission.profile()" in hal_aml
-    assert "profile,\n            s19k_native_generation," in hal_aml
+    assert (
+        "Self::spawn_with_required_slots_and_generation( admission.populated_slots(), "
+        "admission.profile(), Some(Arc::clone(&admission.generation)), )?"
+    ) in " ".join(hal_aml.split())
+    assert "AmlogicPsuCommitAuthority::new(profile, native_generation)" in hal_aml
+    assert "native_generation: self.psu_commit.native_generation.clone()" in hal_aml
     assert "admit_amlogic_retained_power_owner_freezes_profile_polarity" in gpio437_rs
     assert "admit_s19k_track1_arms_teardown_without_enable" in gpio437_rs
     assert "admit_s19k_track1_arms_watchdog_without_enable" in gpio437_rs

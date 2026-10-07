@@ -1,4 +1,18 @@
 // DCENTos REST API TypeScript interfaces
+export interface DiagnosticsResponse {
+  board_target: string | null;
+  image_version: string | null;
+  daemon_version: string;
+  git_sha: string | null;
+  channel: string | null;
+  drop: string | null;
+  active_slot: string | null;
+  signature_state: 'verified' | 'unverified';
+  signature_detail: string | null;
+  last_panic: { version: string; unix_seconds: number; location: string | null; message: string } | null;
+  reset_status?: { phase: string; unix_seconds: number; error: string | null } | null;
+  warnings: string[];
+}
 // Hand-maintained REST DTOs. Generated shared capability types are re-exported
 // from ./generated/capability.
 
@@ -1264,11 +1278,18 @@ export interface StatusResponse {
 
 // ─── GET /api/config ────────────────────────────────────────
 export interface ConfigResponse {
+  initial_idle_activation_available?: boolean;
   mode: { active: OperatingMode };
   firmware_version: string;
   donation?: DonationConfig;
   api: {
     cgminer_port: number;
+    cgminer_bind_lan?: boolean;
+    cgminer_lan_writes?: boolean;
+    cgminer_saved?: {
+      cgminer_bind_lan: boolean;
+      cgminer_lan_writes: boolean;
+    } | null;
     http_port: number;
     websocket_enabled: boolean;
     auth_enabled: boolean;
@@ -1787,12 +1808,29 @@ export interface KernelWatchdogState {
   read_only?: boolean;
 }
 
+export interface UpdateJobStatus {
+  schema: number;
+  job_id: string;
+  package_sha256: string;
+  source_boot_id: string;
+  state: string;
+  boot_verified?: boolean;
+  physical_hashing_verified?: boolean;
+  scheduled_at?: number;
+  started_at?: number;
+  finished_at?: number;
+  exit_code?: number;
+  error?: string;
+  status_detail?: string;
+}
+
 export interface SystemUpgradeStatusResponse {
   status: string;
   read_only: boolean;
   state: 'idle' | 'validated_or_staged' | 'pending_boot_commit' | (string & {});
   stage_root: string;
   stage_root_present: boolean;
+  jobs?: UpdateJobStatus[];
   staged_package_count: number;
   staged_packages: Array<{
     path: string;
@@ -2298,6 +2336,50 @@ export interface AutotunerStatusResponse {
   }>;
   last_update_s: number;
   message: string;
+  /**
+   * C3a (2026-09): surfaced NotTunable reason — the variant refused to
+   * tune (unknown/missing envelope datums, invalid cut-ladder, fan rung on
+   * a fanless medium). Absent on tunable variants.
+   */
+  not_tunable_reason?: string | null;
+  /**
+   * C3a: first-boot safe-stock park reason currently holding the tuner in
+   * Idle (health snapshot / fans / temp-in-envelope / ExperimentalOptIn
+   * ack). Absent once the gate has opened.
+   */
+  start_gate_park_reason?: string | null;
+  /**
+   * C3a: per-run convergence evidence — rung counts (tunable / not tuned /
+   * not tunable / refused + reasons), last step, and the envelope version
+   * the evidence was produced under. The efficiency figure inside is an
+   * ESTIMATE (model-derived projection), never a measured wall value.
+   */
+  convergence?: AutotunerConvergenceSnapshot | null;
+}
+
+/**
+ * C3a: per-run convergence evidence from the variant guard + tuner state.
+ * Honesty contract mirrors the Rust `ConvergenceSnapshot`
+ * (dcentrald-autotuner/src/telemetry.rs): `estimated_efficiency_jth`, when
+ * present, is ALWAYS a model-derived projection — `efficiency_jth_estimated`
+ * is pinned true — and must never be rendered as a measured value.
+ */
+export interface AutotunerConvergenceSnapshot {
+  state: string;
+  started_at: number;
+  rung_counts: {
+    tunable: number;
+    not_tuned: number;
+    not_tunable: number;
+    refused: number;
+  };
+  not_tunable_reason?: string | null;
+  refusal_reasons?: string[];
+  last_step?: string | null;
+  envelope_version: string;
+  envelope_source?: string | null;
+  estimated_efficiency_jth?: number | null;
+  efficiency_jth_estimated: boolean;
 }
 
 export interface AutotunerTelemetryChip {
@@ -2672,7 +2754,7 @@ export interface HeaterStatusResponse {
   noise_source?: 'tach_estimate' | 'unavailable_no_rpm_feedback' | string;
   noise_note?: string;
   airflow_cfm: number;
-  preset: string;
+  preset: string | null;
   room_temp_c: number | null;
   cost_today_usd: number;
   daily_cost_usd?: number;
@@ -2727,6 +2809,10 @@ export interface HeaterTargetResponse {
   message: string;
   preset?: string;
   watts?: number;
+  target_watts?: number;
+  saved?: boolean;
+  applied_runtime?: boolean;
+  runtime?: { message?: string; status?: string; applied_runtime?: boolean };
 }
 
 export interface HeaterPreset {
@@ -2740,6 +2826,7 @@ export interface HeaterPreset {
   noise_note?: string;
   hashrate_ths?: number;
   description: string;
+  estimates_available?: boolean;
 }
 
 export interface HeaterPresetScope {
@@ -2748,6 +2835,8 @@ export interface HeaterPresetScope {
   chip_type: string;
   label: string;
   universal: boolean;
+  live_control_available?: boolean;
+  control_note?: string;
 }
 
 export interface HeaterPresetsResponse {
@@ -2794,6 +2883,7 @@ export interface ActionResponse {
 }
 
 export interface FirmwareUploadResponse extends ActionResponse {
+  job?: UpdateJobStatus;
   filename?: string;
   staged_path?: string;
   bytes_written?: number;
@@ -3631,4 +3721,65 @@ export interface BootTimelineEntry {
 
 export interface BootTimelineResponse {
   entries: BootTimelineEntry[];
+}
+
+/** Actual qualified public-key persistence; dashboard and Linux passwords remain separate. */
+export interface SshKeyStatus {
+  available: boolean;
+  scope: 'classic_aml_nvdata' | 'nopic_aml_nvdata' | 'native_zynq_sd_data' | 'unavailable';
+  reason: string | null;
+  fingerprints: string[];
+  operator_disabled: boolean;
+  root_password_changed: false;
+}
+
+export interface SshKeyEnrollmentResult {
+  status: SshKeyStatus;
+  persisted: boolean;
+  durable: boolean;
+  activation: 'not_requested' | 'requested' | 'failed' | 'disabled_by_operator';
+  activation_error: string | null;
+}
+
+export interface ChannelRelease {
+  board_target: string;
+  version: string;
+  minimum_version: string;
+  release_channel: 'beta' | 'stable';
+  artifact_kind: 'sysupgrade-tar' | 'native-sd-image' | 'sd-payload-tar';
+  install_route: 'first_install_and_self_update' | 'self_update_only' | 'sd_trial_boot_only' | 'operator_staged';
+  hardware_recipe: string;
+  sha256: string;
+  url: string;
+  size: number;
+}
+
+export interface ChannelUpdateCheck {
+  status: 'available';
+  board_target: string;
+  current_version: string;
+  release_channel: 'beta' | 'stable';
+  feed_sha256: string;
+  candidate: ChannelRelease;
+  update_started: false;
+}
+
+export interface ChannelStagedUpdate {
+  status: 'staged';
+  download_id: string;
+  feed_sha256: string;
+  artifact_sha256: string;
+  candidate: ChannelRelease;
+  update_started: false;
+  message: string;
+}
+
+export interface ChannelUpdateOperation {
+  operation_id: string;
+  phase: 'checking' | 'downloading' | 'verifying' | 'staged' | 'applying' | 'scheduled' | 'failed';
+  downloaded_bytes?: number;
+  total_bytes?: number;
+  detail?: string;
+  result?: ChannelStagedUpdate | FirmwareUploadResponse;
+  update_started?: boolean | null;
 }

@@ -986,9 +986,9 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// An ENTIRELY ABSENT `[autotune.bad_chip]` block must deserialize to
-    /// the disabled default — the daemon must not construct the supervisor.
+    /// enabled supervision while preserving separate actuation authority.
     #[test]
-    fn bad_chip_absent_section_is_disabled() {
+    fn bad_chip_absent_section_enables_supervision_without_actuation() {
         // No `[autotune.bad_chip]` table at all, only an unrelated key.
         let toml_src = r#"
             [power_target]
@@ -996,9 +996,10 @@ mod tests {
         "#;
         let cfg: AutotuneConfig = toml::from_str(toml_src).unwrap();
         assert!(
-            !cfg.bad_chip.enabled,
-            "absent [autotune.bad_chip] must default to disabled"
+            cfg.bad_chip.enabled,
+            "absent [autotune.bad_chip] must default to enabled supervision"
         );
+        assert!(!cfg.bad_chip.actuate, "default supervision must not grant actuation");
         // The whole struct equals the default's bad_chip sub-config.
         assert_eq!(cfg.bad_chip, AutotuneConfig::default().bad_chip);
     }
@@ -1045,12 +1046,15 @@ mod tests {
         assert!(sup.is_enabled());
 
         let disabled = dcentrald_autotuner::BadChipSupervisor::new(
-            AutotuneConfig::default().bad_chip,
+            dcentrald_autotuner::BadChipConfig {
+                enabled: false,
+                ..AutotuneConfig::default().bad_chip
+            },
             Vec::new(),
         );
         assert!(
             !disabled.is_enabled(),
-            "default-off config must construct a dormant supervisor"
+            "explicitly disabled config must construct a dormant supervisor"
         );
     }
 

@@ -151,6 +151,16 @@ pub(crate) fn execution_fence_domain<T>(
 }
 
 impl<T: ExecutionFenceIdentity> ExecutionFencePort<T> {
+    /// Immutable identity for route-specific command validation. This snapshot
+    /// never grants a commit; the subsequent mutation still uses this fence.
+    pub(crate) fn identity_snapshot(&self) -> Option<T> {
+        self.inner
+            .state
+            .lock()
+            .ok()
+            .map(|state| state.token.clone())
+    }
+
     #[cfg(test)]
     pub(crate) fn owner_count_for_test(&self) -> usize {
         Arc::strong_count(&self.inner)

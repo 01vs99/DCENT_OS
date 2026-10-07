@@ -35,7 +35,10 @@ make_package() {
 
     rm -rf "$pkgdir"
     mkdir -p "$pkgdir"
-    printf '\047\005\031\126kernel\n' > "$pkgdir/kernel"
+    # Donor Amlogic kernel shape: 56 header bytes then the arm64 Image
+    # magic "ARM\x64" at 0x38 (the only kernel form am3 producers ship).
+    dd if=/dev/zero of="$pkgdir/kernel" bs=1 count=56 2>/dev/null
+    printf '\101\122\115\144kernel\n' >> "$pkgdir/kernel"
     printf '\047\005\031\126root\n' > "$pkgdir/root"
     printf 'board=%s\n' "$board" > "$pkgdir/METADATA"
 
@@ -96,21 +99,32 @@ check_profile() {
     pass "$variant extraction emits the expected rootfs-window image"
 }
 
-check_profile am3-s19jpro-aml s19jpro-aml dcentos-sysupgrade-am3-s19jpro-aml.tar dcentos-amlogic-s19jpro-aml.bin
-check_profile am3-s19jproplus s19jproplus dcentos-sysupgrade-am3-s19jproplus.tar dcentos-amlogic-s19jproplus.bin
 check_profile am3-s19k s19kpro dcentos-sysupgrade-am3-s19kpro.tar dcentos-amlogic-s19kpro.bin
 check_profile am3-s21 s21 dcentos-sysupgrade-am3-s21.tar dcentos-amlogic-s21.bin
 check_profile am3-s21pro s21pro dcentos-sysupgrade-am3-s21pro.tar dcentos-amlogic-s21pro.bin
 
+# am3-s19jpro-aml, am3-s19jproplus, am3-s19jproa and the other A113D
+# denied boards emit package_only_denied manifests (no persistent-writer
+# authority; am3-s19jpro-aml unconditionally) — reconciled with
+# PACKAGE_ONLY_DENIED_TARGETS after producer run drop1-20260918-xtleogkg;
+# they validate like the other denied boards and refuse extraction.
 make_package am3-t21 dcentos-sysupgrade-am3-t21.tar false
 make_package am3-s21xp dcentos-sysupgrade-am3-s21xp.tar false
 make_package am3-s19xp dcentos-sysupgrade-am3-s19xp.tar false
 make_package am3-s19jxp dcentos-sysupgrade-am3-s19jxp.tar false
+make_package am3-s19jproa dcentos-sysupgrade-am3-s19jproa.tar false
+make_package am3-s19jproplus dcentos-sysupgrade-am3-s19jproplus.tar false
+make_package am3-s19jpro-aml dcentos-sysupgrade-am3-s19jpro-aml.tar false
+make_package am3-s19kpro dcentos-sysupgrade-am3-s19kpro-denied.tar false
 printf '#!/bin/sh\nexit 97\n' > "$TMPDIR_T/poison-am3-geometry.sh"
 for package_only_case in \
     'am3-s19xp:s19xp:dcentos-sysupgrade-am3-s19xp.tar' \
     'am3-s19jxp:s19jxp:dcentos-sysupgrade-am3-s19jxp.tar' \
-    'am3-s21xp:s21xp:dcentos-sysupgrade-am3-s21xp.tar'
+    'am3-s21xp:s21xp:dcentos-sysupgrade-am3-s21xp.tar' \
+    'am3-s19jproa:s19jproa:dcentos-sysupgrade-am3-s19jproa.tar' \
+    'am3-s19jproplus:s19jproplus:dcentos-sysupgrade-am3-s19jproplus.tar' \
+    'am3-s19jpro-aml:s19jpro-aml:dcentos-sysupgrade-am3-s19jpro-aml.tar' \
+    'am3-s19kpro:s19kpro:dcentos-sysupgrade-am3-s19kpro-denied.tar'
 do
     board=${package_only_case%%:*}
     remainder=${package_only_case#*:}

@@ -1042,9 +1042,41 @@ pub const BHB_SKU_CATALOG: &[BhbSkuCatalogEntry] = &[
         eeprom_variant: "unknown_no_held_page",
         confidence: "high",
         source: "epic-jig-hashboard-db-50models.json (BM1398P/0x1398, 76 chips, 38 domains x 2); \
-                 projects/dcent-hashboards/HASHBOARD_TARGET_MATRIX.md:45 (S19: 76 = 38 x 2)",
+                 projects/dcent-hashboards/HASHBOARD_TARGET_MATRIX.md:45 (S19: 76 = 38 x 2); \
+                 first-party Bitmain stock topol.conf s19-20211116 (Phase A 2026-09-01, section 3.7)",
         note: "Exact row: NBS1902 matched no pattern before UB-26 and resolved to None. \
-               Identity label only; native BM1398 stays refused by the admission policy.",
+               Identity label only; native BM1398 stays refused by the admission policy. \
+               Gauntlet B6 (2026-09-02): stock topol now first-party — 76/chain, 8x10 grid, \
+               38 domains x 2, interval 3, PIC1704@0x20, AWP12@0x10 gpio907 (pinned as \
+               bm1398_protocol::S19_NBS1902_BOARD_GEOMETRY).",
+    },
+    // ------------------------------------------------------------------
+    // Gauntlet B6 (2026-09-02): T19's board, promoted from unknown to a
+    // catalog identity-label row by FIRST-PARTY Bitmain stock evidence
+    // (Phase A asicminingsupplies mirror, section 3.7 row 9): the T19
+    // stock topol.conf names machine NBT1903 = BM1398P (asic_addr 0x1398),
+    // 76 ASICs/chain (8x10), 38 domains x 2, addr interval 3, PIC1704 @
+    // 0x20, PSU AWP12 @ 0x10 gpio 907. Geometry is pinned as
+    // bm1398_protocol::T19_NBT1903_BOARD_GEOMETRY.
+    //
+    // Same class as the NB* rows above: IDENTITY LABEL ONLY — no held
+    // EEPROM page, and `hashboard_eeprom::DEPLOYED_SKU_IDENTITY_POLICY`
+    // still declares no BM1398 row, so nothing here admits anything.
+    // ------------------------------------------------------------------
+    BhbSkuCatalogEntry {
+        pattern: "NBT1903",
+        chip_family: "BM1398",
+        model_family: "T19",
+        eeprom_variant: "unknown_no_held_page",
+        confidence: "high",
+        source: "first-party Bitmain stock topol.conf t19-20230320 (Phase A 2026-09-01, \
+                 section 3.7 row 9: NBT1903 = BM1398P, 76/chain, 8x10, 38 domains x 2, \
+                 interval 3, PIC1704@0x20, AWP12@0x10 gpio907); geometry pinned at \
+                 bm1398_protocol::T19_NBT1903_BOARD_GEOMETRY",
+        note: "Exact row: identity label only. No held NBT1903 EEPROM page; the \
+               deployed admission policy never declares BM1398, so this row cannot \
+               mint an observed identity (pinned by \
+               deployed_policy_table_can_never_declare_bm1398).",
     },
 ];
 

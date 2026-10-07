@@ -44,6 +44,98 @@
 // loop 11 wired everything and added this contract comment.
 // ════════════════════════════════════════════════════════════════════════════
 
+// ════════════════════════════════════════════════════════════════════════════
+// CHART HISTORY SEED (lane P1-W6, 2026-09-03)
+// ════════════════════════════════════════════════════════════════════════════
+// This comment is OUTSIDE the DASHBOARD_HTML literal, so it costs zero image
+// bytes. Comments inside the literal are served to every browser and are paid
+// for out of the OTA slot — keep them to a pointer.
+//
+// The Performance chart used to be a purely client-side ring: `update(d)`
+// pushed one point per 15 s poll into HRH/TH/PH/TSH and `drawChart()` drew
+// nothing until two points existed, so every reload started empty and threw
+// away everything the device already knew. The firmware has kept a real
+// history all along and the dashboard never asked for it.
+//
+// ENDPOINT CONTRACT, read from the handler (`api.rs::register_system_statistics`,
+// api.rs:1757-1926) — the handler code is the contract, not this comment:
+//   route     GET /api/system/statistics  and  GET /api/system/statistics/dashboard
+//             (api.rs:1925-1926 register the SAME closure at both paths). No auth
+//             check in the handler. 0 new handlers: the dashboard just calls one
+//             of the two that already exist.
+//   body      {"currentTimestamp": <u64 unix ms>,
+//              "labels": [<column names>],
+//              "statistics": [[<f64 per label>], ...]}
+//   labels    fixed order: hashrate, hashrate_15s, hashrate_30s, power, asicTemp,
+//             localAcceptedShares, localRejectedShares, sharesSubmitted,
+//             poolAcceptedShares, poolRejectedShares, responseTime,
+//             failoverActive, connected, timestamp
+//   ?columns= optional CSV filter; the handler keeps the FIXED order and drops
+//             unlisted names (api.rs:1793-1813). So a client must resolve columns
+//             BY NAME from the returned `labels`, never by a hard-coded index —
+//             which also makes it immune to a future column being inserted.
+//   units     hashrate/hashrate_15s/hashrate_30s GH/s (hashrate = the 5 m
+//             average, `snap.hashrate_5m_ghs` / `sample.hashrate_ghs`), power W,
+//             asicTemp degC, responseTime ms, share columns are counts,
+//             failoverActive/connected are 1.0/0.0, timestamp unix ms.
+//   ordering  oldest first — rows are `history.samples` in push order and the cap
+//             is applied by draining the FRONT (main.rs:4964-4967).
+//   cadence   one sample per 60 s (`>= 60_000` gate, main.rs:4914) and at most 60
+//             samples retained, i.e. a rolling ~60-minute window.
+//   empty     when the device has no samples yet the handler still returns ONE
+//             row built from the live snapshot with timestamp == currentTimestamp
+//             (api.rs:1814-1861). That is a live reading, not history, and the
+//             window label reports it as one sample.
+//
+// The dashboard side (all inside the literal). Stated as the code behaves, not
+// as it would be nice for it to behave:
+//   seed      `seedChart()` runs once in the boot chain and again from update()'s
+//             offline->online branch. It resolves the four columns BY NAME off
+//             the response's own `labels`, skips any row shorter than the largest
+//             resolved index (a short row is dropped, never zero-filled into a
+//             false 0 sample) and REPLACES HRH/TH/PH/TSH outright. Live points
+//             collected before a re-seed are DISCARDED, not merged: the device's
+//             own 60 s samples cover the same window and merging two cadences we
+//             cannot de-duplicate would invent shape. Say "replaced", not
+//             "merged" — the round-1 version of this comment claimed merging and
+//             was wrong.
+//   reconnect a re-seed happens only on a response the client accepted. `poll()`
+//             and `schedRetry()` both `throw` on `!r.ok`, so a 5xx never reaches
+//             update() and never clears `_offline`; the first 200 after the 5xx
+//             takes the offline->online branch and re-seeds. (Round 1's
+//             `schedRetry` cleared `_offline` itself before calling update(),
+//             so a 5xx->200 recovery silently skipped the re-seed.)
+//   x axis    x is proportional to the TIMESTAMP, not to the sample index:
+//             `_CX[i] = pad.l + (TSH[i]-TSH[0])/span * cw`. The ring mixes 60 s
+//             device samples with 15 s live points, so an index-uniform axis
+//             would draw 60 minutes and 15 minutes at the same width. Time ticks
+//             are drawn on a clock-aligned ladder (1/5/15/30/60/180 min, the
+//             smallest step that yields <= 5 ticks), so tick spacing is uniform
+//             in TIME and the labels land on round clock minutes.
+//   statistic ONE hashrate statistic on the line: the seeded `hashrate` column is
+//             `snap.hashrate_5m_ghs` (main.rs:4941, api.rs:1818) and the live
+//             push is `d.hashRate_5m` (api.rs:1312, same snapshot field). The
+//             legend says "Hashrate 5m". `hashRate_1m` still drives the mining
+//             booleans and the 1m readout — it must never drive HRH.
+//   axes      hashrate on the labelled left axis (accent, TH/s), temperature on
+//             the labelled right axis (cyan, degC). Power keeps its own auto
+//             scale with no axis of its own; its unit is in the legend and its
+//             value in the hover tooltip. That is a known residual.
+//   label     `chartWindow()` renders window length + sample count DERIVED from
+//             TSH, plus provenance: "<n> from device" / "<n> from device, stale"
+//             (a failed re-seed that still holds device points) / "device history
+//             unavailable" / "live reading, no history" (the empty-history
+//             branch's single synthetic row, which is a live reading and is NOT
+//             counted as history) / "this session". `#chartWin` is `aria-live`
+//             and is the canvas's accessible name via `aria-labelledby`.
+//   trend     the hero trend arrow compares the newest point against the last
+//             point at least 90 s older, found by walking TSH — a fixed TIME
+//             window. It used to be "6 samples back", which is 90 s in an
+//             all-live ring but up to 5 minutes once device samples are mixed in.
+// On failure nothing is fabricated: the ring stays client-only and the label
+// says so. Pinned by `dashboard_evidence_guards::chart_*` in dcentaxe-core.
+// ════════════════════════════════════════════════════════════════════════════
+
 use esp_idf_svc::http::server::EspHttpServer;
 use esp_idf_svc::http::Method;
 use log::*;
@@ -189,7 +281,7 @@ pub fn register_dashboard(server: &mut EspHttpServer) {
 }
 
 const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
-<html><head><meta charset=UTF-8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
+<html lang=en><head><meta charset=UTF-8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name=application-name content="AxeOS Compatible">
 <title>DCENT_axe | AxeOS-compatible</title>
 <!-- Modular dashboard CSS is loaded AFTER the inline <style> below
@@ -201,7 +293,7 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
 --s-void:#050709;--s-base:#0a0e14;--s-raised:#101820;--s-overlay:#182030;
 --orange:#FAA500;--accent:#FAA500;--orange-bitcoin:#F7931A;
 --green:#34d399;--red:#f87171;--yellow:#fbbf24;--cyan:#22d3ee;--tgreen:#00ff41;
---text:#e8ecf2;--dim:#6b7a8d;--muted:#3a4555;--border:rgba(255,255,255,0.07);
+--text:#e8ecf2;--dim:#94a3b8;--muted:#8496ac;--border:rgba(255,255,255,0.07);
 --glow:rgba(250,165,0,0.08);--glow-green:rgba(52,211,153,0.08);
 --font:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 --mono:'SF Mono','Fira Code','Cascadia Code',Consolas,monospace;
@@ -221,6 +313,11 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
 --shadow-hero:0 8px 40px rgba(0,0,0,0.50),inset 0 1px 0 rgba(255,255,255,0.05);--shadow-float:0 8px 32px rgba(0,0,0,0.50),0 0 0 1px var(--border);
 --ease-out:cubic-bezier(.22,1,.36,1);--ease-pop:cubic-bezier(.34,1.56,.64,1);--dur-fast:.15s;--dur-base:.22s;--dur-slow:.55s;
 }
+/* A11y (P1-W4): tokens.css loads after this block and its :root would
+   restore --dim:#6b7a8d / --muted:#3a4555, measured 3.51:1 / 1.89:1 against
+   the painted surfaces. html:root (0,1,1) keeps the >=4.5:1 pair; the roles
+   are unchanged - --muted is still the quietest tier (5.08:1 vs 5.99:1). */
+html:root{--dim:#94a3b8;--muted:#8496ac}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:var(--font);background:var(--s-void);color:var(--text);min-height:100vh;font-size:13px;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility}
 body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;background:radial-gradient(ellipse at 20% 50%,var(--glow),transparent 60%),radial-gradient(ellipse at 80% 20%,rgba(255,255,255,0.01),transparent 50%)}
@@ -232,7 +329,6 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;bac
 @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 @keyframes slideIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none}}
-@keyframes shimmer{0%{background-position:-400px 0}100%{background-position:400px 0}}
 @keyframes logNew{0%{background:rgba(0,255,65,0.1)}100%{background:transparent}}
 .loading{animation:pulse 1.5s ease-in-out infinite;opacity:.4}
 .loaded{animation:fadeIn .3s ease}
@@ -241,11 +337,10 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;bac
 .sparkline svg{display:block;width:100%;height:100%}
 .hero-trend{display:inline-block;font-size:16px;margin-left:8px;vertical-align:middle;transition:color .3s}
 .hero-trend.up{color:var(--accent)}.hero-trend.down{color:var(--red)}.hero-trend.flat{color:var(--dim)}
-.eff-badge{display:inline-block;font-size:9px;padding:2px 8px;border-radius:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;vertical-align:middle}
+.eff-badge{display:inline-block;font-size:10px;padding:2px 8px;border-radius:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;vertical-align:middle}
 .eff-badge.excellent{background:rgba(52,211,153,0.15);color:var(--green)}.eff-badge.good{background:var(--glow);color:var(--accent)}.eff-badge.average{background:rgba(251,191,36,0.15);color:var(--yellow)}.eff-badge.poor{background:rgba(248,113,113,0.15);color:var(--red)}
-.status-badge{display:inline-block;font-size:9px;padding:1px 8px;border-radius:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.status-badge{display:inline-block;font-size:10px;padding:1px 8px;border-radius:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
 .status-badge.ok{background:rgba(52,211,153,0.12);color:var(--green)}.status-badge.warn{background:rgba(251,191,36,0.12);color:var(--yellow)}.status-badge.err{background:rgba(248,113,113,0.12);color:var(--red)}
-@keyframes fanSpin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
 
 /* ── Scanlines (subtle CRT) ── */
 body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9999;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.018) 2px,rgba(0,0,0,0.018) 4px)}
@@ -271,7 +366,7 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9999;b
 .sb-under{color:var(--accent);font-family:var(--archivo);font-weight:900;font-size:20px;margin:0 1px;text-shadow:0 0 10px var(--accent);animation:sbBlink 1.2s steps(2) infinite}
 @keyframes sbBlink{0%,55%{opacity:1}56%,100%{opacity:0.35}}
 .sb-axe{font-family:var(--gothic);font-weight:400;font-size:26px;color:var(--accent);letter-spacing:0.5px;text-shadow:0 0 12px var(--glow),0 0 2px var(--accent),0 1px 0 rgba(0,0,0,0.4);position:relative;top:1px;-webkit-text-stroke:0.4px var(--accent)}
-.sb-tag{font-family:var(--jbmono);font-size:8px;color:var(--dim);letter-spacing:1.6px;text-transform:uppercase;text-align:center;padding:0 4px}
+.sb-tag{font-family:var(--jbmono);font-size:10px;color:var(--dim);letter-spacing:1.6px;text-transform:uppercase;text-align:center;padding:0 4px}
 .sb-tag .br{color:var(--accent);opacity:0.7}
 .sb-hr{font-family:var(--mono);font-size:11px;color:var(--accent);margin-top:8px;display:flex;align-items:center;gap:6px}
 .sb-dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex-shrink:0;transition:all .3s}
@@ -282,8 +377,9 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9999;b
 .sb-nav a.ac{color:var(--text);border-left-color:var(--accent);background:linear-gradient(90deg,rgba(247,147,26,0.08),transparent 80%);box-shadow:inset 3px 0 12px -6px var(--accent)}
 .sb-nav svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0;transition:stroke .15s}
 .sb-nav a.ac svg{stroke:var(--accent)}
-.sb-foot{padding:14px 16px;border-top:1px solid var(--border);font-size:10px;color:var(--muted);line-height:1.6}
+.sb-foot{padding:14px 16px;border-top:1px solid var(--border);font-size:10px;color:var(--dim);line-height:1.6}
 .sb-foot b{color:var(--dim);font-weight:600}
+.sb-foot a{display:inline-block;padding:15px 0}
 .sb-creature{font-size:18px;text-align:center;margin-bottom:6px;text-shadow:0 0 10px currentColor}
 .sb-sep{height:1px;background:var(--border);margin:8px 16px}
 
@@ -329,7 +425,7 @@ body.col .main{margin-left:var(--sidebar-c)}
 .tb-alert-empty{padding:18px 16px;text-align:center;color:var(--dim);font-size:11px}
 .tb-alert-row{padding:8px 14px;border-bottom:1px dashed var(--border);font-size:11px;color:var(--text);display:flex;flex-direction:column;gap:2px}
 .tb-alert-row:last-child{border-bottom:none}
-.tb-alert-row .tb-alert-when{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:0.5px}
+.tb-alert-row .tb-alert-when{font-family:var(--mono);font-size:10px;color:var(--dim);letter-spacing:0.5px}
 .hamburger{display:none;background:none;border:none;color:var(--text);font-size:20px;cursor:pointer;padding:4px}
 .status-pills{display:flex;gap:8px;flex-wrap:wrap}
 .pill{font-size:10px;padding:3px 10px;border-radius:12px;background:rgba(255,255,255,0.04);color:var(--dim);border:1px solid rgba(255,255,255,0.03)}
@@ -338,15 +434,18 @@ body.col .main{margin-left:var(--sidebar-c)}
 .content{padding:24px;max-width:1200px}
 .page{display:none;animation:fadeIn .2s ease}
 .page.ac{display:block}
-.page-title{font-size:22px;font-weight:700;margin-bottom:20px;letter-spacing:-0.3px}
+.page-title{font-size:22px;font-weight:700;margin:0 0 20px;letter-spacing:-0.3px}
 .page-title::before{content:'> ';color:var(--accent);font-family:var(--mono);font-weight:400}
+.vh{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 
 /* ── Cards ── */
 .card{background:var(--s-raised);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;margin-bottom:16px;transition:border-color .22s ease,box-shadow .28s cubic-bezier(.22,1,.36,1),transform .28s cubic-bezier(.22,1,.36,1);box-shadow:0 4px 24px rgba(0,0,0,0.4),inset 0 1px 0 rgba(255,255,255,0.04)}
 .card:hover{border-color:rgba(247,147,26,0.1);box-shadow:0 12px 40px rgba(0,0,0,0.5),0 0 24px var(--glow),inset 0 1px 0 rgba(255,255,255,0.06);transform:translateY(-1px) scale(1.003)}
 .card-dense{padding:12px 16px}
-.metric-help{font-size:10px;color:var(--muted);margin-top:3px;font-style:italic}
-.sb-nav a:focus-visible,.btn:focus-visible,.tb-btn:focus-visible,.color-opt:focus-visible{outline:2px solid var(--accent);outline-offset:2px;box-shadow:0 0 0 4px var(--glow)}
+.btn:focus-visible,.tb-btn:focus-visible,.color-opt:focus-visible{outline:2px solid var(--accent);outline-offset:2px;box-shadow:0 0 0 4px var(--glow)}
+/* .sb-nav clips horizontally (overflow-y:auto), so the shared ring above would
+   lose its left/right edges on a nav link: draw that one inset instead. */
+.sb-nav a:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 .kv-row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:11px}
 .kv-row:last-child{border-bottom:none}
 .kv-key{color:var(--dim)}.kv-val{color:var(--text)}
@@ -380,24 +479,14 @@ body.col .main{margin-left:var(--sidebar-c)}
 .stat[data-accent="green"]:hover::before{background:var(--green)}
 .stat[data-accent="red"]:hover::before{background:var(--red)}
 [data-tip]{position:relative;cursor:help}
-[data-tip]:hover::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:var(--s-overlay);color:var(--text);padding:6px 12px;border-radius:6px;font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;white-space:nowrap;z-index:50;border:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,0.4);animation:fadeIn .15s ease;pointer-events:none}
+[data-tip]:hover::after,[data-tip]:focus::after,[data-tip]:focus-within::after,[data-tip].tip-on::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:var(--s-overlay);color:var(--text);padding:6px 12px;border-radius:6px;font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;white-space:nowrap;z-index:50;border:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,0.4);animation:fadeIn .15s ease;pointer-events:none}
 
 /* ── Hero ── */
-.hero{text-align:left;padding:28px 28px 22px;background:var(--s-raised);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:16px;position:relative;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,0.5),inset 0 1px 0 rgba(255,255,255,0.05);transition:box-shadow .5s ease}
-.hero-head{display:flex;justify-content:space-between;align-items:flex-start;gap:20px}
-.hero-meta{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:16px}
 .hero-kpi{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.05);border-radius:10px;padding:10px 14px;transition:border-color .2s}
 .hero-kpi:hover{border-color:rgba(255,255,255,.1);transform:translateY(-2px);box-shadow:0 8px 20px rgba(0,0,0,.3),0 0 12px var(--glow)}
-.hero-kpi-label{font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--dim);font-weight:600}
+.hero-kpi-label{font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:var(--dim);font-weight:600}
 .hero-kpi-val{margin-top:4px;font:700 15px var(--mono);color:var(--text)}
-.hero-kpi-sub{font-size:9px;color:var(--muted);margin-top:2px;font-style:italic}
-.hero::before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 50% 30%,var(--glow),transparent 60%);pointer-events:none}
-.hero::after{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent 10%,var(--accent) 50%,transparent 90%);opacity:0.4}
-.hero-hr{font-family:var(--mono);font-size:60px;font-weight:800;color:var(--text);text-shadow:0 0 40px rgba(247,147,26,0.2),0 0 80px rgba(247,147,26,0.06);line-height:1;position:relative;letter-spacing:-2px}
-.hero-unit{font-size:20px;color:var(--dim);font-weight:400;margin-left:6px;letter-spacing:0}
-.hero-sub{font-size:11px;color:var(--dim);margin-top:8px}
-.hero-sub span[style*="accent"]{text-shadow:0 0 8px var(--glow)}
-.hero-pills{display:flex;justify-content:flex-start;gap:8px;margin-top:10px}
+.hero-kpi-sub{font-size:10px;color:var(--dim);margin-top:2px;font-style:italic}
 .hero-pill{font-family:var(--mono);font-size:10px;padding:4px 12px;border-radius:12px;background:rgba(255,255,255,0.04);color:var(--dim);border:1px solid rgba(255,255,255,0.04);transition:all .2s}
 .hero-pool-pill{font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;padding:4px 10px;border-radius:12px;background:var(--glow);color:var(--accent);border:1px solid rgba(247,147,26,0.28)}
 .hero-core-caption{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim);padding:0 4px}
@@ -411,12 +500,12 @@ body.col .main{margin-left:var(--sidebar-c)}
 .gauge-row{display:flex;align-items:center;gap:10px;margin:6px 0}
 .gauge-label{font-size:10px;color:var(--dim);min-width:50px}
 .gauge-val{font-family:var(--mono);font-size:12px;min-width:60px;text-align:right}
-.gauge-bar{flex:1}
 
 /* ── Chart ── */
 .chart-wrap{position:relative;height:200px;margin:8px 0}
 .chart-wrap canvas{position:absolute;top:0;left:0;width:100%;height:100%;cursor:crosshair}
 .chart-legend{display:flex;gap:12px;font-size:10px;color:var(--dim);margin-bottom:4px}
+.chart-win{font-size:var(--t-meta)}
 .chart-legend label{display:flex;align-items:center;gap:4px;cursor:pointer}
 .chart-legend input{accent-color:var(--accent)}
 
@@ -426,14 +515,14 @@ body.col .main{margin-left:var(--sidebar-c)}
 .field input,.field select{width:100%;padding:8px 10px;background:var(--s-void);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-family:var(--mono);font-size:12px;outline:none;transition:border-color .2s ease,box-shadow .25s ease,background .2s}
 .field input:focus,.field select:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent),0 0 16px var(--glow);background:rgba(255,255,255,0.02);outline:none}
 .field:focus-within label{color:var(--accent);transition:color .2s}
-.field input::placeholder{color:var(--muted);opacity:0.6}
+.field input::placeholder{color:var(--dim);opacity:0.85}
 .field-row{display:flex;gap:10px}
 .field-row .field{flex:1}
 .btn{padding:8px 16px;border:none;border-radius:var(--radius-sm);font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);transition:all .15s}
 .btn:active{transform:scale(0.97);filter:brightness(0.9)}.btn:disabled{opacity:0.4;cursor:not-allowed}
 input[type=range]{accent-color:var(--accent)}
 .btn-primary{background:var(--accent);color:#000;box-shadow:0 2px 8px rgba(247,147,26,0.25)}.btn-primary:hover{filter:brightness(1.1);box-shadow:0 4px 16px rgba(247,147,26,0.35);transform:translateY(-1px)}
-.btn-danger{background:var(--red);color:#fff}.btn-danger:hover{filter:brightness(1.1)}
+.btn-danger{background:var(--red);color:#000}.btn-danger:hover{filter:brightness(1.1)}
 .btn-ghost{background:transparent;border:1px solid var(--border);color:var(--dim)}.btn-ghost:hover{color:var(--text);border-color:var(--muted)}
 .btn-sm{padding:4px 10px;font-size:11px}
 .btn-row{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
@@ -453,19 +542,19 @@ details summary{font-size:11px;color:var(--dim);cursor:pointer;padding:4px 0}
 .log-crumb{font-family:var(--mono);font-size:11px;color:var(--dim);margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .log-crumb::before{content:'> ';color:var(--accent)}
 .log-crumb b{color:var(--text);font-weight:600}
-.log-crumb .sep{color:var(--muted)}
+.log-crumb .sep{color:var(--dim)}
 .log-crumb .path{color:var(--accent)}
 .log-crumb-pills{margin-left:auto;display:flex;gap:6px;align-items:center}
 .log-crumb-pill{font-family:var(--mono);font-size:10px;padding:3px 9px;border-radius:10px;border:1px solid var(--border);color:var(--dim);background:rgba(255,255,255,0.02);display:inline-flex;align-items:center;gap:5px;cursor:pointer}
 .log-crumb-pill.live{color:var(--green);border-color:rgba(52,211,153,0.25)}
 .log-crumb-pill.live::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green);animation:pulse 1.6s ease infinite}
 .log-crumb-pill.paused{color:var(--yellow);border-color:rgba(251,191,36,0.25)}
-.log-stream-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;font-family:var(--mono);font-size:10px;letter-spacing:1.4px;color:var(--dim);text-transform:uppercase}
+.log-stream-head{display:flex;align-items:center;flex-wrap:wrap;gap:2px 8px;margin-bottom:10px;font-family:var(--mono);font-size:10px;letter-spacing:1.4px;color:var(--dim)}
 .log-stream-head .lhs{color:var(--accent);text-shadow:0 0 8px var(--glow);font-weight:700}
 .log-grid{display:grid;grid-template-columns:200px 1fr;gap:14px}
 .log-counters-col{display:flex;flex-direction:column;gap:10px}
 .log-counter-row{padding:8px 10px;background:var(--s-void);border:1px solid var(--border);border-radius:var(--radius-sm);font-family:var(--mono)}
-.log-counter-row .lc-k{font-size:9px;letter-spacing:1.4px;color:var(--dim);text-transform:uppercase}
+.log-counter-row .lc-k{font-size:10px;letter-spacing:1.4px;color:var(--dim);text-transform:uppercase}
 .log-counter-row .lc-v{font-size:18px;color:var(--text);font-weight:600;margin-top:2px;line-height:1}
 .log-counter-row.ok .lc-v{color:var(--green);text-shadow:0 0 8px rgba(52,211,153,0.25)}
 .log-counter-row.rej .lc-v{color:var(--red)}
@@ -541,16 +630,12 @@ details summary{font-size:11px;color:var(--dim);cursor:pointer;padding:4px 0}
 .kv-flex-row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)}
 .kv-flex-row:last-child{border-bottom:0}
 .text-dim{color:var(--dim)}
-.text-accent{color:var(--accent)}
-.text-red{color:var(--red)}
-.text-cyan{color:var(--cyan)}
-.text-yellow{color:var(--yellow)}
+a,.text-accent{color:var(--accent)}
+.fund{display:block;border-top:1px solid var(--border);padding:16px 0}
 .text-green{color:var(--green)}
-.stack-tight{margin-top:8px}
 .help-small{font-size:11px;color:var(--dim);margin-bottom:8px;display:block}
 .meta-mono{font-family:var(--mono);font-size:11px}
 .gauge-row{display:flex;align-items:center;gap:10px;margin:8px 0}
-.icon-accent-bg{background:var(--glow);color:var(--accent)}
 /* Show/hide toggle for password inputs. The wrapper reserves padding on the
    right so the eye button doesn't overlap the input text. */
 .pw-wrap{position:relative;display:block}
@@ -560,11 +645,11 @@ details summary{font-size:11px;color:var(--dim);cursor:pointer;padding:4px 0}
 .pw-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
 /* ── Offline banner ── */
-.offline-banner{display:none;background:var(--red);color:#fff;text-align:center;padding:8px;font-size:12px}
+.offline-banner{display:none;background:var(--red);color:#000;text-align:center;padding:8px;font-size:12px}
 
 /* ── Achievement grid ── */
 .ach-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:8px}
-.ach-item{text-align:center;padding:10px 6px;border-radius:var(--radius-sm);font-size:9px;background:rgba(255,255,255,0.02);border:1px solid var(--border);transition:all .2s}
+.ach-item{text-align:center;padding:10px 6px;border-radius:var(--radius-sm);font-size:10px;background:rgba(255,255,255,0.02);border:1px solid var(--border);transition:all .2s}
 .ach-item:hover{transform:translateY(-2px);border-color:rgba(255,255,255,0.1)}
 .ach-item.unlocked{border-color:var(--accent);background:rgba(247,147,26,0.06);box-shadow:0 0 12px rgba(247,147,26,0.08)}
 .ach-item.locked{opacity:0.4}
@@ -573,71 +658,52 @@ details summary{font-size:11px;color:var(--dim);cursor:pointer;padding:4px 0}
 .chip-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:10px}
 .chip-tile{background:var(--s-void);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;text-align:center;position:relative;transition:all .2s}
 .chip-tile:hover{border-color:rgba(255,255,255,0.1);transform:translateY(-1px)}
-.chip-tile .chip-id{font-family:var(--mono);font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
-.chip-tile .chip-temp{font-family:var(--mono);font-size:20px;font-weight:700;line-height:1.2}
-.chip-tile .chip-status{font-size:9px;margin-top:4px;display:flex;align-items:center;justify-content:center;gap:4px}
-.chip-tile .cs-dot{width:6px;height:6px;border-radius:50%}
-.cs-active{background:var(--accent);box-shadow:0 0 4px var(--glow)}.cs-idle{background:var(--dim)}.cs-err{background:var(--red)}
-.chip-tile.hottest{border-color:var(--red);box-shadow:0 0 12px rgba(248,113,113,0.1)}
 
-/* duplicate scanline removed */
-
-/* ── Mobile tabs ── */
+/* Mobile shell */
 .mobile-tabs{display:none}
-
-/* ── Responsive ── */
 @media(max-width:768px){
-.mobile-tabs{display:grid;grid-template-columns:repeat(4,1fr);position:fixed;left:0;right:0;bottom:0;background:rgba(10,14,20,.96);border-top:1px solid var(--border);z-index:120;padding:4px 0}
-.mobile-tabs button{background:none;border:none;color:var(--dim);font-size:9px;padding:6px 0;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;font-family:var(--font)}
+.mobile-tabs{display:grid;grid-template-columns:repeat(5,1fr);position:fixed;left:0;right:0;bottom:0;background:rgba(10,14,20,.96);border-top:1px solid var(--border);z-index:120;padding:4px 0 env(safe-area-inset-bottom)}
+.mobile-tabs button{background:none;border:none;color:var(--dim);font-size:10px;padding:8px 0;min-height:44px;display:flex;flex-direction:column;align-items:center;gap:2px;font-family:var(--font)}
 .mobile-tabs button.ac{color:var(--accent)}
 .mobile-tabs svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8}
-.content{padding-bottom:72px!important}
-body{grid-template-columns:1fr}
 .sb{transform:translateX(-100%);transition:transform .25s;width:260px}
 .sb.open{transform:translateX(0)}
+.sb-scrim{position:fixed;inset:0;background:var(--s-void);opacity:.6;z-index:50}
 .main{margin-left:0!important}
 .hamburger{display:block}
-.grid4{grid-template-columns:1fr 1fr}.grid3{grid-template-columns:1fr 1fr}.grid2{grid-template-columns:1fr}
-.hero-hr{font-size:36px}
+.topbar .crumbs,.status-pills,.tb-icon+.tb-icon,.tb-icon+.tb-icon+.tb-btn{display:none}
+.topbar-right{min-width:0;overflow-x:auto}
+.grid4,.grid3{grid-template-columns:1fr 1fr}.grid2{grid-template-columns:1fr}
 .offline-banner{left:0}
-.content{padding:14px}
+.content{padding:14px 14px calc(72px + env(safe-area-inset-bottom))!important;overflow-x:clip}
 [data-tip]:hover::after{display:none}
 }
-@media(max-width:480px){.grid4{grid-template-columns:1fr}.hero-hr{font-size:28px}}
+@media(max-width:480px){#p0.ac{display:flex;flex-direction:column}.mstrip{order:-2}.grid4{order:-1}.stat-label{font-size:12px}}
 
-/* ── Design handoff layer (2026-04-24) — hero split + block-card + new modal ── */
-.hero-inner{display:flex;justify-content:space-between;align-items:stretch;gap:24px;position:relative;z-index:1}
-.hero-left{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:10px}
-.hero-divider-v{width:1px;background:var(--border);align-self:stretch}
-.hero-footer{display:flex;gap:24px;padding-top:14px;border-top:1px solid var(--border);margin-top:14px;flex-wrap:wrap;align-items:center}
-.hero-footer .hero-kpi{min-width:120px}
-.hero-footer .hero-divider{width:1px;height:36px;background:var(--border);flex-shrink:0}
+/* ── Design handoff layer (2026-04-24) — block-card + new modal ── */
 .block-card{background:var(--s-raised);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;width:260px;flex-shrink:0;cursor:pointer;transition:all var(--dur-base) var(--ease-out);display:flex;flex-direction:column;gap:8px;text-align:left;outline:none;font:inherit;color:inherit}
 .block-card:hover{border-color:rgba(247,147,26,0.28);box-shadow:var(--shadow-hover);transform:translateY(-1px)}
 .block-card:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .block-card .block-title{font-family:var(--mono);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1.5px;color:var(--dim);display:flex;align-items:center;gap:6px}
 .block-card .block-title::before{content:">";color:var(--accent);font-weight:400}
 .block-card .block-height{font-family:var(--mono);font-size:30px;font-weight:800;line-height:1;letter-spacing:-1px;color:var(--text);text-shadow:0 0 12px rgba(247,147,26,0.18);font-variant-numeric:tabular-nums}
-.block-card .block-sub{display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--dim);gap:8px;margin-top:2px}
-.block-card .block-click-hint{font-size:9px;color:var(--muted);letter-spacing:0.5px;text-transform:uppercase;font-family:var(--mono)}
 .block-card.new-block{animation:blockFlash 1.2s var(--ease-out)}
 @keyframes blockFlash{0%{border-color:var(--accent);box-shadow:0 0 0 3px var(--glow),var(--shadow-hover)}100%{border-color:var(--border);box-shadow:var(--shadow-card)}}
 /* ── Hero block card (loop 2026-04-29 inspiration combine) ──
    Extends .block-card with a richer head/hash/grid/foot layout.
    All data ids are wired by block-tile.js + inline update(). */
 .block-card .block-card-head{display:flex;justify-content:space-between;align-items:center;gap:8px}
-.block-card .pill-live{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--accent);background:var(--glow);border:1px solid rgba(247,147,26,0.28);padding:3px 8px;border-radius:var(--radius-sm)}
+.block-card .pill-live{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--accent);background:var(--glow);border:1px solid rgba(247,147,26,0.28);padding:3px 8px;border-radius:var(--radius-sm)}
 .block-card .pill-live .live-dot{width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 6px var(--accent);animation:livePulse 1.6s var(--ease-out) infinite}
 @keyframes livePulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.4;transform:scale(0.85)}}
 .block-card .block-hash-row{display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--s-void);border:1px solid var(--border);border-radius:var(--radius-sm);font-family:var(--mono);font-size:11px;font-variant-numeric:tabular-nums;min-width:0}
-.block-card .block-hash-label{font-size:9px;color:var(--dim);letter-spacing:1px;flex-shrink:0}
+.block-card .block-hash-label{font-size:10px;color:var(--dim);letter-spacing:1px;flex-shrink:0}
 .block-card .block-hash-val{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
-.block-card .block-grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
 .block-card .block-grid4{display:grid;grid-template-columns:repeat(2,1fr);gap:6px}
 .block-card .block-cell{display:flex;flex-direction:column;gap:2px;padding:6px 8px;background:rgba(255,255,255,0.012);border:1px solid var(--border);border-radius:var(--radius-sm);min-width:0}
-.block-card .block-cell-label{font-family:var(--mono);font-size:9px;color:var(--dim);letter-spacing:1px;text-transform:uppercase}
+.block-card .block-cell-label{font-family:var(--mono);font-size:10px;color:var(--dim);letter-spacing:1px;text-transform:uppercase}
 .block-card .block-cell-val{font-family:var(--mono);font-size:13px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.block-card .block-cell-unit{font-size:9px;font-weight:500;color:var(--dim);margin-left:1px}
+.block-card .block-cell-unit{font-size:10px;font-weight:500;color:var(--dim);margin-left:1px}
 .block-card .block-card-foot{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:0.5px;padding-top:6px;border-top:1px dashed var(--border);margin-top:2px}
 .block-card .block-arrow{color:var(--accent);font-weight:700;transition:transform var(--dur-fast) var(--ease-out)}
 .block-card:hover .block-arrow{transform:translateX(3px)}
@@ -661,30 +727,24 @@ body{grid-template-columns:1fr}
 .kvdl .kvdl-v .copy-btn{background:transparent;border:1px solid var(--border);color:var(--dim);cursor:pointer;padding:2px 8px;border-radius:var(--radius-sm);font-size:10px;font-family:var(--mono);transition:all var(--dur-fast) var(--ease-out)}
 .kvdl .kvdl-v .copy-btn:hover{color:var(--accent);border-color:var(--accent)}
 .pill-ok{color:var(--green);background:rgba(52,211,153,0.08);border:1px solid rgba(52,211,153,0.20)}
-.pill-orange{color:var(--accent);background:var(--glow);border:1px solid rgba(247,147,26,0.25)}
-.pill-muted{color:var(--muted);font-size:9px}
-.block-hash-big{font-family:var(--mono);font-size:14px;color:var(--accent);word-break:break-all;padding:8px 10px;background:var(--s-void);border:1px solid var(--border);border-radius:var(--radius-sm);margin-top:4px}
-@media(max-width:900px){.hero-inner{flex-direction:column;align-items:stretch;gap:16px}.block-card{width:auto}.hero-divider-v{display:none}.hero-footer{gap:16px}}
+.pill-muted{color:var(--dim);font-size:10px}
+@media(max-width:900px){.block-card{width:auto}}
 
 /* ── Topbar breadcrumb ── */
 .crumbs{display:flex;align-items:center;gap:8px;font-size:13px;margin-right:16px}
 .crumb-root{color:var(--dim);font-weight:500}
-.crumb-sep{color:var(--muted)}
+.crumb-sep{color:var(--dim)}
 .crumb-cur{color:var(--text);font-weight:600}
 body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
 
 /* ── Full handoff logo (320×120 scaled to sidebar 180px) ── */
 /* legacy logo classes — superseded by .sb-lockup */
 
-/* ── Pool Status card (Dashboard) ── */
-.pool-status-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
-.pool-status-row .pill{font-size:10px}
-
 /* ── 6-gauge Power card upgrade ── */
 .gauges6{display:grid;grid-template-columns:1fr 1fr;gap:10px 18px}
 .gauges6 .gauge-row{display:flex;flex-direction:column;gap:4px;font-size:10px;margin-bottom:0}
 .gauges6 .gauge-head{display:flex;justify-content:space-between;align-items:baseline}
-.gauges6 .gauge-label{color:var(--dim);text-transform:uppercase;letter-spacing:0.6px;font-weight:600;font-size:9px}
+.gauges6 .gauge-label{color:var(--dim);text-transform:uppercase;letter-spacing:0.6px;font-weight:600;font-size:10px}
 .gauges6 .gauge-val{font-family:var(--mono);color:var(--text);font-weight:700;font-variant-numeric:tabular-nums;font-size:13px}
 .gauges6 .gauge-unit{color:var(--dim);font-weight:400;margin-left:3px;font-size:10px}
 .gauges6 .gauge-track{height:4px;background:rgba(255,255,255,0.05);border-radius:2px;overflow:hidden}
@@ -695,43 +755,28 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
 .g-fill-yellow{background:linear-gradient(90deg,var(--yellow),#f59e0b)}
 .g-fill-red{background:linear-gradient(90deg,var(--red),#ef4444)}
 @media(max-width:700px){.gauges6{grid-template-columns:1fr}}
-
-/* ── Chip tiles v2 (handoff chips.css port) ── */
-.chip-grid{display:grid;gap:12px}
-.chip-grid-1{grid-template-columns:minmax(0,320px);justify-content:center}
-.chip-grid-2{grid-template-columns:repeat(2,1fr)}
-.chip-grid-4{grid-template-columns:repeat(4,1fr)}
-.chip-grid-6{grid-template-columns:repeat(6,1fr)}
-@media(max-width:1100px){.chip-grid-4{grid-template-columns:repeat(2,1fr)}.chip-grid-6{grid-template-columns:repeat(3,1fr)}}
-.chip-tile{--chip-color:var(--accent);--chip-glow:rgba(247,147,26,0.35);cursor:default;display:flex;flex-direction:column;padding:12px 12px 10px;background:linear-gradient(180deg,rgba(255,255,255,0.015) 0%,rgba(0,0,0,0.25) 100%),var(--s-raised);border:1px solid var(--border);border-radius:var(--radius-sm);position:relative;overflow:hidden;transition:all var(--dur-base) var(--ease-out);box-shadow:0 2px 12px rgba(0,0,0,0.35)}
-.chip-tile::before{content:'';position:absolute;top:0;left:12%;right:12%;height:1px;background:linear-gradient(90deg,transparent,var(--chip-color),transparent);opacity:0.5}
-.chip-tile::after{content:'';position:absolute;inset:0;background:radial-gradient(ellipse 120% 50% at 50% 120%,var(--chip-glow),transparent 70%);opacity:0.35;pointer-events:none;transition:opacity var(--dur-base)}
-.chip-tile:hover{transform:translateY(-2px);border-color:var(--chip-color);box-shadow:0 8px 28px rgba(0,0,0,0.5),0 0 24px var(--chip-glow)}
-.chip-tile:hover::after{opacity:0.8}
-.chip-tile.hot{border-color:rgba(247,147,26,0.35);--chip-color:var(--yellow);--chip-glow:rgba(251,191,36,0.30)}
-.chip-tile.error{border-color:rgba(248,113,113,0.40);--chip-color:var(--red);--chip-glow:rgba(248,113,113,0.30)}
-.chip-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
-.chip-id{font-family:var(--mono);font-size:10px;font-weight:700;color:var(--dim);letter-spacing:1.2px}
-.chip-dot{width:6px;height:6px;border-radius:50%;background:var(--muted)}
-.chip-dot.active{background:var(--chip-color);box-shadow:0 0 8px var(--chip-color);animation:pulse 1.6s ease-in-out infinite}
-.chip-dot.error{background:var(--red);box-shadow:0 0 8px var(--red);animation:pulse 0.8s ease-in-out infinite}
-.chip-metrics{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px}
-.chip-metric{display:flex;flex-direction:column;align-items:flex-start;line-height:1.1}
-.chip-metric:last-child{align-items:flex-end}
-.chip-metric-val{font-family:var(--mono);font-size:18px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text);letter-spacing:-0.4px}
-.chip-metric-unit{font-size:11px;color:var(--dim);margin-left:2px;font-weight:400}
-.chip-metric-lbl{font-family:var(--mono);font-size:8px;color:var(--dim);letter-spacing:1.3px;font-weight:600;margin-top:1px}
-.chip-share-bar{position:relative;height:16px;background:var(--s-void);border:1px solid var(--border);border-radius:4px;overflow:hidden}
-.chip-share-fill{position:absolute;inset:0 auto 0 0;border-radius:4px;opacity:0.35;transition:width .8s var(--ease-out);background:var(--chip-color)}
-.chip-share-lbl{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:0.5px;color:var(--text)}
-.uart-chain-v2{display:flex;align-items:center;flex-wrap:wrap;gap:4px;padding:10px 12px;background:var(--s-void);border:1px solid var(--border);border-radius:var(--radius-sm);font-family:var(--mono);font-size:10px;margin-top:12px;overflow:hidden;position:relative}
-.uart-node{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:4px;font-weight:600;letter-spacing:0.8px;white-space:nowrap}
-.uart-mcu{color:var(--cyan);border:1px solid rgba(34,211,238,0.3);background:rgba(34,211,238,0.06);box-shadow:0 0 12px rgba(34,211,238,0.12)}
-.uart-led{width:6px;height:6px;border-radius:50%;background:var(--cyan);box-shadow:0 0 8px var(--cyan);animation:pulse 1.6s ease-in-out infinite}
-.uart-chip{border:1px solid var(--border);color:var(--dim)}
-.uart-chip.active{color:var(--accent);border-color:rgba(247,147,26,0.35);background:var(--glow);box-shadow:0 0 12px rgba(247,147,26,0.15)}
-.uart-chip.error{color:var(--red);border-color:rgba(248,113,113,0.35);background:rgba(248,113,113,0.08)}
-.uart-line{flex:0 0 auto;width:24px;height:1px;background:linear-gradient(90deg,var(--dim),rgba(107,122,141,0.1));position:relative;margin:0 2px}
+/* ── A11y: motion, contrast, target size (lane P1-W4, 2026-09-03) ──
+   Every number here was measured with the CDP probe in
+   projects/.axe-gauntlet/pass1/P1-W4/, not eyeballed. Floors only. */
+@media(prefers-reduced-motion:reduce){
+*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+.sb,.topbar,.toast,.modal-overlay,.modal-back,#frOverlay{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+}
+/* 10px readable floor. These selectors live in the modular sheets (loaded
+   after this block) or in inline style= attributes, so the floor has to be
+   !important; svg presentation attributes lose to any author rule. */
+.chip-metric-lbl,.chip-badge-hot,.board-opt-lbl,.chip-share-lbl,.chip-pop .row .k,.bm-full .k,.bm-reward .k,.bm-cb .k,.bm-hrow .k,.bm-tbl td:first-child,.core-readout .lbl,.core-meta .k,.core-meta .u,.dcent-stat .stat-eyebrow,[style*="font-size:9px"],[style*="font-size:8px"]{font-size:10px!important}
+svg text[font-size="8"],svg text[font-size="9"]{font-size:10px}
+[data-tip]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media(max-width:768px){
+/* 44x44 floor for every control outside the dense key/value + log tables. */
+.tb-btn,.btn,.hamburger,.modal-close,.tb-alert-close,.pw-toggle,.copy-btn,.log-filter-pill,.log-crumb-pill,.content a:not(.fund){min-height:44px;min-width:44px;display:inline-flex;align-items:center;justify-content:center}
+.chart-legend label,label:has(>input[type=checkbox]),label:has(>input[type=radio]){min-height:44px;min-width:44px;display:flex;align-items:center;gap:6px}
+.sb-nav a,details summary,.field input,.field select,.log-filter-row input{min-height:44px}
+.pw-wrap input{padding-right:56px!important}
+/* the educational copy stays reachable on touch: focus or tap shows it. */
+[data-tip]:focus::after,[data-tip]:focus-within::after,[data-tip].tip-on::after{display:block;white-space:normal;width:max-content;max-width:min(78vw,260px);text-align:left}
+}
 </style>
 <!-- Modular dashboard CSS (Phase 2.A-3.2). Loaded AFTER inline <style>
      so component rules (chip-grid, chip-tile, mining-core, block-tile)
@@ -765,14 +810,14 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
   <div class="sb-hr"><span class="sb-dot" id="dot"></span><span id="sbHR">-- GH/s</span></div>
  </div>
  <nav class="sb-nav" id="nav">
-  <a onclick="go(0)" class="ac" id="n0"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span class="nl">Dashboard</span></a>
-  <a onclick="go(1)" id="n1"><svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1"/><circle cx="6" cy="18" r="1"/></svg><span class="nl">Pool</span></a>
-  <a onclick="go(2)" id="n2"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg><span class="nl">Logs</span></a>
-  <a onclick="go(3)" id="n3"><svg viewBox="0 0 24 24"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1"/></svg><span class="nl">Network</span></a>
+  <a onclick="go(0)" class="ac" id="n0" tabindex=0 role=button aria-current=page><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span class="nl">Dashboard</span></a>
+  <a onclick="go(1)" id="n1" tabindex=0 role=button><svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1"/><circle cx="6" cy="18" r="1"/></svg><span class="nl">Pool</span></a>
+  <a onclick="go(2)" id="n2" tabindex=0 role=button><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg><span class="nl">Logs</span></a>
+  <a onclick="go(3)" id="n3" tabindex=0 role=button><svg viewBox="0 0 24 24"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1"/></svg><span class="nl">Network</span></a>
   <div class="sb-sep"></div>
-  <a onclick="go(4)" id="n4"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg><span class="nl">System</span></a>
-  <a onclick="go(5)" id="n5"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="nl">Settings</span></a>
-  <a onclick="go(6)" id="n6"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><line x1="9" y1="6" x2="15" y2="6"/><line x1="6" y1="9" x2="6" y2="15"/><line x1="18" y1="9" x2="18" y2="15"/><line x1="9" y1="18" x2="15" y2="18"/></svg><span class="nl">Swarm</span></a>
+  <a onclick="go(4)" id="n4" tabindex=0 role=button><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg><span class="nl">System</span></a>
+  <a onclick="go(5)" id="n5" tabindex=0 role=button><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="nl">Settings</span></a>
+  <a onclick="go(6)" id="n6" tabindex=0 role=button><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><line x1="9" y1="6" x2="15" y2="6"/><line x1="6" y1="9" x2="6" y2="15"/><line x1="18" y1="9" x2="18" y2="15"/><line x1="9" y1="18" x2="15" y2="18"/></svg><span class="nl">Swarm</span></a>
  </nav>
  <div class="sb-foot">
   <div class="sb-creature" id="creatureFace">(^_^)</div>
@@ -781,12 +826,13 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
   <a href="https://d-central.tech/fund/go?source=dcent_axe&placement=dashboard" target="_blank" rel="noopener">Support open firmware &rarr;</a>
  </div>
 </div>
+<div class="sb-scrim" id="sbScrim" onclick="closeSBMobile()" hidden></div>
 
 <!-- ════ Main ════ -->
 <div class="main" id="mainArea">
  <div class="topbar">
   <div class="topbar-left">
-   <button class="hamburger" onclick="toggleSB()">&#9776;</button>
+   <button class="hamburger" onclick="toggleSB()" aria-label="Open navigation">&#9776;</button>
    <div class="crumbs"><span class="crumb-root">DCENT_axe</span><span class="crumb-sep">/</span><span class="crumb-cur" id="crumbPage">Dashboard</span></div>
    <div class="status-pills">
     <span class="pill pill-muted" id="tbMining" style="display:flex;align-items:center;gap:4px"><span class="sb-dot" id="tbMiningDot"></span>CONNECTING</span>
@@ -808,7 +854,7 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
    <button class="tb-btn tb-icon" onclick="go(5)" title="Settings &amp; account" aria-label="Account">
     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
    </button>
-   <button class="tb-btn" onclick="toggleCol()" title="Collapse sidebar">&#9664;</button>
+   <button class="tb-btn" onclick="toggleCol()" title="Collapse sidebar" aria-label="Collapse sidebar">&#9664;</button>
    <button class="tb-btn danger" onclick="doReboot()" title="Reboot (Shift+R)">Reboot</button>
   </div>
  </div>
@@ -834,9 +880,10 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
  </div>
  <div class="offline-banner" id="offlineBanner"><span id="reconnectMsg">Offline</span></div>
 
- <div class="content">
+ <main class="content">
 <!-- ════════════════════ PAGE 0: DASHBOARD ════════════════════ -->
 <div class="page ac" id="p0">
+ <h1 class=vh>Dashboard</h1>
  <!-- MERGED HERO (loop 13, 2026-04-28). Mining Core sphere is THE hero;
       the legacy `<div class="hero">` was deleted because it duplicated
       the hashrate readout that core.js renders inside the sphere card.
@@ -875,11 +922,11 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
  <div class="grid3" style="margin-bottom:16px">
   <div class="hero-kpi"><div class="hero-kpi-label">Efficiency</div><div class="hero-kpi-val"><span id="heroEffVal">--</span> <span class="eff-badge" id="effBadge"></span></div><div class="hero-kpi-sub">Lower J/TH = more efficient</div></div>
   <div class="hero-kpi"><div class="hero-kpi-label">Pool Share Rate</div><div class="hero-kpi-val" id="heroSatsVal">--</div><div class="hero-kpi-sub">Pool-accepted shares per hour</div></div>
-  <div class="hero-kpi" data-tip="Heat output in BTU/h. Shown in every mode (every miner is a heater)."><div class="hero-kpi-label">Heat Output</div><div class="hero-kpi-val"><span id="btuVal" style="color:var(--accent)">--</span> BTU/h</div><div class="hero-kpi-sub" id="btuEquiv">--</div></div>
+  <div class="hero-kpi" data-tip="Heat output in BTU/h. Shown in every mode (every miner is a heater)." tabindex=0><div class="hero-kpi-label">Heat Output</div><div class="hero-kpi-val"><span id="btuVal" style="color:var(--accent)">--</span> BTU/h</div><div class="hero-kpi-sub" id="btuEquiv">--</div></div>
  </div>
 
  <!-- Thin meta strip: state badge + multi-window pills + board + hex hash -->
- <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px;font-family:var(--mono);font-size:10px;color:var(--dim);padding:8px 12px;background:rgba(255,255,255,0.012);border:1px solid var(--border);border-radius:var(--radius-sm)">
+ <div class=mstrip style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px;font-family:var(--mono);font-size:10px;color:var(--dim);padding:8px 12px;background:rgba(255,255,255,0.012);border:1px solid var(--border);border-radius:var(--radius-sm)">
   <span class="status-badge warn" id="heroMiningState" style="font-size:10px;padding:4px 12px">Telemetry pending</span>
   <span class="hero-pool-pill" id="heroPoolPill" hidden></span>
   <span class="hero-pill" id="hr1m">1m: --</span>
@@ -897,26 +944,27 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
  <div class="grid4">
   <div class="stat" data-accent="green">
    <div class="stat-icon" style="background:var(--glow);color:var(--accent)"><svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
-   <div class="stat-label" data-tip="Overall mining health status">Health</div><div class="stat-val" id="healthQuick">--</div><div class="sparkline" id="hrSpk"></div><div class="stat-sub" id="healthQuickLabel">--</div>
+   <div class="stat-label" data-tip="Overall mining health status" tabindex=0>Health</div><div class="stat-val" id="healthQuick">--</div><div class="sparkline" id="hrSpk"></div><div class="stat-sub" id="healthQuickLabel">--</div>
   </div>
   <div class="stat" data-accent="cyan">
    <div class="stat-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)"><svg viewBox="0 0 24 24"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg></div>
-   <div class="stat-label" data-tip="ASIC die temperature. Firmware throttles above 90\u00B0C and cuts power above 105\u00B0C.">Temperature</div><div class="stat-val" id="tempQuick">--</div><div class="stat-sub" id="tempQuickLabel">--</div>
+   <div class="stat-label" data-tip="ASIC die temperature. Firmware throttles above 90\u00B0C and cuts power above 105\u00B0C." tabindex=0>Temperature</div><div class="stat-val" id="tempQuick">--</div><div class="stat-sub" id="tempQuickLabel">--</div>
   </div>
   <div class="stat" data-accent="orange">
    <div class="stat-icon" style="background:rgba(247,147,26,0.1);color:var(--accent)"><svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></div>
-   <div class="stat-label" data-tip="Highest difficulty share found this session">Best Diff</div><div class="stat-val" id="bestDiff">--</div><div class="stat-sub">All-time: <span id="bestEver" style="color:var(--accent)">--</span> | Up: <span id="uptime">--</span></div>
+   <div class="stat-label" data-tip="Highest difficulty share found this session" tabindex=0>Best Diff</div><div class="stat-val" id="bestDiff">--</div><div class="stat-sub">All-time: <span id="bestEver" style="color:var(--accent)">--</span> | Up: <span id="uptime">--</span></div>
   </div>
   <div class="stat" data-accent="yellow">
    <div class="stat-icon" style="background:rgba(251,191,36,0.1);color:var(--yellow)"><svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>
-   <div class="stat-label" data-tip="Total electrical power consumption">Power</div><div class="stat-val" id="powerQuick">--</div><div class="sparkline" id="pwrSpk"></div><div class="stat-sub" id="powerQuickLabel">--</div>
+   <div class="stat-label" data-tip="Total electrical power consumption" tabindex=0>Power</div><div class="stat-val" id="powerQuick">--</div><div class="sparkline" id="pwrSpk"></div><div class="stat-sub" id="powerQuickLabel">--</div>
   </div>
  </div>
 
  <div class="card">
   <div class="card-title">Performance</div>
-  <div class="chart-legend"><label><input type=checkbox id="chkHR" checked onchange="toggleSeries()"><span style="color:var(--accent)">Hashrate</span></label><label><input type=checkbox id="chkTemp" checked onchange="toggleSeries()"><span style="color:var(--cyan)">Temp</span></label><label><input type=checkbox id="chkPwr" checked onchange="toggleSeries()"><span style="color:var(--yellow)">Power</span></label></div>
-  <div class="chart-wrap"><canvas id="perfChart"></canvas></div>
+  <div class="chart-legend"><label><input type=checkbox id="chkHR" checked onchange="toggleSeries()"><span style="color:var(--accent)">Hashrate 5m (left)</span></label><label><input type=checkbox id="chkTemp" checked onchange="toggleSeries()"><span style="color:var(--cyan)">Temp °C (right)</span></label><label><input type=checkbox id="chkPwr" checked onchange="toggleSeries()"><span style="color:var(--yellow)">Power W</span></label></div>
+  <div class="chart-win" id="chartWin" aria-live=polite>Telemetry pending</div>
+  <div class="chart-wrap"><canvas id="perfChart" role=img aria-labelledby=chartWin></canvas></div>
  </div>
 
  <div class="grid2">
@@ -932,17 +980,17 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
     <span>Session Best: <span style="font-family:var(--mono);color:var(--accent)" id="sessionBestDiff">--</span></span>
     <span style="color:var(--dim)">Rate: <span style="font-family:var(--mono);color:var(--text)" id="sharesPerHr2">--</span>/hr</span>
    </div>
-   <div class="share-dots" id="shareDots" data-tip="Recent pool responses — green=accepted, red=rejected"></div>
+   <div class="share-dots" id="shareDots" data-tip="Recent pool responses — green=accepted, red=rejected" tabindex=0></div>
   </div>
   <div class="card">
    <div class="card-head"><div class="card-title">Power &amp; Thermals</div><span class="card-right-meta" id="pwrSummary">-- V · -- A</span></div>
    <div class="gauges6">
-    <div class="gauge-row"><div class="gauge-head"><span class="gauge-label" data-tip="Total electrical power draw">Draw</span><span class="gauge-val"><span id="pw6Draw">--</span><span class="gauge-unit">W</span></span></div><div class="gauge-track"><div class="gauge-fill g-fill-green" id="pw6DrawBar"></div></div></div>
-    <div class="gauge-row"><div class="gauge-head"><span class="gauge-label" data-tip="ASIC clock frequency">Freq</span><span class="gauge-val"><span id="pw6Freq">--</span><span class="gauge-unit">MHz</span></span></div><div class="gauge-track"><div class="gauge-fill g-fill-orange" id="pw6FreqBar"></div></div></div>
-    <div class="gauge-row"><div class="gauge-head"><span class="gauge-label" data-tip="ASIC core voltage — affects hash and power">Core</span><span class="gauge-val"><span id="pw6Core">--</span><span class="gauge-unit">mV</span></span></div><div class="gauge-track"><div class="gauge-fill g-fill-green" id="pw6CoreBar"></div></div></div>
-    <div class="gauge-row"><div class="gauge-head"><span class="gauge-label" data-tip="ASIC die temperature">ASIC</span><span class="gauge-val"><span id="pw6Asic">--</span><span class="gauge-unit">°C</span></span></div><div class="gauge-track"><div class="gauge-fill g-fill-cyan" id="pw6AsicBar"></div></div></div>
-    <div class="gauge-row"><div class="gauge-head"><span class="gauge-label" data-tip="Voltage regulator temperature">VR</span><span class="gauge-val"><span id="pw6Vreg">--</span><span class="gauge-unit">°C</span></span></div><div class="gauge-track"><div class="gauge-fill g-fill-cyan" id="pw6VregBar"></div></div></div>
-    <div class="gauge-row"><div class="gauge-head"><span class="gauge-label" data-tip="Fan duty cycle (RPM in hover)">Fan</span><span class="gauge-val"><span id="pw6Fan">--</span><span class="gauge-unit">%</span> <span id="pw6FanRpm" style="color:var(--dim);font-size:10px"></span></span></div><div class="gauge-track"><div class="gauge-fill g-fill-orange" id="pw6FanBar"></div></div></div>
+    <div class="gauge-row"><div class="gauge-head"><span class="gauge-label" data-tip="Total electrical power draw" tabindex=0>Draw</span><span class="gauge-val"><span id="pw6Draw">--</span><span class="gauge-unit">W</span></span></div><div class="gauge-track"><div class="gauge-fill g-fill-green" id="pw6DrawBar"></div></div></div>
+    <div class="gauge-row"><div class="gauge-head"><span class="gauge-label" data-tip="ASIC clock frequency" tabindex=0>Freq</span><span class="gauge-val"><span id="pw6Freq">--</span><span class="gauge-unit">MHz</span></span></div><div class="gauge-track"><div class="gauge-fill g-fill-orange" id="pw6FreqBar"></div></div></div>
+    <div class="gauge-row"><div class="gauge-head"><span class="gauge-label" data-tip="ASIC core voltage — affects hash and power" tabindex=0>Core</span><span class="gauge-val"><span id="pw6Core">--</span><span class="gauge-unit">mV</span></span></div><div class="gauge-track"><div class="gauge-fill g-fill-green" id="pw6CoreBar"></div></div></div>
+    <div class="gauge-row"><div class="gauge-head"><span class="gauge-label" data-tip="ASIC die temperature" tabindex=0>ASIC</span><span class="gauge-val"><span id="pw6Asic">--</span><span class="gauge-unit">°C</span></span></div><div class="gauge-track"><div class="gauge-fill g-fill-cyan" id="pw6AsicBar"></div></div></div>
+    <div class="gauge-row"><div class="gauge-head"><span class="gauge-label" data-tip="Voltage regulator temperature" tabindex=0>VR</span><span class="gauge-val"><span id="pw6Vreg">--</span><span class="gauge-unit">°C</span></span></div><div class="gauge-track"><div class="gauge-fill g-fill-cyan" id="pw6VregBar"></div></div></div>
+    <div class="gauge-row"><div class="gauge-head"><span class="gauge-label" data-tip="Fan duty cycle (RPM in hover)" tabindex=0>Fan</span><span class="gauge-val"><span id="pw6Fan">--</span><span class="gauge-unit">%</span> <span id="pw6FanRpm" style="color:var(--dim);font-size:10px"></span></span></div><div class="gauge-track"><div class="gauge-fill g-fill-orange" id="pw6FanBar"></div></div></div>
    </div>
   </div>
  </div>
@@ -959,7 +1007,7 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
    <div class="kvdl-row"><span class="kvdl-k">Submit State</span><span class="kvdl-v" id="dPoolTruth">--</span></div>
    <div class="kvdl-row"><span class="kvdl-k">Quality</span><span class="kvdl-v" id="dShareQuality">--</span></div>
    <div class="kvdl-row"><span class="kvdl-k">Recovery</span><span class="kvdl-v" id="dRecovery">--</span></div>
-   <div class="kvdl-row"><span class="kvdl-k" data-tip="Pool Target Difficulty: the pool-required minimum for a share to count (vardiff), not the Achieved Difficulty a share actually hit">Share Target</span><span class="kvdl-v" id="dPoolTarget">--</span></div>
+   <div class="kvdl-row"><span class="kvdl-k" data-tip="Pool Target Difficulty: the pool-required minimum for a share to count (vardiff), not the Achieved Difficulty a share actually hit" tabindex=0>Share Target</span><span class="kvdl-v" id="dPoolTarget">--</span></div>
   </dl>
  </div>
 
@@ -972,14 +1020,8 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
   </div>
  </div>
 
- <!-- ════ Network card (CAP-OS2AXE-3) — INLINE, 0 new register_static handlers ════
-      (a) Halving countdown: HalvingTimelineBar math reimplemented client-side
-          from the ALREADY-CLIENT-SIDE d.blockHeight (no fetch, no field, no handler).
-      (b) Mempool fee radial: MempoolFeeRadial pure-SVG 180° gauge built from a
-          cross-origin browser fetch to mempool.space — the SAME pattern
-          block-tile.js already uses, so it costs NO firmware handler, only the
-          browser fetch. Fails SILENTLY to the em-dash empty state when blocked/
-          offline (device may be on an isolated LAN). No new dashboard/network.js. -->
+ <!-- Network card (CAP-OS2AXE-3) — INLINE, 0 handlers. Halving = client-side
+      math over d.blockHeight. Mempool = cross-origin fetch, OPT-IN default OFF. -->
  <div class="card" id="networkCard">
   <div class="card-title">Network</div>
   <div class="grid2" style="align-items:start">
@@ -995,6 +1037,7 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
    <div>
     <div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);margin-bottom:8px;font-weight:700">Mempool Fees <span style="color:var(--muted)">sat/vB</span></div>
     <div id="mempoolRadial" style="text-align:center;min-height:130px"></div>
+    <button type="button" id="mpOptIn" class="btn btn-ghost btn-sm" onclick="mempoolToggle()" style="width:100%;white-space:normal;text-align:left;line-height:1.4;padding:9px 10px;margin-top:6px;color:var(--text)"><b id="mpOptInVerb">Enable</b> mempool.space fees (sends this device's IP to mempool.space)</button>
    </div>
   </div>
  </div>
@@ -1007,16 +1050,16 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
    <div style="display:flex;justify-content:center;gap:12px;margin-top:6px;font-size:10px;color:var(--dim)">
     <span id="boardTempPill">Board: <span id="boardTemp">--</span></span>
     <span id="vregTempPill">VReg: <span id="vregTemp">--</span></span>
-    <span>Fan: <span id="fanPct">--</span>% (<span id="fanRpm">--</span>) <span id="fanProof" class="dim" data-tip="cut hash before noise: speed is proven only when a tach RPM reading is present">Unproved</span></span>
+    <span>Fan: <span id="fanPct">--</span>% (<span id="fanRpm">--</span>) <span id="fanProof" class="dim" data-tip="cut hash before noise: speed is proven only when a tach RPM reading is present" tabindex=0>Unproved</span></span>
    </div>
   </div>
   <div class="card card-dense">
    <div class="card-title">Block Info</div>
    <div style="font-family:var(--mono)">
-    <div class="kv-row"><span class="kv-key" data-tip="Current Bitcoin block height">Height</span><span class="kv-val" id="biHeight">--</span></div>
-    <div class="kv-row"><span class="kv-key" data-tip="Shares submitted to the pool this session; pending responses are not counted as accepted">Submitted</span><span class="kv-val" id="biNonces">--</span></div>
-    <div class="kv-row"><span class="kv-key" data-tip="Pool Target Difficulty: the pool-required minimum for a share to count (vardiff), not the Achieved Difficulty a share actually hit">Share Target</span><span class="kv-val" id="biPoolDiff">--</span></div>
-    <div class="kv-row"><span class="kv-key" data-tip="Pool-confirmed accepted shares divided by accepted plus rejected responses">Acceptance</span><span class="kv-val" id="biAccRate">--</span></div>
+    <div class="kv-row"><span class="kv-key" data-tip="Current Bitcoin block height" tabindex=0>Height</span><span class="kv-val" id="biHeight">--</span></div>
+    <div class="kv-row"><span class="kv-key" data-tip="Shares submitted to the pool this session; pending responses are not counted as accepted" tabindex=0>Submitted</span><span class="kv-val" id="biNonces">--</span></div>
+    <div class="kv-row"><span class="kv-key" data-tip="Pool Target Difficulty: the pool-required minimum for a share to count (vardiff), not the Achieved Difficulty a share actually hit" tabindex=0>Share Target</span><span class="kv-val" id="biPoolDiff">--</span></div>
+    <div class="kv-row"><span class="kv-key" data-tip="Pool-confirmed accepted shares divided by accepted plus rejected responses" tabindex=0>Acceptance</span><span class="kv-val" id="biAccRate">--</span></div>
    </div>
   </div>
  </div>
@@ -1040,24 +1083,26 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
    <div class="component-loading" style="font-family:var(--mono);font-size:11px;color:var(--dim);text-align:center;padding:14px">awaiting first telemetry…</div>
   </div>
  </div>
+ <a class=fund href="https://d-central.tech/fund/go?source=dcent_axe&placement=p0" target=_blank rel=noopener>Fund open firmware</a>
 </div>
 
 <!-- ════════════════════ PAGE 2: LOGS ════════════════════ -->
 <div class="page" id="p2">
+ <h1 class=vh>Logs</h1>
  <div class="log-crumb">Logs <span class="sep">/</span> dcent@<b id="logHost">bitaxe</b> <span class="sep">:</span> <span class="path">~/logs</span>
   <span class="log-crumb-pills">
    <span class="log-crumb-pill paused" id="logStatePill">PENDING</span>
-   <span class="log-crumb-pill paused" id="logPausePill" onclick="logPause()" title="Pause / resume stream">&#10074;&#10074; PAUSE</span>
-   <span class="log-crumb-pill" onclick="logClear()" title="Clear stream">&#x2715; CLEAR</span>
+   <span class="log-crumb-pill paused" id="logPausePill" onclick="logPause()" title="Pause / resume the event feed">&#10074;&#10074; PAUSE</span>
+   <span class="log-crumb-pill" onclick="logClear()" title="Clear the event feed">&#x2715; CLEAR</span>
   </span>
  </div>
  <div class="card">
-  <div class="log-stream-head"><span class="lhs">LOG STREAM &middot; LIVE</span><span id="logStreamMeta">events: <span id="logTotalN">0</span></span></div>
+  <div class="log-stream-head"><span class="lhs">EVENT FEED</span><span style="letter-spacing:.3px;margin-right:auto">&middot; derived from telemetry every 15 s</span><span id="logStreamMeta">events: <span id="logTotalN">0</span></span></div>
   <div class="log-grid">
    <div class="log-counters-col">
     <div class="log-counter-row ok"><div class="lc-k">Accepted</div><div class="lc-v" id="logAccN">0</div><div class="log-counter-bar"><i id="logAccBar"></i></div></div>
     <div class="log-counter-row rej"><div class="lc-k">Rejected</div><div class="lc-v" id="logRejN">0</div><div class="log-counter-bar"><i id="logRejBar"></i></div></div>
-    <div class="log-counter-row hw"><div class="lc-k">HW Err</div><div class="lc-v" id="logHwN">0</div><div class="log-counter-bar"><i id="logHwBar"></i></div></div>
+    <div class="log-counter-row hw"><div class="lc-k">Bad Share</div><div class="lc-v" id="logHwN">0</div><div class="log-counter-bar"><i id="logHwBar"></i></div></div>
     <div class="log-counter-row stale"><div class="lc-k">Stale</div><div class="lc-v" id="logStaleN">0</div><div class="log-counter-bar"><i id="logStaleBar"></i></div></div>
     <div class="log-counter-row rec"><div class="lc-k">Reconnect</div><div class="lc-v"><span id="logRecN">0</span><span style="font-size:11px;color:var(--dim);margin-left:3px">&times;</span></div><div class="log-counter-bar"><i id="logRecBar"></i></div></div>
    </div>
@@ -1082,7 +1127,7 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
 
 <!-- ════════════════════ PAGE 1: POOL ════════════════════ -->
 <div class="page" id="p1">
- <div class="page-title">Pool Configuration</div>
+ <h1 class="page-title">Pool Configuration</h1>
  <div class="card">
   <div class="card-title">Primary Pool</div>
   <div class="field"><label>Protocol</label><select id="pProtocol"><option value="v1">Stratum V1</option><option value="v2">Stratum V2 (Noise)</option></select></div>
@@ -1144,14 +1189,17 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
    <div class="kv-row"><span class="kv-key">Share Target</span><span class="kv-val" id="poolDiff">--</span></div>
    <div class="kv-row"><span class="kv-key">Best Share</span><span class="kv-val" id="poolBestDiff">--</span></div>
    <div class="kv-row"><span class="kv-key">Shares/hr</span><span class="kv-val" id="sharesPerHr">--</span></div>
+   <div class="kv-row"><span class="kv-key">Rejected</span><span class="kv-val" id="poolRejN">--</span></div>
   </div>
+  <div class="card-title" style="margin-top:14px">Rejections by Reason</div>
+  <div id="rejList"></div>
   <div id="splitRuntime" style="display:none;margin-top:10px;border-top:1px solid var(--border);padding-top:10px"></div>
  </div>
 </div>
 
 <!-- ════════════════════ PAGE 3: NETWORK ════════════════════ -->
 <div class="page" id="p3">
- <div class="page-title">Network Configuration</div>
+ <h1 class="page-title">Network Configuration</h1>
  <div class="card">
   <div class="card-title">WiFi Settings</div>
   <div class="field"><label>Hostname</label><input id="netHostname" placeholder="DCENTaxe-gt"></div>
@@ -1179,7 +1227,7 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
 
 <!-- ════════════════════ PAGE 5: SETTINGS ════════════════════ -->
 <div class="page" id="p5">
- <div class="page-title">Settings</div>
+ <h1 class="page-title">Settings</h1>
  <div class="card">
   <div class="card-title">Mining Profile</div>
   <div class="field"><label>Preset</label><select id="presetSel" onchange="presetChanged()"><option>Loading...</option></select></div>
@@ -1195,7 +1243,7 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
   </details>
  </div>
  <div class="card">
-  <div class="card-title" data-tip="cut hash before noise: hash power is cut before fan noise is raised. Loud airflow is reserved for measured thermal need.">Fan Control</div>
+  <div class="card-title" data-tip="cut hash before noise: hash power is cut before fan noise is raised. Loud airflow is reserved for measured thermal need." tabindex=0>Fan Control</div>
   <div class="field"><label>Mode</label><select id="fanMode" onchange="fanModeChanged()"><option value="manual">Manual</option><option value="auto">Auto (Target Temp)</option></select></div>
   <!-- UXFLOW-SAFETY-1: derived PWM ZONE label next to the slider value. axe keeps its
        OWN floor (min=20) — do NOT import OS's 10-30 home clamp; only the zone VOCABULARY
@@ -1211,7 +1259,7 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
        dcentaxe-core s4_axe_capability_port_guards. -->
   <details id="fanCurveWrap" ontoggle="fanCurveRender()" style="margin-top:8px">
    <summary>Fan Curve (lite)</summary>
-   <div style="font-size:10px;color:var(--dim);line-height:1.5;margin:6px 0"><b>Not</b> a per-point firmware curve (that's DCENT_OS-only) &mdash; shapes axe's target-temp + fan floor as a 3-point curve; Apply maps it to one knee + one floor. Clamped to the axe fan floor (20-100%). <span data-tip="cut hash before noise: hash power is cut before fan noise is raised. Loud airflow is reserved for measured thermal need.">cut hash before noise</span>.</div>
+   <div style="font-size:10px;color:var(--dim);line-height:1.5;margin:6px 0"><b>Not</b> a per-point firmware curve (that's DCENT_OS-only) &mdash; shapes axe's target-temp + fan floor as a 3-point curve; Apply maps it to one knee + one floor. Clamped to the axe fan floor (20-100%). <span data-tip="cut hash before noise: hash power is cut before fan noise is raised. Loud airflow is reserved for measured thermal need." tabindex=0>cut hash before noise</span>.</div>
    <svg id="fanCurveSvg" viewBox="0 0 320 180" style="width:100%;height:auto;touch-action:none;user-select:none" role="img" aria-label="Fan curve editor: temperature versus PWM, axe floor 20 to 100 percent"></svg>
    <div class="btn-row"><button class="btn btn-ghost btn-sm" onclick="fanCurveReset()">Reset</button><button class="btn btn-primary btn-sm" onclick="fanCurveApply()">Apply Curve</button></div>
   </details>
@@ -1251,7 +1299,7 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
    <div style="font-size:11px;color:var(--dim);margin-bottom:8px">Default ON at 2%, matching DCENT_OS. Time-sliced, never a mandatory fee, subordinate to your pool failover, and one toggle away from OFF.</div>
    <div class="field"><label><input type=checkbox id="donationEnable"> Enable donation</label></div>
    <div class="field"><label>Percent: <span id="donationPctLabel">2.0</span>%</label><input type=range id="donationPct" min=0 max=5 step=.1 value=2 oninput="S('donationPctLabel',Number(this.value).toFixed(1))"></div>
-   <div style="font-size:10px;color:var(--muted);margin:8px 0">Payout <code>bc1q04lzwddzgmtjex6jlsv2fwhe4se4jxje6rhzp6</code> · <a href="https://mempool.space/address/bc1q04lzwddzgmtjex6jlsv2fwhe4se4jxje6rhzp6" target="_blank" style="color:var(--accent)">verify on-chain</a></div>
+   <div style="font-size:10px;color:var(--muted);margin:8px 0">Payout <code>bc1q04lzwddzgmtjex6jlsv2fwhe4se4jxje6rhzp6</code> · <a href="https://mempool.space/address/bc1q04lzwddzgmtjex6jlsv2fwhe4se4jxje6rhzp6" target="_blank">verify on-chain</a></div>
    <div class="btn-row"><button class="btn btn-primary btn-sm" onclick="saveDonation()">Save Donation Setting</button></div>
   </div>
   <div class="card">
@@ -1314,7 +1362,7 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
 
 <!-- ════════════════════ PAGE 4: SYSTEM ════════════════════ -->
 <div class="page" id="p4">
- <div class="page-title">System</div>
+ <h1 class="page-title">System</h1>
  <div class="card">
   <div class="card-title">Device Info</div>
   <div class="meta-mono" id="sysInfo">
@@ -1411,6 +1459,7 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
      <div>MQTT + auto-discovery for climate &amp; sensor entities. Not yet released.</div>
     </div>
    </div>
+   <a class=fund href="https://d-central.tech/fund/go?source=dcent_axe&placement=sys" target=_blank rel=noopener>Fund open firmware</a>
   </div>
   <div class="card">
    <div class="card-title">Firmware Update (OTA)</div>
@@ -1442,7 +1491,7 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
 
 <!-- ════════════════════ PAGE 6: SWARM ════════════════════ -->
 <div class="page" id="p6">
- <div class="page-title">Swarm</div>
+ <h1 class="page-title">Swarm</h1>
  <div class="card">
   <div class="card-title" style="display:flex;align-items:center;gap:10px">
    <span>Local Node</span>
@@ -1484,13 +1533,14 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
 </div>
 
 
- </div><!-- /content -->
- <div class="mobile-tabs" id="mobileNav">
-  <button onclick="go(0)" class="ac" id="mn0"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Dash</button>
-  <button onclick="go(1)" id="mn1"><svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/></svg>Pool</button>
-  <button onclick="go(2)" id="mn2"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>Logs</button>
-  <button onclick="go(5)" id="mn5"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9"/></svg>Settings</button>
- </div>
+ </main>
+ <nav class="mobile-tabs" aria-label="Primary">
+  <button onclick="go(0)" class="ac" id="mn0" aria-current=page><svg viewBox="0 0 24 24"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg>Dash</button>
+  <button onclick="go(1)" id="mn1"><svg viewBox="0 0 24 24"><path d="M2 3h20v6H2zM2 15h20v6H2z"/></svg>Pool</button>
+  <button onclick="go(2)" id="mn2"><svg viewBox="0 0 24 24"><path d="M4 5l6 6-6 6M12 19h8"/></svg>Logs</button>
+  <button onclick="go(4)" id="mn4"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4zM9 9h6v6H9zM9 1v3M15 1v3M9 20v3M15 20v3"/></svg>System</button>
+  <button onclick="go(5)" id="mn5"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1l2 3h-4zM12 23l-2-3h4zM1 12l3-2v4zM23 12l-3 2v-4zM4.2 4.2l3.5.7-2.8 2.8zM19.8 19.8l-3.5-.7 2.8-2.8zM19.8 4.2l-.7 3.5-2.8-2.8zM4.2 19.8l.7-3.5 2.8 2.8z"/><circle cx="12" cy="12" r="6" fill="none" stroke="currentColor" stroke-width="2"/></svg>Settings</button>
+ </nav>
 </div><!-- /main -->
 
 <!-- Modal -->
@@ -1545,7 +1595,7 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
      <code id="bmPrevHashFull">--</code>
      <div style="display:flex;gap:10px;margin-top:6px;align-items:center">
       <button type="button" class="copy-btn" onclick="copyBlockHash()" style="font-size:10px">Copy</button>
-      <a id="bmMempoolLink" href="#" target="_blank" rel="noopener" style="font-size:10px;color:var(--accent);text-decoration:none">View on mempool.space &rarr;</a>
+      <a id="bmMempoolLink" href="#" target="_blank" rel="noopener" style="font-size:10px;text-decoration:none">View on mempool.space &rarr;</a>
      </div>
     </div>
    </div>
@@ -1663,10 +1713,11 @@ body.col .crumbs .crumb-root,body.col .crumbs .crumb-sep{display:none}
 
 <script>
 /* ── Globals ── */
-var HRH=[],TH=[],PH=[],TSH=[],MAX_PTS=120,_offline=0,_retryT=0,_retryDelay=10;
-var _maxFreq=600,_maxVolt=1400,_maxW=25,_prevBlock=0,_hHist=[];
+var HRH=[],TH=[],PH=[],TSH=[],_CX=[],MAX_PTS=120,_offline=0,_retryT=0,_retryDelay=10;
+var _maxFreq=600,_maxVolt=1400,_maxW=25,_prevBlock=0;
 var _cfgFreq=400,_cfgVolt=1200,_fd=0,_ad=0,_dd=0,_oc=0,_miningOn=true;
-var _prevAch=0,_lastShares,_lastRej,_offStart=-1,OFF_RANGES=[];
+var _prevAch=0,_lastShares,_lastRej;
+var _histSrc=0,_histRows=0,_histSkew=0;
 var _lastInfo=null;
 var _otaManifest=null;
 var FACES=['(x_x)','(;_;)','(-_-)','(._.)','(o_o)','(^_^)','(^o^)','(*_*)','(>v<)','(\\o/)','(\\o/)'];
@@ -1685,12 +1736,14 @@ function drawSpk(id,data,color){var el=E(id);if(!el||data.length<3)return;var w=
 
 /* ── Navigation ── */
 var PAGE_NAMES=['Dashboard','Pool','Logs','Network','System','Settings','Swarm'];
-function go(n){if(n===_curPage)return;E('n'+_curPage).classList.remove('ac');E('p'+_curPage).classList.remove('ac');_curPage=n;E('n'+n).classList.add('ac');E('p'+n).classList.add('ac');var cp=E('crumbPage');if(cp)cp.textContent=PAGE_NAMES[n]||'';if(n===0&&HRH.length>1)drawChart();closeSBMobile();
+function go(n){n=+n;if(!(n>=0&&n<PAGE_NAMES.length)||n===_curPage)return;var o=E('n'+_curPage);if(o){o.classList.remove('ac');o.removeAttribute('aria-current')}E('p'+_curPage).classList.remove('ac');_curPage=n;var t=E('n'+n);if(t){t.classList.add('ac');t.setAttribute('aria-current','page')}E('p'+n).classList.add('ac');var cp=E('crumbPage');if(cp)cp.textContent=PAGE_NAMES[n]||'';if(n===0&&HRH.length>1)drawChart();closeSBMobile();
  /* Sync mobile nav */
- document.querySelectorAll('.mobile-tabs button').forEach(function(b){b.classList.remove('ac')});
- var mb=E('mn'+n);if(mb)mb.classList.add('ac')}
-function toggleSB(){E('sidebar').classList.toggle('open')}
-function closeSBMobile(){E('sidebar').classList.remove('open')}
+ document.querySelectorAll('.mobile-tabs button').forEach(function(b){b.classList.remove('ac');b.removeAttribute('aria-current')});
+ var mb=E('mn'+n);if(mb){mb.classList.add('ac');mb.setAttribute('aria-current','page')}}
+/* Drawer: scrim + focus trap + focus return. */
+var _sbR=0;
+function toggleSB(){var s=E('sidebar'),o=!s.classList.contains('open');s.classList.toggle('open',o);E('sbScrim').hidden=!o;document.body.style.overflow=o?'hidden':'';if(o){_sbR=document.activeElement;E('n0').focus()}}
+function closeSBMobile(){var s=E('sidebar');if(!s.classList.contains('open'))return;s.classList.remove('open');E('sbScrim').hidden=1;document.body.style.overflow='';if(_sbR){_sbR.focus();_sbR=0}}
 function toggleCol(){document.body.classList.toggle('col');try{localStorage.setItem('sbCol',document.body.classList.contains('col')?'1':'0')}catch(e){}}
 (function(){try{if(localStorage.getItem('sbCol')==='1')document.body.classList.add('col')}catch(e){}})();
 
@@ -1847,38 +1900,48 @@ function drawChart(){
  var c=E('perfChart'),ctx=c.getContext('2d');
  var W=c.parentElement.clientWidth,H=c.parentElement.clientHeight;
  c.width=W*2;c.height=H*2;ctx.scale(2,2);ctx.clearRect(0,0,W,H);
- var pad={l:45,r:10,t:10,b:25},cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
+ var pad={l:45,r:34,t:10,b:25},cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
  var ac=getAccentHex();
- ctx.strokeStyle='rgba(255,255,255,0.04)';ctx.lineWidth=1;ctx.setLineDash([3,6]);
+ ctx.strokeStyle='rgba(255,255,255,0.04)';ctx.lineWidth=1;ctx.setLineDash([3,6]);ctx.font='10px sans-serif';
  var showHR=E('chkHR').checked,showT=E('chkTemp').checked,showP=E('chkPwr').checked;
  var hrMax=HRH.length>1?Math.max.apply(null,HRH)*1.2||1:1;
  var tMax=TH.length>1?Math.max(Math.max.apply(null,TH)*1.1,50):100;
+ var t0=TSH[0],tsp=(TSH[TSH.length-1]-t0)||1;
+ _CX=[];for(var i=0;i<TSH.length;i++)_CX[i]=pad.l+(TSH[i]-t0)/tsp*cw;
  for(var i=0;i<=4;i++){var y=pad.t+ch*i/4;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(pad.l+cw,y);ctx.stroke();
-  if(showHR&&HRH.length>1){ctx.fillStyle=ac;ctx.font='10px sans-serif';ctx.textAlign='right';ctx.fillText((hrMax*(1-i/4)/1e3).toFixed(1),pad.l-4,y+4)}}
+  if(showHR&&HRH.length>1){ctx.fillStyle=ac;ctx.textAlign='right';ctx.fillText((hrMax*(1-i/4)/1e3).toFixed(1),pad.l-4,y+4)}
+  if(showT&&TH.length>1){ctx.fillStyle='#22d3ee';ctx.textAlign='left';ctx.fillText((tMax*(1-i/4)).toFixed(0),pad.l+cw+5,y+4)}}
  ctx.setLineDash([]);
  if(showHR&&HRH.length>1){ctx.strokeStyle=ac;ctx.lineWidth=2;ctx.shadowColor=ac;ctx.shadowBlur=12;ctx.beginPath();
-  var pts=[];for(var i=0;i<HRH.length;i++)pts.push([pad.l+i/(HRH.length-1)*cw,pad.t+ch-(HRH[i]/hrMax)*ch]);
+  var pts=[];for(var i=0;i<HRH.length;i++)pts.push([_CX[i],pad.t+ch-(HRH[i]/hrMax)*ch]);
   ctx.moveTo(pts[0][0],pts[0][1]);for(var i=1;i<pts.length;i++){var cp=0.2;var dx2=(pts[Math.min(i+1,pts.length-1)][0]-pts[Math.max(i-1,0)][0])*cp;ctx.bezierCurveTo(pts[i-1][0]+dx2,pts[i-1][1],pts[i][0]-dx2,pts[i][1],pts[i][0],pts[i][1])}
   ctx.stroke();ctx.shadowBlur=0;
-  /* Peak marker */
   var pk=0;for(var i=1;i<pts.length;i++)if(HRH[i]>HRH[pk])pk=i;
   if(pts.length>3){ctx.beginPath();ctx.arc(pts[pk][0],pts[pk][1],6,0,Math.PI*2);ctx.fillStyle=hexToRgba(ac,0.15);ctx.fill();ctx.beginPath();ctx.arc(pts[pk][0],pts[pk][1],3,0,Math.PI*2);ctx.fillStyle=ac;ctx.fill()}
-  /* Gradient fill */
   ctx.lineTo(pad.l+cw,pad.t+ch);ctx.lineTo(pad.l,pad.t+ch);ctx.closePath();
   var grad=ctx.createLinearGradient(0,pad.t,0,pad.t+ch);grad.addColorStop(0,hexToRgba(ac,0.15));grad.addColorStop(0.5,hexToRgba(ac,0.04));grad.addColorStop(1,hexToRgba(ac,0));ctx.fillStyle=grad;ctx.fill()}
- if(showT&&TH.length>1){ctx.strokeStyle='#22d3ee';ctx.lineWidth=1.5;ctx.setLineDash([4,2]);ctx.beginPath();
-  for(var i=0;i<TH.length;i++){var x=pad.l+i/(TH.length-1)*cw;var y=pad.t+ch-(TH[i]/tMax)*ch;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y)}ctx.stroke();ctx.setLineDash([])}
- if(showP&&PH.length>1){var pm=Math.max.apply(null,PH)*1.2||25;ctx.strokeStyle='#fbbf24';ctx.lineWidth=1.5;ctx.setLineDash([2,2]);ctx.beginPath();
-  for(var i=0;i<PH.length;i++){var x=pad.l+i/(PH.length-1)*cw;var y=pad.t+ch-(PH[i]/pm)*ch;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y)}ctx.stroke();ctx.setLineDash([])}
- /* Time axis labels */
- if(TSH.length>1){ctx.fillStyle='rgba(255,255,255,0.3)';ctx.font='10px sans-serif';ctx.textAlign='center';
-  var ticks=[0,Math.floor(TSH.length/4),Math.floor(TSH.length/2),Math.floor(TSH.length*3/4),TSH.length-1];
-  for(var ti=0;ti<ticks.length;ti++){var idx=ticks[ti];if(idx<TSH.length){var tx=pad.l+idx/(TSH.length-1)*cw;var d2=new Date(TSH[idx]);var h=d2.getHours()%12||12,m=d2.getMinutes();ctx.fillText(h+':'+(m<10?'0':'')+m+(d2.getHours()>=12?'p':'a'),tx,pad.t+ch+18)}}}
+ function _ser(a,mx,col,dash){if(a.length<2)return;ctx.strokeStyle=col;ctx.lineWidth=1.5;ctx.setLineDash(dash);ctx.beginPath();for(var i=0;i<a.length;i++){var y=pad.t+ch-(a[i]/mx)*ch;i?ctx.lineTo(_CX[i],y):ctx.moveTo(_CX[i],y)}ctx.stroke();ctx.setLineDash([])};
+ if(showT)_ser(TH,tMax,'#22d3ee',[4,2]);
+ if(showP)_ser(PH,Math.max.apply(null,PH)*1.2||25,'#fbbf24',[2,2]);
+ if(TSH.length>1){ctx.fillStyle='rgba(255,255,255,0.3)';ctx.textAlign='center';
+  var TS=[6e4,3e5,9e5,18e5,36e5,108e5],st=216e5,k;for(k=0;k<6;k++)if(tsp/TS[k]<=5){st=TS[k];break}
+  var tz=new Date().getTimezoneOffset()*6e4;
+  for(var tk=Math.ceil((t0-tz)/st)*st+tz;tk<=t0+tsp;tk+=st){var d2=new Date(tk),h2=d2.getHours(),m2=d2.getMinutes();ctx.fillText((h2%12||12)+':'+(m2<10?'0':'')+m2+(h2>=12?'p':'a'),pad.l+(tk-t0)/tsp*cw,pad.t+ch+18)}}
 }
 function toggleSeries(){drawChart()}
-/* Chart hover crosshair */
+function chartWindow(){var n=TSH.length,fd=' from device',src=_histSrc>0?(_histRows?_histRows+fd:'live reading, no history'):_histSrc<0?(_histRows?_histRows+fd+', stale':'device history unavailable'):'this session';S('chartWin',(n>1?'last '+fU(Math.round((TSH[n-1]-TSH[0])/1e3)):'no window yet')+' · '+n+' sample'+(n===1?'':'s')+' · '+src)}
+function chartTrim(){while(HRH.length>MAX_PTS){HRH.shift();TH.shift();PH.shift();TSH.shift();if(_histRows)_histRows--}}
+function seedChart(){return tfetch('/api/system/statistics?columns=hashrate,power,asicTemp,timestamp',{headers:authHeaders({})}).then(function(r){if(!r.ok)throw 0;return r.json()}).then(function(j){
+ var L=j.labels||[],R=j.statistics||[],ih=L.indexOf('hashrate'),ip=L.indexOf('power'),it=L.indexOf('asicTemp'),is=L.indexOf('timestamp');
+ if(ih<0||ip<0||it<0||is<0||!R.length)throw 0;
+ var h=[],t=[],p=[],s=[],i,r,mi=Math.max(ih,ip,it,is),c0=+j.currentTimestamp||Date.now();
+ for(i=0;i<R.length;i++){r=R[i];if(!r||r.length<=mi)continue;h.push(+r[ih]||0);t.push(+r[it]||0);p.push(+r[ip]||0);s.push(+r[is]||0)}
+ if(!s.length)throw 0;
+ _histRows=s.length-(s.length==1&&s[0]==c0);_histSkew=c0-Date.now();
+ HRH=h;TH=t;PH=p;TSH=s;_histSrc=1;chartTrim();chartWindow();if(_curPage===0)drawChart();return _histRows
+}).catch(function(){_histSrc=-1;chartWindow();return 0})}
 var _chartHoverIdx=-1;
-E('perfChart').addEventListener('mousemove',function(e){if(HRH.length<2)return;var rect=this.getBoundingClientRect();var mx=e.clientX-rect.left;var W=rect.width;var pad_l=45,pad_r=10,cw=W-pad_l-pad_r;var idx=Math.round((mx-pad_l)/cw*(HRH.length-1));if(idx<0||idx>=HRH.length){_chartHoverIdx=-1;drawChart();return}if(idx===_chartHoverIdx)return;_chartHoverIdx=idx;drawChart();var c=this,ctx=c.getContext('2d');var H=rect.height;var pad={l:45,r:10,t:10,b:25},ch=H-pad.t-pad.b;var x=pad.l+idx/(HRH.length-1)*cw;var hrMax=Math.max.apply(null,HRH)*1.2||1;var ac=getAccentHex();ctx.save();ctx.scale(0.5,0.5);ctx.strokeStyle='rgba(255,255,255,0.15)';ctx.lineWidth=1;ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(x*2,pad.t*2);ctx.lineTo(x*2,(pad.t+ch)*2);ctx.stroke();ctx.setLineDash([]);var hy=pad.t+ch-(HRH[idx]/hrMax)*ch;ctx.beginPath();ctx.arc(x*2,hy*2,8,0,Math.PI*2);ctx.fillStyle=ac;ctx.globalAlpha=0.5;ctx.fill();ctx.globalAlpha=1;ctx.beginPath();ctx.arc(x*2,hy*2,4,0,Math.PI*2);ctx.fillStyle='#fff';ctx.fill();ctx.fillStyle='rgba(10,14,20,0.9)';ctx.fillRect((x-50)*2,(pad.t-2)*2,100*2,38*2);ctx.strokeStyle='rgba(255,255,255,0.1)';ctx.strokeRect((x-50)*2,(pad.t-2)*2,100*2,38*2);ctx.fillStyle=ac;ctx.font='bold 20px sans-serif';ctx.textAlign='center';ctx.fillText(fHR(HRH[idx]),x*2,(pad.t+12)*2);ctx.fillStyle='#94a3b8';ctx.font='16px sans-serif';ctx.fillText(TH[idx]?TH[idx].toFixed(0)+'C':'',x*2,(pad.t+28)*2);ctx.restore()});
+E('perfChart').addEventListener('mousemove',function(e){if(HRH.length<2||_CX.length<2)return;var rect=this.getBoundingClientRect();var mx=e.clientX-rect.left;var pad={l:45,r:34,t:10,b:25},cw=rect.width-pad.l-pad.r,ch=rect.height-pad.t-pad.b;var idx=0,bd=1e9,q,dq;for(q=0;q<_CX.length;q++){dq=Math.abs(_CX[q]-mx);if(dq<bd){bd=dq;idx=q}}if(mx<pad.l||mx>pad.l+cw){_chartHoverIdx=-1;drawChart();return}if(idx===_chartHoverIdx)return;_chartHoverIdx=idx;drawChart();var ctx=this.getContext('2d');var x=_CX[idx];var hrMax=Math.max.apply(null,HRH)*1.2||1;var ac=getAccentHex();ctx.save();ctx.scale(0.5,0.5);ctx.strokeStyle='rgba(255,255,255,0.15)';ctx.lineWidth=1;ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(x*2,pad.t*2);ctx.lineTo(x*2,(pad.t+ch)*2);ctx.stroke();ctx.setLineDash([]);var hy=pad.t+ch-(HRH[idx]/hrMax)*ch;ctx.beginPath();ctx.arc(x*2,hy*2,8,0,Math.PI*2);ctx.fillStyle=ac;ctx.globalAlpha=0.5;ctx.fill();ctx.globalAlpha=1;ctx.beginPath();ctx.arc(x*2,hy*2,4,0,Math.PI*2);ctx.fillStyle='#fff';ctx.fill();ctx.fillStyle='rgba(10,14,20,0.9)';ctx.fillRect((x-60)*2,(pad.t-2)*2,120*2,38*2);ctx.strokeStyle='rgba(255,255,255,0.1)';ctx.strokeRect((x-60)*2,(pad.t-2)*2,120*2,38*2);ctx.fillStyle=ac;ctx.font='bold 20px sans-serif';ctx.textAlign='center';ctx.fillText(fHR(HRH[idx]),x*2,(pad.t+12)*2);ctx.fillStyle='#94a3b8';ctx.font='16px sans-serif';ctx.fillText((TH[idx]?TH[idx].toFixed(0)+'C ':'')+(PH[idx]?PH[idx].toFixed(1)+'W':''),x*2,(pad.t+28)*2);ctx.restore()});
 E('perfChart').addEventListener('mouseleave',function(){_chartHoverIdx=-1;drawChart()});
 
 /* ── Thermal Gauge ── */
@@ -1976,11 +2039,8 @@ function renderAutotunerEvidence(at){
  var lj=at.lastGoodJth;S('atEvLgJth',(typeof lj==='number'&&lj>0&&isFinite(lj))?lj.toFixed(1)+' J/TH':DASH);
  var le=at.lastGoodErrorRate;S('atEvLgErr',(typeof le==='number'&&le>=0&&isFinite(le))?(le*100).toFixed(2)+'%':DASH);
 }
-/* Network card (CAP-OS2AXE-3) — halving countdown bar. Port of the OS
-   HalvingTimelineBar math: epoch = floor(h/210000), blocks-left to the next
-   halving, ~days ETA at 600s/block. Reads the ALREADY-CLIENT-SIDE block height
-   — no fetch, no new wire field, no register_static handler. Uniquely named to
-   avoid shadowing any dashboard/*.js window.* global. */
+/* Halving countdown bar (CAP-OS2AXE-3): epoch=floor(h/210000), blocks-left, ~days
+   at 600s/block, over the already-client-side block height. No fetch/field/handler. */
 var _HALVING_INTERVAL=210000,_BLOCK_SECONDS=600;
 function _fmtHalvingDays(blocks){var days=(blocks*_BLOCK_SECONDS)/86400;if(days<1){var hrs=days*24;if(hrs<1)return'~'+Math.max(1,Math.round(hrs*60))+' min';return'~'+hrs.toFixed(1)+' h'}if(days<10)return'~'+days.toFixed(1)+' days';return'~'+Math.round(days)+' days'}
 function renderHalvingCountdown(bh){
@@ -1996,12 +2056,8 @@ function renderHalvingCountdown(bh){
  S('halvingEra','Era '+epoch+' · now → Era '+(epoch+1)+' · next');
  var hb2=E('halvingBar');if(hb2)hb2.style.width=pct+'%';
 }
-/* Mempool fee radial (CAP-OS2AXE-3) — pure-SVG 180° gauge ported from the OS
-   MempoolFeeRadial: green/yellow/red bands 0-20 / 20-80 / 80+ sat/vB, needle at
-   `fastest`, FAST/30M/1H summary. Built client-side from a cross-origin browser
-   fetch to mempool.space (same cross-origin pattern block-tile.js uses → NO
-   firmware handler). Fails SILENTLY to the em-dash empty state when blocked/
-   offline. Slow 60s timer; fail-silent. */
+/* Mempool fee radial (CAP-OS2AXE-3) — pure-SVG 180° gauge, bands 0-20/20-80/80+
+   sat/vB. Cross-origin fetch (block-tile.js pattern → NO handler), 60s timer. */
 var _MEMPOOL_MAX=120,_mempoolTimer=null;
 function _mpPolar(cx,cy,angleDeg,r){var a=(angleDeg*Math.PI)/180;return{x:cx-r*Math.cos(a),y:cy-r*Math.sin(a)}}
 function _mpFeeToAngle(fee){var n=Math.max(0,Math.min(_MEMPOOL_MAX,fee))/_MEMPOOL_MAX;return 180-n*180}
@@ -2037,7 +2093,11 @@ function fetchMempoolFees(){
   renderMempoolRadial({fastest:j.fastestFee,halfHour:j.halfHourFee,hour:j.hourFee});
  }).catch(function(){/* fail-silent: leave/show the em-dash empty state */if(!E('mempoolRadial')||!E('mempoolRadial').innerHTML)renderMempoolRadial(null)})
 }
-function startMempoolPoll(){renderMempoolRadial(null);fetchMempoolFees();if(_mempoolTimer)clearInterval(_mempoolTimer);_mempoolTimer=setInterval(fetchMempoolFees,60000)}
+/* CONSENT: default OFF — no request until the operator opts in (browser-local). */
+var _MPOPT='dcentaxe-mempool-optin';
+function mempoolOptedIn(){try{return localStorage.getItem(_MPOPT)==='1'}catch(e){return false}}
+function mempoolToggle(){var on=!mempoolOptedIn();try{localStorage.setItem(_MPOPT,on?'1':'0')}catch(e){}if(_mempoolTimer){clearInterval(_mempoolTimer);_mempoolTimer=null}startMempoolPoll()}
+function startMempoolPoll(){var on=mempoolOptedIn();S('mpOptInVerb',on?'Disable':'Enable');renderMempoolRadial(null);if(!on)return;fetchMempoolFees();if(_mempoolTimer)clearInterval(_mempoolTimer);_mempoolTimer=setInterval(fetchMempoolFees,60000)}
 var _schedule=[];
 function pad2(n){return String(n).padStart(2,'0')}
 function scheduleTime(e){return pad2(e.hour||0)+':'+pad2(e.minute||0)}
@@ -2045,7 +2105,7 @@ function scheduleDefaultEntry(){var f=parseFloat(E('setFreq').value)||(_lastInfo
 function renderScheduleStatus(s){if(!s)return;var m=s.currentMinuteOfDay||0;var a=s.active||null;var txt=(s.enabled?'ON':'OFF')+' · '+pad2(Math.floor(m/60))+':'+pad2(m%60)+' · '+(s.timeSource||'clock');if(a)txt+=' · active: '+(a.label||scheduleTime(a));if(s.nextChangeMinutes!=null)txt+=' · next '+s.nextChangeMinutes+'m';S('schedClock',txt)}
 function renderSchedule(){var host=E('schedRows');if(!host)return;if(!_schedule.length){host.innerHTML='<div style="font-size:11px;color:var(--dim);margin:8px 0">No slots yet. Add a daytime low-power slot and a night boost slot.</div>';return}var html='';for(var i=0;i<_schedule.length;i++){var e=_schedule[i]||{};var at=e.autotune_enabled===true;var mode=at?(e.autotune_mode||'best_efficiency'):'fixed';html+='<div style="border:1px solid var(--line);border-radius:8px;padding:8px;margin:8px 0;background:rgba(255,255,255,0.02)">'
 +'<div class="field-row"><div class="field"><label><input type="checkbox" id="sEn'+i+'" '+(e.enabled!==false?'checked':'')+'> Active</label></div><div class="field"><label>Start</label><input id="sTime'+i+'" type="time" value="'+scheduleTime(e)+'"></div><div class="field"><label>Label</label><input id="sLab'+i+'" value="'+(e.label||'').replace(/"/g,'&quot;')+'"></div></div>'
-+'<div class="field-row"><div class="field"><label>Freq MHz</label><input id="sFreq'+i+'" type="number" value="'+(e.frequency||'')+'"></div><div class="field"><label>Voltage mV</label><input id="sVolt'+i+'" type="number" value="'+(e.voltage_mv||e.voltageMv||'')+'"></div><div class="field"><label>Policy</label><select id="sPolicy'+i+'"><option value="fixed" '+(!at?'selected':'')+'>Fixed profile</option><option value="best_efficiency" '+(mode==='best_efficiency'?'selected':'')+'>Autotune efficiency</option><option value="target_watts" '+(mode==='target_watts'?'selected':'')+'>Autotune watts</option><option value="target_temp" '+(mode==='target_temp'?'selected':'')+'>Autotune temp</option><option value="max_hashrate" '+(mode==='max_hashrate'?'selected':'')+'>Autotune max</option></select></div></div>'
++'<div class="field-row"><div class="field"><label>Freq MHz</label><input id="sFreq'+i+'" type="number" value="'+(e.frequency||'')+'"></div><div class="field"><label>Voltage mV</label><input id="sVolt'+i+'" type="number" value="'+(e.voltage_mv||e.voltageMv||'')+'"></div><div class="field"><label>Policy</label><select id="sPolicy'+i+'"><option value="fixed" '+(!at?'selected':'')+'>Fixed profile</option><option value="best_efficiency" '+(mode==='best_efficiency'?'selected':'')+'>Best Efficiency</option><option value="target_watts" '+(mode==='target_watts'?'selected':'')+'>Target Watts</option><option value="target_temp" '+(mode==='target_temp'?'selected':'')+'>Target Temp</option><option value="max_hashrate" '+(mode==='max_hashrate'?'selected':'')+'>Max Hashrate</option></select></div></div>'
 +'<div class="field-row"><div class="field"><label>Autotune Target</label><input id="sTarget'+i+'" type="number" value="'+(e.autotune_target||e.autotuneTarget||0)+'"></div><div class="field"><label>&nbsp;</label><button class="btn btn-ghost btn-sm" onclick="removeScheduleRow('+i+')">Remove</button></div></div></div>'}host.innerHTML=html}
 function addScheduleRow(entry){_schedule.push(entry||scheduleDefaultEntry());renderSchedule()}
 function removeScheduleRow(i){_schedule.splice(i,1);renderSchedule()}
@@ -2186,7 +2246,7 @@ function loadAchievements(){fetch('/api/achievements').then(function(r){return r
 function renderAch(bits){var g=E('achGrid');if(!g)return;g.innerHTML='';var count=0;
  for(var i=0;i<24;i++){var u=bits&(1<<i);if(u)count++;
   var d=document.createElement('div');d.className='ach-item'+(u?' unlocked':' locked');
-  d.innerHTML='<div style="font-size:14px">'+(u?'\u2B50':'\uD83D\uDD12')+'</div><div style="font-size:9px">'+ACH[i]+'</div><div style="font-size:8px;color:'+(ACH_R[i]==='legendary'?'var(--accent)':ACH_R[i]==='epic'?'#a855f7':ACH_R[i]==='rare'?'var(--cyan)':'var(--dim)')+'">'+ACH_R[i]+'</div>';
+  d.innerHTML='<div style="font-size:14px">'+(u?'\u2B50':'\uD83D\uDD12')+'</div><div style="font-size:9px">'+ACH[i]+'</div><div style="font-size:8px;color:'+(ACH_R[i]==='legendary'?'var(--accent)':ACH_R[i]==='epic'?'#c084fc':ACH_R[i]==='rare'?'var(--cyan)':'var(--dim)')+'">'+ACH_R[i]+'</div>';
   g.appendChild(d)}
  S('achBadge',count+'/24')}
 
@@ -2207,14 +2267,21 @@ function applyPreset(){var i=parseInt(E('presetSel').value);if(isNaN(i)||!_prese
    an inline renderChips() — a hoisted declaration would shadow
    window.renderChips and hide the silicon SVG. */
 
+/* Pool reject reasons. RJK = normalized key fragments, RJW = the plain line for
+   that class. Unmatched keys get the pool's wording and no line; never invent. */
+var RJK='stale,jobnot|abovetarget,toolow,lowdiff|duplicate|authoriz,subscribed,address,mismatch|versionmask|invalid,params,validation,nonce,ntime,username,jobid|poolrejectedshare'.split('|');
+var RJW='arrived after a new job started|below the pool difficulty target|already submitted once|worker login refused|version-rolling bits refused|pool could not parse it|pool gave no reason'.split('|');
+function rjCat(k){var n=String(k).toLowerCase().replace(/[^a-z0-9]/g,''),i,j,p;for(i=0;i<RJK.length;i++){p=RJK[i].split(',');for(j=0;j<p.length;j++)if(n.indexOf(p[j])>=0)return i}return-1}
+function renderRej(cs,rj){var e=E('rejList');if(!e)return;var na=cs==null;cs=(cs||[]).slice().sort(function(x,y){return(y.count||0)-(x.count||0)});var h='',i,c,sum=0;for(i=0;i<cs.length;i++){c=rjCat(cs[i].key);sum+=cs[i].count||0;h+='<div class="kv-row"><span class="kv-key">'+hEsc(cs[i].key)+'</span><span class="kv-val">'+(cs[i].count||0)+'</span></div>'+(c<0?'':'<span class="help-small">'+RJW[c]+'</span>')}if(h&&rj>sum)h+='<span class="help-small">'+(rj-sum)+' earlier rejects not itemised (8-reason limit)</span>';e.innerHTML=h||'<span class="help-small">'+(na?'Reject reasons unavailable.':rj>0?'The pool sent no reason for '+rj+' rejected share'+(rj===1?'':'s')+'.':'No rejected shares yet.')+'</span>'}
+
 /* ── Main Update ── */
 function update(d){
  _lastInfo=d;
- if(_offline){_offline=0;clearInterval(_retryT);_retryDelay=10;E('offlineBanner').style.display='none'}
+ if(_offline){_offline=0;clearInterval(_retryT);_retryDelay=10;E('offlineBanner').style.display='none';seedChart()}
  /* Remove loading state on first data */
  if(_firstUpdate){_firstUpdate=0;document.querySelectorAll('.loading').forEach(function(e){e.classList.remove('loading');e.classList.add('loaded')})}
  E('dot').className='sb-dot on';
- var hr=d.hashRate_1m||d.hashRate||0;
+ var hr=d.hashRate_1m||d.hashRate||0,hr5=d.hashRate_5m||hr;
  var ac=getAccentHex();
  // Sidebar hashrate
  S('sbHR',fHR(hr));
@@ -2240,20 +2307,20 @@ function update(d){
  var w=d.power||0,hrTh=hr/1e3,jth=hrTh>0&&w>0?w/hrTh:0;
  S('heroEffVal',jth>0?jth.toFixed(1)+' J/TH':'--');
  var eb=E('effBadge');if(eb&&jth>0){if(jth<15){eb.textContent='Excellent';eb.className='eff-badge excellent'}else if(jth<25){eb.textContent='Good';eb.className='eff-badge good'}else if(jth<40){eb.textContent='Average';eb.className='eff-badge average'}else{eb.textContent='Poor';eb.className='eff-badge poor'}}else if(eb){eb.textContent=''}
- _hHist.push(hr);if(_hHist.length>7)_hHist.shift();
- var trE=E('hrTrend');if(trE&&_hHist.length>=3){var old=_hHist[0],delta=(hr-old)/Math.max(old,1)*100;if(delta>2){trE.textContent='\u25B2';trE.className='hero-trend up'}else if(delta<-2){trE.textContent='\u25BC';trE.className='hero-trend down'}else{trE.textContent='\u25C6';trE.className='hero-trend flat'}}
  var miningEnabled=d.dcentaxe?d.dcentaxe.miningEnabled!==false:hrGH>0;
  var activeHashrate=hrGH>0;
  var mining=miningEnabled&&activeHashrate;
+ /* ONE rung word, four surfaces (topbar/hero/Logs pill/Health) - cannot drift */
+ var _rung=mining?'Mining':miningEnabled?'Ready':'Standby',_RUNG=mining?'MINING':miningEnabled?'READY':'STANDBY';
  E('tbMiningDot').className='sb-dot'+(mining?' on':'');
- var tbm=E('tbMining');if(tbm){tbm.className='pill '+(mining?'pill-ok':miningEnabled?'pill-muted':'pill-err');tbm.innerHTML='<span class="sb-dot'+(mining?' on':'')+'" id="tbMiningDot"></span>'+(mining?'MINING':miningEnabled?'READY':'STANDBY')}
- var ms=E('heroMiningState');if(ms){ms.textContent=mining?'Mining':miningEnabled?'Ready':'Standby';ms.className='status-badge '+(mining?'ok':miningEnabled?'warn':'err');ms.style.fontSize='10px';ms.style.padding='4px 12px'}
+ var tbm=E('tbMining');if(tbm){tbm.className='pill '+(mining?'pill-ok':miningEnabled?'pill-muted':'pill-err');tbm.innerHTML='<span class="sb-dot'+(mining?' on':'')+'" id="tbMiningDot"></span>'+_RUNG}
+ var ms=E('heroMiningState');if(ms){ms.textContent=_rung;ms.className='status-badge '+(mining?'ok':miningEnabled?'warn':'err');ms.style.fontSize='10px';ms.style.padding='4px 12px'}
  var hpp=E('heroPoolPill');if(hpp){var u=(d.stratumURL||'').trim();if(u){var host=u.replace(/^[a-z]+:\/\//i,'').split(/[\/:]/)[0]||'';var parts=host.split('.');var label=parts.length>=2?(parts[parts.length-2]+' '+parts[parts.length-1]):host;hpp.textContent=label.toUpperCase();hpp.hidden=false}else{hpp.hidden=true}}
  _miningEnabledLast=miningEnabled;
  window._lastInfo=d;
- var tbp=E('tbMiningPill');if(tbp){var st=mining?'mining':miningEnabled?'ready':'standby';var lbl=mining?'MINING':miningEnabled?'READY':'STANDBY';tbp.dataset.state=st;tbp.innerHTML='<span class="tb-mining-dot"></span>'+lbl}
- var tbpb=E('tbPauseBtn');if(tbpb){tbpb.dataset.mode=miningEnabled?'pause':'resume';var pl=E('tbPauseLabel');if(pl)pl.textContent=miningEnabled?'PAUSE':'RESUME';var ic=tbpb.querySelector('.tb-pause-icon');if(ic){ic.innerHTML=miningEnabled?'<rect x="3" y="2" width="3.5" height="12" rx="1"/><rect x="9.5" y="2" width="3.5" height="12" rx="1"/>':'<polygon points="3,2 13.5,8 3,14"/>'}}
- setLogMiningState(mining?'MINING':miningEnabled?'READY':'STANDBY',mining);
+ var tbp=E('tbMiningPill');if(tbp){tbp.dataset.state=_rung.toLowerCase();tbp.innerHTML='<span class="tb-mining-dot"></span>'+_RUNG}
+ var tbpb=E('tbPauseBtn');if(tbpb){tbpb.dataset.mode=miningEnabled?'pause':'resume';tbpb.setAttribute('aria-label',miningEnabled?'Pause mining':'Resume mining');var pl=E('tbPauseLabel');if(pl)pl.textContent=miningEnabled?'PAUSE':'RESUME';var ic=tbpb.querySelector('.tb-pause-icon');if(ic){ic.innerHTML=miningEnabled?'<rect x="3" y="2" width="3.5" height="12" rx="1"/><rect x="9.5" y="2" width="3.5" height="12" rx="1"/>':'<polygon points="3,2 13.5,8 3,14"/>'}}
+ setLogMiningState(_RUNG,mining);
  var rt=d.dcentaxe||{},pt=rt.poolTruth||{},dp=rt.dispatcher||{};
  var poolD=d.poolDifficulty||0;var a=pt.sharesAccepted!=null?pt.sharesAccepted:(d.sharesAccepted||0),r=pt.sharesRejected!=null?pt.sharesRejected:(d.sharesRejected||0),submitted=pt.sharesSubmitted!=null?pt.sharesSubmitted:(a+r),confirmed=a+r,t=confirmed||1,upSec2=d.uptimeSeconds||0;
  var nowMs=Date.now(),lastAcceptedMs=pt.lastShareAcceptedUnixMs||0,lastResponseMs=pt.lastShareResponseUnixMs||0,lastRejectedMs=pt.lastShareRejectedUnixMs||0;
@@ -2263,7 +2330,7 @@ function update(d){
  var btu=w*3.412142;S('btuVal',btu.toFixed(0));
  var eq=btu<30?'Like a phone charger':btu<60?'Like a laptop':btu<100?'Like a desk lamp':btu<200?'Like a small heater':'Like a room heater';S('btuEquiv',eq);
 
- S('hr1m','1m: '+fHR(d.hashRate_1m||hr));S('hr5m','5m: '+fHR(d.hashRate_5m||hr));S('hr15m','15m: '+fHR(d.hashRate_15m||hr));
+ S('hr1m','1m: '+fHR(d.hashRate_1m||hr));S('hr5m','5m: '+fHR(hr5));S('hr15m','15m: '+fHR(d.hashRate_15m||hr));
 
  if(typeof _lastShares==='undefined')_lastShares=a;
  if(a>_lastShares){for(var si=0;si<Math.min(a-_lastShares,5);si++)addShareDot(true);_lastShares=a}
@@ -2287,7 +2354,7 @@ function update(d){
  var tempProxy=!!(d.dcentaxe&&d.dcentaxe.tempSource==='ambient_proxy');
  /* Mining Health stat card */
   var poolOk=!!d.poolConnected;
- var health=!mining?'Stopped':ct>90?'HOT':!poolOk?'Connecting':!acceptedFresh?(confirmed?'Stale':'Pending'):(a/t*100<95)?'Unstable':'Stable';
+ var health=!mining?_rung:ct>90?'HOT':!poolOk?'Connecting':!acceptedFresh?(confirmed?'Stale':'Pending'):(a/t*100<95)?'Unstable':'Stable';
  var hc=health==='Stable'?'var(--accent)':health==='HOT'?'var(--red)':(health==='Connecting'||health==='Pending'||health==='Stale')?'var(--yellow)':'var(--dim)';
  S('healthQuick',health);E('healthQuick').style.color=hc;
  // Health sub-line: trend marker \u2191 stable / \u2193 recovering / \u00B7 waiting.
@@ -2323,11 +2390,9 @@ function update(d){
  var upSec=d.uptimeSeconds||0;S('uptime',fU(upSec));
 
  // Chart
- HRH.push(hr);if(HRH.length>MAX_PTS)HRH.shift();
- TH.push(ct);if(TH.length>MAX_PTS)TH.shift();
- PH.push(w);if(PH.length>MAX_PTS)PH.shift();
- TSH.push(Date.now());if(TSH.length>MAX_PTS)TSH.shift();
+ HRH.push(hr5);TH.push(ct);PH.push(w);TSH.push(Date.now()+_histSkew);chartTrim();chartWindow();
  if(_curPage===0)drawChart();
+ var trE=E('hrTrend'),n2=TSH.length;if(trE&&n2>1){var j2=n2-1,tb=TSH[j2]-9e4;while(j2>0&&TSH[j2]>tb)j2--;var o2=HRH[j2],dl=(HRH[n2-1]-o2)/Math.max(o2,1)*100,up=dl>2,dn=dl<-2;trE.textContent=up?'▲':dn?'▼':'◆';trE.className='hero-trend '+(up?'up':dn?'down':'flat')}
  /* Sparklines on stat cards */
  drawSpk('hrSpk',HRH.slice(-20),ac);
  drawSpk('pwrSpk',PH.slice(-20),'#fbbf24');
@@ -2440,6 +2505,7 @@ function update(d){
  var sysBap=E('sysBapRow');if(sysBap)sysBap.style.display=d.hasBap?'block':'none';
  S('poolConnDur',poolOk?fU(upSec):'--');
  if(upSec>60)S('sharesPerHr',((a/(upSec/3600))||0).toFixed(1));
+ S('poolRejN',r+' of '+submitted+' submitted');renderRej(pt.rejectReasonCounts,r);
  if(_curPage===1)loadPoolsRuntime(false);
 
  // ── Network page ──
@@ -2511,17 +2577,19 @@ function update(d){
  if(!_mlogInit){_mlogInit=1;_prevBlockLog=bh;_prevSharesLog=a;_prevRejLog=r;_prevPoolDiff=poolD;
   mlog('system boot \u00b7 DCENT_axe '+(d.version||'')+' \u00b7 '+(d.ASICModel||'BitAxe'),'sys');
   mlog('chain detected \u00b7 '+(d.asicCount||1)+'\u00d7 '+(d.ASICModel||'?')+' \u00b7 '+(d.frequency||0).toFixed(0)+' MHz \u00b7 '+(d.coreVoltageActual||d.coreVoltage||0)+' mV','asic')}
- if(bh>0&&bh!==_prevBlockLog&&_prevBlockLog>0){mlog('NEW BLOCK \u00b7 height '+bh.toLocaleString()+' \u00b7 extranonce reset','blk');var hero=document.querySelector('.hero');if(hero){hero.style.boxShadow='0 0 40px rgba(247,147,26,0.3),inset 0 1px 0 rgba(255,255,255,0.08)';setTimeout(function(){hero.style.boxShadow=''},2500)}}
+ if(bh>0&&bh!==_prevBlockLog&&_prevBlockLog>0){mlog('NEW BLOCK \u00b7 height '+bh.toLocaleString()+' \u00b7 extranonce reset','blk');}
  _prevBlockLog=bh;
  if(a>_prevSharesLog){var hr=d.hashRate||0;mlog('pool accepted share \u00b7 diff '+fD(d.bestDiff||0)+' \u00b7 '+hr.toFixed(0)+' GH/s','ok');_logCounters.accepted+=(a-_prevSharesLog)}
  if(r>_prevRejLog){mlog('pool rejected share ('+r+' total)','err');_logCounters.rejected+=(r-_prevRejLog)}
  _prevSharesLog=a;_prevRejLog=r;
  if(poolD>0&&poolD!==_prevPoolDiff&&_prevPoolDiff>0)mlog('stratum difficulty \u2192 '+fD(poolD),'pool');
  _prevPoolDiff=poolD;
- /* HW errors / stale shares from API */
- var hwTot=d.sharesRejectedReasons&&(d.sharesRejectedReasons['Job not found']||0)+(d.sharesRejectedReasons['Difficulty too low']||0)||0;
- if(typeof _prevHwLog==='undefined')_prevHwLog=hwTot;if(hwTot>_prevHwLog){_logCounters.hwErr+=(hwTot-_prevHwLog);mlog('hw error counter +'+(hwTot-_prevHwLog),'warn')}_prevHwLog=hwTot;
- var stTot=(d.sharesRejectedReasons&&d.sharesRejectedReasons['Stale share'])||0;
+ /* Bad-share / stale counters from the pool's own reject histogram.
+    sharesRejectedReasons is an ARRAY, so the old ['Job not found'] lookups
+    were always undefined and both counters were pinned at zero. */
+ var hwTot=0,stTot=0,_rc=pt.rejectReasonCounts||[];
+ for(var qi=0;qi<_rc.length;qi++){var qk=rjCat(_rc[qi].key),qn=_rc[qi].count||0;if(qk===0)stTot+=qn;else if(qk===1||qk===4)hwTot+=qn}
+ if(typeof _prevHwLog==='undefined')_prevHwLog=hwTot;if(hwTot>_prevHwLog){_logCounters.hwErr+=(hwTot-_prevHwLog);mlog('bad-share rejects +'+(hwTot-_prevHwLog),'warn')}_prevHwLog=hwTot;
  if(typeof _prevStLog==='undefined')_prevStLog=stTot;if(stTot>_prevStLog){_logCounters.stale+=(stTot-_prevStLog);mlog('stale share +'+(stTot-_prevStLog),'warn')}_prevStLog=stTot;
 
  // Alert
@@ -2531,7 +2599,7 @@ function update(d){
   var n=d.wdtResetCount||0;
   var detail='Mining disabled after '+n+' task-watchdog reset'+(n===1?'':'s')+' inside a 5-minute window. The firmware is probably wedging on a real bug \u2014 grab the coredump (if present) before clearing.';
   if(d.coredumpPresent)detail+=' ';
-  E('safeModeDetail').innerHTML=detail.replace(/&/g,'&amp;').replace(/</g,'&lt;')+(d.coredumpPresent?' <a href="#" onclick="event.preventDefault();downloadCoredump()" style="color:var(--accent);text-decoration:underline">Download coredump first &rarr;</a>':'');
+  E('safeModeDetail').innerHTML=detail.replace(/&/g,'&amp;').replace(/</g,'&lt;')+(d.coredumpPresent?' <a href="#" onclick="event.preventDefault();downloadCoredump()" style="text-decoration:underline">Download coredump first &rarr;</a>':'');
   sm.style.display='flex'
  }else{sm.style.display='none'}
  var cd=E('coredumpBanner');cd.style.display=d.coredumpPresent?'flex':'none';
@@ -2556,8 +2624,8 @@ function _telemetryBanner(cause){
  if(cause)return cause;
  return _lastInfo?_glossLbl('telemetry_stale','Telemetry stale'):_glossLbl('telemetry_absent','Offline');
 }
-function goOffline(cause){var msg=_telemetryBanner(cause);if(_offline){if(cause)S('reconnectMsg',msg+' \u2014 retrying...');return}_offline=1;_offStart=HRH.length;_retryDelay=10;E('dot').className='sb-dot';S('reconnectMsg',msg+' \u2014 retrying...');E('offlineBanner').style.display='block';if(typeof _logCounters!=='undefined'){_logCounters.reconnect++;if(typeof mlog==='function')mlog('connection lost \u00b7 '+(cause||(_lastInfo?'telemetry stale':'offline'))+' \u00b7 reconnecting','net')}schedRetry()}
-function schedRetry(){var sec=_retryDelay;S('reconnectMsg','Reconnecting in '+sec+'...');_retryT=setInterval(function(){sec--;if(sec<=0){clearInterval(_retryT);S('reconnectMsg','Retrying...');fetch('/api/system/info',{headers:authHeaders({})}).then(handleReadAuthFailure).then(function(r){return r.json()}).then(function(d){_offline=0;_retryDelay=10;E('offlineBanner').style.display='none';update(d)}).catch(function(e){if(e.message==='auth-required'){_offline=0;E('offlineBanner').style.display='none';return} _retryDelay=Math.min(_retryDelay*2,60);schedRetry()})}else{S('reconnectMsg','Reconnecting in '+sec+'...')}},1000)}
+function goOffline(cause){var msg=_telemetryBanner(cause);if(_offline){if(cause)S('reconnectMsg',msg+' \u2014 retrying...');return}_offline=1;_retryDelay=10;E('dot').className='sb-dot';S('reconnectMsg',msg+' \u2014 retrying...');E('offlineBanner').style.display='block';if(typeof _logCounters!=='undefined'){_logCounters.reconnect++;if(typeof mlog==='function')mlog('connection lost \u00b7 '+(cause||(_lastInfo?'telemetry stale':'offline'))+' \u00b7 reconnecting','net')}schedRetry()}
+function schedRetry(){var sec=_retryDelay;S('reconnectMsg','Reconnecting in '+sec+'...');_retryT=setInterval(function(){sec--;if(sec<=0){clearInterval(_retryT);S('reconnectMsg','Retrying...');fetch('/api/system/info',{headers:authHeaders({})}).then(handleReadAuthFailure).then(function(r){if(!r.ok)throw 0;return r.json()}).then(update).catch(function(e){if(e&&e.message==='auth-required'){_offline=0;E('offlineBanner').style.display='none';return} _retryDelay=Math.min(_retryDelay*2,60);schedRetry()})}else{S('reconnectMsg','Reconnecting in '+sec+'...')}},1000)}
 
 /* ── Poll ── */
 // Timed fetch — aborts after 8 s so we detect stalled networks before the next
@@ -2657,13 +2725,16 @@ function setRoomTempSource(src){
 function loadSwarm(){fetch('/api/swarm',{headers:authHeaders({})}).then(handleReadAuthFailure).then(function(r){return r.json()}).then(renderSwarm).catch(function(){})}
 
 /* ── Keyboard shortcuts ── */
-document.addEventListener('keydown',function(e){if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT')return;
+document.addEventListener('keydown',function(e){if(e.key==='Escape')_tipClear();if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT')return;
  if(e.key==='R'&&e.shiftKey)doReboot();
- var k=parseInt(e.key);if(k>=1&&k<=8)go(k-1)});
+ if(e.key==='Enter'||e.key===' '){var a=e.target.closest&&e.target.closest('.sb-nav a');if(a){e.preventDefault();a.click();return}}
+ if(e.key==='Escape'){closeSBMobile();return}
+ if(e.key==='Tab'&&E('sidebar').classList.contains('open')){var q=E('sidebar').querySelectorAll('a,button'),f=q[0],z=q[q.length-1];if(document.activeElement===(e.shiftKey?f:z)){e.preventDefault();(e.shiftKey?z:f).focus()}return}
+ var k=parseInt(e.key);if(k>=1&&k<=PAGE_NAMES.length)go(k-1)});
 
 /* ── Touch swipe ── */
 var _tsx=0,_tsEdge=false;
-document.addEventListener('touchstart',function(e){_tsx=e.touches[0].clientX;_tsEdge=_tsx<30||_tsx>window.innerWidth-30});
+document.addEventListener('touchstart',function(e){var t=e.target&&e.target.closest?e.target.closest('[data-tip]'):null,on=!!(t&&t.classList.contains('tip-on'));_tipClear();if(t&&!on)t.classList.add('tip-on');if(!e.touches[0])return;_tsx=e.touches[0].clientX;_tsEdge=_tsx<30||_tsx>window.innerWidth-30});
 document.addEventListener('touchend',function(e){if(!_tsEdge)return;var dx=e.changedTouches[0].clientX-_tsx;if(Math.abs(dx)>80){if(dx>0&&_curPage>0)go(_curPage-1);if(dx<0&&_curPage<6)go(_curPage+1)}});
 
 /* CAP-OS2AXE-2 lite fan-curve editor (vanilla SVG, zero deps). FanCurvePoint
@@ -2731,9 +2802,13 @@ function firstRunApply(){var url=((E('frPoolUrl')&&E('frPoolUrl').value)||'').tr
 /* ── Boot ── */
 var _pollInterval;
 function startPoll(){if(_pollInterval)clearInterval(_pollInterval);var rate=document.hidden?30000:15000;_pollInterval=setInterval(poll,rate);if(_blockFetchTimer)clearInterval(_blockFetchTimer);_blockFetchTimer=setInterval(pollBlockHero,10000)}
-renderAuthUi();poll();loadCfg();loadSharedCfg();loadAuthStatus();loadPresets();loadAutotunerModes();loadSchedule();loadAchievements();loadSwarm();pollBlockHero();startMempoolPoll();startPoll();
+renderAuthUi();poll();seedChart();loadCfg();loadSharedCfg();loadAuthStatus();loadPresets();loadAutotunerModes();loadSchedule();loadAchievements();loadSwarm();pollBlockHero();startMempoolPoll();startPoll();
 try{fanCurveInit();fanCurveRender();}catch(e){}
 setTimeout(function(){try{firstRunMaybe();}catch(e){}},800);
+/* Tooltips on touch (P1-W4): a tap toggles .tip-on, tapping elsewhere or
+ Escape closes. Both ride listeners that already exist (MOBILE-6: no new
+ document listeners). Keyboard focus is handled by :focus/:focus-within. */
+function _tipClear(){var a=document.querySelectorAll('.tip-on');for(var i=0;i<a.length;i++)a[i].classList.remove('tip-on')}
 document.addEventListener('visibilitychange',startPoll);
 var _resizeT;window.addEventListener('resize',function(){clearTimeout(_resizeT);_resizeT=setTimeout(drawChart,100)});
 </script>

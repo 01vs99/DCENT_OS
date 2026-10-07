@@ -52,6 +52,9 @@ fn journal_entry_from_hal_shape(
                 I2cFabricQuarantineDisposition::UnresolvedPic16State => {
                     MutationQuarantineReason::UnresolvedPic16State
                 }
+                I2cFabricQuarantineDisposition::UnresolvedClassicAmlPicState => {
+                    MutationQuarantineReason::UnresolvedClassicAmlPicState
+                }
                 I2cFabricQuarantineDisposition::UnexpectedLeaseDrop => {
                     MutationQuarantineReason::UnexpectedLeaseDrop
                 }

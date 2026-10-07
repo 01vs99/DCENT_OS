@@ -1,101 +1,39 @@
-# Installing DCENT_OS
+# Installing DCENT_OS beta
 
-A fresh install always boots **management-only** (dashboard, SSH, and API up; hash power off) until
-you explicitly enable mining, so a flash can't surprise-start a loud miner. **Always keep a
-known-good recovery path before flashing.**
+Start with the [one-page quickstart](../BETA_QUICKSTART.md). Obtain the signed beta package and DCENT_Toolbox supplied for your exact model and control board. Beta packages are for testing; no model is described here as production-stable. You do not need to compile firmware to try a supplied package.
 
-> **Public beta (not production-stable).** No model is `stable`. Install readiness is
-> **path-specific** and separate from mining/driver readiness — see the per-method
-> table below and the per-model notes for the honest per-path status.
+## Pick your family
 
-## Preferred methods (priority order)
+- [S9 and S9 variants with Xilinx/Zynq controllers](S9_XILINX.md)
+- [S15/T15, S17/T17 and S19 native Zynq SD trials](AM2_NATIVE.md)
+- [S19j Pro with a Xilinx/Zynq controller](S19J_PRO_XILINX.md)
+- [S19j Pro with a BeagleBone controller](BEAGLEBONE.md)
+- [S19 and S21 families with Amlogic controllers](AMLOGIC.md)
 
-| Priority | Method | When to use | Honest readiness today |
-| --- | --- | --- | --- |
-| **1** | **SD card** | Reversible try + physical recovery | **S9 SD-boot try** Supported (keep card; no NAND). **AM2 SD** Public Beta Experimental — host complete+signed under `releases/am2-sd/…`; cold-boot open (not Supported; not NAND install). |
-| **2** | **DCENT_Toolbox** | Detect, dry-run, persistent NAND/eMMC, recovery | **S9** persistent Supported (operator-gated capstone). **S19j Pro Zynq** guarded lab / live Blocked until clean unit. Everything else experimental, detect-only, or lab-flagged. |
+CVitek, S11, S23, T21 and other models outside the supplied release roster need a separate supported package and procedure. Discovery of a device is not an install method. Do not select a similarly named package when the exact model or controller is missing.
 
-## Public beta warning (read before flashing)
+## Preview with Toolbox
 
-- Supported **beta install anchors:** Antminer **S9 (Xilinx)** and **S19j Pro (Xilinx)** only.
-- Fingerprint the **control board** before any flash (S19j Pro exists as Zynq, BB, Amlogic, CV).
-- **Automatic failed-boot rollback is not guaranteed** — keep serial and SD or a verified full-NAND restore path.
-- On AM2, complete full-NAND backup + `restore_action_proof.verified=true` before install.
-- Install only **signed** packages from the checksum ledger.
-- Degraded EEPROM/dsPIC units (including `a lab unit`-class) are refused for public-beta GO evidence.
-- Home safety: quiet fan profile (~PWM 30); cut hash before noise.
+Launch `dcent tui` for the Toolbox interface, select one miner, and open Install. Choose the signed package and review the proposed method. For a firmware route that requests the Firmware field, the command-line preview is below; replace MINER_IP and SIGNED_PACKAGE with your own address and file path. An AM2 first-install capsule uses the separate example in the [S19j Pro guide](S19J_PRO_XILINX.md).
 
-## 1. Build or obtain a flashable image
-
-```bash
-# The only admitted source build today is the exact S9 release capsule.
-make -C DCENT_OS_Antminer release RELEASE_TARGET=s9
+```text
+dcent doctor MINER_IP
+dcent install --list-routes --explain MINER_IP
+dcent install MINER_IP -f SIGNED_PACKAGE --dry-run
 ```
 
-Do not invoke `build-dcentrald.sh` plus `build_in_docker.sh` as a packaging
-shortcut. The inner driver now requires an authenticated release invocation and
-fails closed when called directly. AM2, Amlogic, BeagleBone, CVitek, and S17
-source packaging remains blocked until each lane has the same capsule lifecycle;
-use only an already approved signed artifact whose target-specific evidence has
-been independently verified.
+The doctor and route-explanation commands contact the selected miner to identify it. The firmware preview can also probe it; the dedicated AM2 capsule preview checks local inputs only. None of these previews performs the install. Resolve the reported prerequisites before proceeding. For a persistent write, keep the automatic full backup, readback result and required restore preparation off the device. Then approve the exact action in Toolbox. For the firmware route just previewed, the CLI execution form is:
 
-Or use a **release-signed** sysupgrade tarball (local beta set under
-`DCENT_OS_Antminer/output/beta-xil-20260617/` for S9 + S19j Pro XIL). Public HTTPS
-publication remains operator-gated.
-
-## 2. Install onto the miner
-
-### Option A — S9 SD-boot try (no toolbox, fully reversible)
-
-S9 hardware boots DCENT_OS straight from an SD card with **no NAND write at all** — pull the card to
-revert to the prior firmware. Keep the card inserted while using DCENT_OS. See
-[`S9_XILINX.md`](S9_XILINX.md) and [`../qa/S9_PRIVATE_BETA_SD_RELEASE.md`](../qa/S9_PRIVATE_BETA_SD_RELEASE.md).
-
-This is **not** “SD install to NAND.” Permanent S9 NAND uses Option B.
-
-### Option B — DCENT Toolbox (detect → plan → gated write)
-
-The **DCENT Toolbox** auto-detects stock firmware (BraiinsOS / VNish / stock Bitmain / LuxOS) and
-shows the matching route. A route row is **not** a production install claim; live writes stay gated
-by per-model proof, signed artifacts, recovery evidence, and explicit operator authorization:
-
-```bash
-dcent doctor <MINER_IP>
-dcent support --flash-readiness --json
-dcent install --list-routes
-dcent install --list-routes --explain <MINER_IP>
-dcent install <MINER_IP> -f <signed-package> --dry-run
-# Commit only after dry-run is unblocked and recovery evidence exists.
+```text
+dcent install MINER_IP -f SIGNED_PACKAGE --yes
 ```
 
-**S19j Pro Xilinx:** Toolbox is the primary path (AM2 production SD is not customer-ready). Success
-on AM2 sysupgrade is often **`upload_accepted`** — power-cycle to boot the new slot; do not assume
-auto-reboot. See [`S19J_PRO_XILINX.md`](S19J_PRO_XILINX.md).
+This command can write internal storage. Use it only for the route you just reviewed; SD preparation has its own card-selection step. Do not add bypass flags to overcome an identity, signature, recovery or safety refusal.
 
-> Once DCENT_OS is installed, updates can use A/B sysupgrade with a signed bundle. Failed-boot
-> recovery stays platform/runbook-gated; keep serial or SD recovery media.
+## Understand completion
 
-## 3. First boot
+An accepted upload, a verified storage write, a successful reboot and accepted pool shares are separate milestones. Follow the route's final message. If it requests a power-cycle, first wait until the write has finished. Do not assume every stock firmware will reboot automatically.
 
-Open `http://<MINER_IP>/` and finish the setup wizard. Set your pool in
-[`../CONFIGURATION.md`](../CONFIGURATION.md), then enable mining when you're ready.
+## Recovery and updates
 
-## Per-platform notes
-
-| Platform | Notes |
-| --- | --- |
-| **S9 (Zynq)** | SD-boot try Supported; see [`S9_XILINX.md`](S9_XILINX.md). Persistent NAND via Toolbox + signed package. |
-| **S19j Pro (Zynq)** | Signed artifact exists; live install operator/lab-gated; **not** “any unit GO”. Multi-board: fingerprint first. See [`S19J_PRO_XILINX.md`](S19J_PRO_XILINX.md). |
-| **S19 Pro (Zynq)** | Experimental runtime / guarded lab; no public-beta signed install package in XIL beta set. |
-| **S17 / S19 base** | Runtime-only or evidence-gap; do not advertise as production install-ready. |
-| **S21 / S19k Pro / Amlogic** | aarch64; no public SD path; rootfs-window install is lab-only (restore_verified). |
-| **S19j Pro (BeagleBone)** | SD/runtime lab; not general NAND production install. |
-| **S11 / S15 / S23** | Detect-only or do-not-flash. |
-| **Bitaxe Max / Ultra / Supra / Gamma / Hex\*** | ESP OTA/USB require signed manifest; ESP OTA pubkey residual (B-T-1); see [`ESP_DEVICES.md`](ESP_DEVICES.md). |
-
-See [`../PLATFORMS.md`](../PLATFORMS.md) for per-model maturity and
-[`../CONFIGURATION.md`](../CONFIGURATION.md) for tuning and safety settings.
-
-> Hardware-specific bring-up details (per-board EEPROM/dsPIC quirks, NAND layouts) are intricate and
-> evolve quickly — open a **platform bring-up issue** with your captures and we'll help, and your
-> findings help expand coverage.
+Keep the original firmware and board-specific recovery media. Failed-boot recovery depends on the controller and install method; automatic rollback is not universal. SD trials run from the card. A DCENT_OS self-update package does not automatically provide a first-install route from stock firmware. Use the signed update selected for the running board, then verify the displayed version and complete the [first-start checks](../BETA_QUICKSTART.md).

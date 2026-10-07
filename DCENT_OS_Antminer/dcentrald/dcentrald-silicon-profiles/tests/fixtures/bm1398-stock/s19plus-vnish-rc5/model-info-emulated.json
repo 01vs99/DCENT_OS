@@ -1,0 +1,372 @@
+{
+  "name": "Antminer S19+",
+  "model": "s19plus",
+  "btm_model": "BHB28701",
+  "series": "x19",
+  "api_hr_measure": "GH/s",
+  "num_chains": 3,
+  "chain": {
+    "chip_addr_interval": 3,
+    "num_chips": 80,
+    "num_chips_per_domain": 8,
+    "num_domains": 10,
+    "sensors": [
+      {
+        "access": "via-pic",
+        "i2c_addr": 72,
+        "position": 0,
+        "chip_temp_offset": 15,
+        "location": "back"
+      },
+      {
+        "access": "via-pic",
+        "i2c_addr": 73,
+        "position": 7,
+        "chip_temp_offset": 15,
+        "location": "back"
+      },
+      {
+        "access": "via-pic",
+        "i2c_addr": 74,
+        "position": 72,
+        "chip_temp_offset": 15,
+        "location": "back"
+      },
+      {
+        "access": "via-pic",
+        "i2c_addr": 75,
+        "position": 79,
+        "chip_temp_offset": 15,
+        "location": "back"
+      }
+    ],
+    "topology": {
+      "chips": [
+        [
+          7,
+          8,
+          23,
+          24,
+          39,
+          40,
+          55,
+          56,
+          71,
+          72
+        ],
+        [
+          6,
+          9,
+          22,
+          25,
+          38,
+          41,
+          54,
+          57,
+          70,
+          73
+        ],
+        [
+          5,
+          10,
+          21,
+          26,
+          37,
+          42,
+          53,
+          58,
+          69,
+          74
+        ],
+        [
+          4,
+          11,
+          20,
+          27,
+          36,
+          43,
+          52,
+          59,
+          68,
+          75
+        ],
+        [
+          3,
+          12,
+          19,
+          28,
+          35,
+          44,
+          51,
+          60,
+          67,
+          76
+        ],
+        [
+          2,
+          13,
+          18,
+          29,
+          34,
+          45,
+          50,
+          61,
+          66,
+          77
+        ],
+        [
+          1,
+          14,
+          17,
+          30,
+          33,
+          46,
+          49,
+          62,
+          65,
+          78
+        ],
+        [
+          0,
+          15,
+          16,
+          31,
+          32,
+          47,
+          48,
+          63,
+          64,
+          79
+        ]
+      ],
+      "num_cols": 10,
+      "num_rows": 8
+    },
+    "volt_ctrl": true
+  },
+  "psu": {
+    "max_volt": 15000,
+    "min_volt": 12000,
+    "modded_max_volt": 15350,
+    "models": [
+      113,
+      114,
+      116,
+      117,
+      118,
+      119
+    ]
+  },
+  "chip": {
+    "analog_mux": 3,
+    "core_clock_delay": 0,
+    "io_drive_strength": 1,
+    "model": "BM1398",
+    "num_cores": 623,
+    "pulse_mode": 1,
+    "pulse_width": 0,
+    "ver_roll_mask": 0,
+    "ticket_mask": 63,
+    "uart_speed": 12000000,
+    "diff": 64
+  },
+  "fans": {
+    "num_fans": 4,
+    "min_duty": 0,
+    "max_duty": 100,
+    "max_rpm": 6000
+  },
+  "performance": {
+    "default_freq": 645,
+    "default_volt": 14000,
+    "max_freq": 1000,
+    "min_freq": 50,
+    "presets": [
+      {
+        "id": "2850",
+        "name": "2850 watt ~ 78 TH",
+        "freq": 605,
+        "initial_volt": 12800,
+        "max_volt": 14200
+      },
+      {
+        "id": "3050",
+        "name": "3050 watt ~ 85 TH",
+        "freq": 630,
+        "initial_volt": 12900,
+        "max_volt": 14300
+      },
+      {
+        "id": "3250",
+        "name": "3250 watt ~ 91 TH",
+        "freq": 655,
+        "initial_volt": 13000,
+        "max_volt": 14400
+      },
+      {
+        "id": "3325",
+        "name": "3325 watt ~ 95 TH",
+        "freq": 665,
+        "initial_volt": 13000,
+        "max_volt": 14400
+      },
+      {
+        "id": "3465",
+        "name": "3465 watt ~ 99 TH",
+        "freq": 680,
+        "initial_volt": 13100,
+        "max_volt": 14500
+      },
+      {
+        "id": "3655",
+        "name": "3655 watt ~ 105 TH",
+        "freq": 705,
+        "initial_volt": 13200,
+        "max_volt": 14600
+      },
+      {
+        "id": "3880",
+        "name": "3880 watt ~ 110 TH",
+        "freq": 730,
+        "initial_volt": 13300,
+        "max_volt": 14700
+      }
+    ],
+    "startup_freq": 50,
+    "startup_volt": 15000,
+    "warn_freq": 850
+  },
+  "cooling": {
+    "auto": {
+      "target_temp": {
+        "default": 65,
+        "max": 90,
+        "min": 20
+      }
+    },
+    "danger_board_temp": 80,
+    "danger_chip_temp": 90,
+    "hot_chip_temp": 85,
+    "normal_start_temp": 40,
+    "min_start_temp": -30,
+    "fan_min_count": {
+      "min": 1,
+      "max": 4,
+      "default": 4
+    },
+    "manual": {
+      "fan_duty": {
+        "default": 100,
+        "max": 100,
+        "min": 10
+      }
+    },
+    "modes": [
+      "auto",
+      "manual",
+      "immersion"
+    ]
+  },
+  "autotune_params": [
+    {
+      "lower_percent": 91,
+      "state_time": 180,
+      "init_presets": false,
+      "reset_cores_sleep_ms": 30000,
+      "detect_bad_chips": {
+        "inc_volt": 100,
+        "end_change_volt": -1,
+        "hw_error_limit": 2,
+        "min_state_percent": 85
+      },
+      "find_min_volt": {
+        "dec_volt": 50,
+        "end_inc_volt": 100
+      },
+      "adjust_chip_freqs": {
+        "dec_freq_step": 1.0,
+        "min_inc_freq_step": 1.0,
+        "mid_inc_freq_step": 1.0,
+        "max_inc_freq_step": 1.0
+      },
+      "reduce_chip_freqs": {
+        "inc_volt": 5,
+        "end_inc_volt": 50,
+        "hw_error_limit": 2,
+        "state_target_percent": 98.0,
+        "raise_freq_step": 3.0,
+        "freq_steps": {
+          "perc_lower_50": 18,
+          "perc_lower_60": 15,
+          "perc_lower_70": 12,
+          "perc_lower_80": 9,
+          "perc_lower_90": 6,
+          "perc_lower_95": 3,
+          "max_freq_range": 150
+        }
+      },
+      "increase_chip_freqs": {
+        "state_lower_percent": 99.0,
+        "state_target_percent_with_freqs": 100.0,
+        "raise_freq_step": 3.0,
+        "final_freq_step": 3.0,
+        "hw_error_limit": 2
+      },
+      "final_volt": {
+        "dec_volt": 20,
+        "end_inc_volt": 20,
+        "state_lower_percent": 98.5
+      }
+    },
+    {
+      "lower_percent": 91,
+      "state_time": 180,
+      "init_presets": false,
+      "reset_cores_sleep_ms": 30000,
+      "detect_bad_chips": {
+        "inc_volt": 100,
+        "end_change_volt": -1,
+        "hw_error_limit": 2,
+        "min_state_percent": 85
+      },
+      "find_min_volt": {
+        "dec_volt": 50,
+        "end_inc_volt": 100
+      },
+      "adjust_chip_freqs": {
+        "dec_freq_step": 1.0,
+        "min_inc_freq_step": 1.0,
+        "mid_inc_freq_step": 1.0,
+        "max_inc_freq_step": 1.0
+      },
+      "reduce_chip_freqs": {
+        "inc_volt": 5,
+        "end_inc_volt": 50,
+        "hw_error_limit": 2,
+        "state_target_percent": 98.0,
+        "raise_freq_step": 3.0,
+        "freq_steps": {
+          "perc_lower_50": 18,
+          "perc_lower_60": 15,
+          "perc_lower_70": 12,
+          "perc_lower_80": 9,
+          "perc_lower_90": 6,
+          "perc_lower_95": 3,
+          "max_freq_range": 150
+        }
+      },
+      "increase_chip_freqs": {
+        "state_lower_percent": 99.0,
+        "state_target_percent_with_freqs": 100.0,
+        "raise_freq_step": 3.0,
+        "final_freq_step": 3.0,
+        "hw_error_limit": 2
+      },
+      "final_volt": {
+        "dec_volt": 20,
+        "end_inc_volt": 20,
+        "state_lower_percent": 98.5
+      }
+    }
+  ]
+}

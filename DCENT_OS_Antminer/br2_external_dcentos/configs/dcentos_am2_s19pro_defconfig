@@ -36,6 +36,7 @@
 # Target Architecture — same as S9 / am2-s19jpro (Zynq Cortex-A9).
 # =============================================================================
 BR2_arm=y
+BR2_PACKAGE_AM2_NAND_WINDOW=y
 BR2_cortex_a9=y
 BR2_ARM_ENABLE_NEON=y
 BR2_ARM_ENABLE_VFP=y

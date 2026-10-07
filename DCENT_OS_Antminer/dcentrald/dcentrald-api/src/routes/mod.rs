@@ -66,12 +66,14 @@ pub mod profiles;
 pub mod pvt_table;
 pub mod re_catalog;
 pub mod restore_to_stock;
+pub mod reset_settings;
 /// A03 (2026-06-10 knowledge-goldmine, finding s5-luxminer CAND-01) —
 /// `GET /api/metrics/rolling` + `/api/metrics/rolling.csv`. Read-only 3-tier
 /// (5s/1m/5m) rolling-average ring (LuxOS `/metrics` parity). See
 /// `routes/rolling_metrics.rs`.
 pub mod rolling_metrics;
 pub mod stock_parity;
+pub mod ssh_keys;
 pub mod sv2;
 /// A04 (2026-06-10 knowledge-goldmine, finding s5-luxminer API-07/CAND-02) —
 /// `GET /api/profile/download` + `POST /api/profile/upload`. V/F profile

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Exact SD data was UUID-checked before any service startup.
+case "${1:-}" in
+    start)
+        [ -r /run/dcentos/bm1391-sd-data-ready ] || exit 1
+        [ "$(cat /run/dcentos/bm1391-sd-data-ready)" = "$(cat /etc/dcentos/bm1391-data-uuid)" ] || exit 1
+        ;;
+    stop)
+        awk '$1=="/dev/mmcblk0p3" && $2=="/data" && $3=="ext4" { n++ }
+             END { exit n==1 ? 0 : 1 }' /proc/mounts || exit 1
+        [ -x /usr/sbin/seed-entropy ] && /usr/sbin/seed-entropy --initialize-if-missing /data/keys/random-seed
+        sync ;;
+    restart) "$0" start ;;
+    *) exit 1 ;;
+esac

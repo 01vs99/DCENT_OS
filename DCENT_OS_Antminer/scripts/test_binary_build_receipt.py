@@ -1689,6 +1689,8 @@ class OverridePolicyTests(unittest.TestCase):
     def test_release_status_and_release_image_with_override_fail(self) -> None:
         for values in (
             {"allow_stale": "1", "package_status": "release"},
+            {"allow_stale": "1", "package_status": "beta"},
+            {"allow_stale": "1", "package_status": "stable"},
             {"allow_stale": "1", "package_status": "lab", "release_image": "1"},
         ):
             with self.subTest(values=values):

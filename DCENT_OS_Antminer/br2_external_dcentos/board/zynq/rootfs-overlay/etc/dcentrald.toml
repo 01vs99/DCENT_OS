@@ -44,7 +44,7 @@ websocket = true
 # HTTP auth is enforced by the API's owner-password flow, not by a legacy
 # auth_enabled toggle. Ship fail-closed defaults for the surfaces that still
 # have config knobs.
-cgminer_bind_lan = false
+cgminer_bind_lan = true
 # API-1 (security): allow MUTATING CGMiner/LuxOS verbs (addpool/switchpool/
 # config changes) from NON-loopback LAN peers. DEFAULT false (fail-closed):
 # even with cgminer_bind_lan=true, remote mutating verbs stay blocked unless
@@ -53,10 +53,11 @@ cgminer_lan_writes = false
 metrics_require_auth = true
 
 [donation]
-# Voluntary 2% donation supports open-source firmware development.
-# Set enabled = false to disable it, or adjust percent between 0 and 5.
-enabled = true
-percent = 2.0
+# DCENT_OS ships with ZERO mandatory fee. Optional transparent donation:
+# set enabled = true and percent 1-5 (time-sliced, always visible, one tap
+# off). Fund development: https://d-central.tech/fund/
+enabled = false
+percent = 0.0
 pool_url = "stratum+tcp://pool.d-central.tech:3333"
 worker = "DungeonMaster"
 password = "x"
@@ -89,5 +90,13 @@ celebration_on_lucky_share = true
 chain_status_blink_codes = true
 
 [autotuner]
-enabled = false
+# Autotune is ON by default (operator decision 2026-09-01). Safety contract:
+# the tuner REFUSES to tune blind — every frequency/voltage step validates
+# against the variant's BoardDesc cut-ladder + published envelope BEFORE
+# execution, and variants with unknown/missing envelope datums surface
+# NOT TUNABLE instead of tuning. First boot parks at the safe-stock
+# profile until health + fans + temp-in-envelope (+ ExperimentalOptIn
+# operator ack) pass. Voltage autotune on am2 stays behind the
+# DCENT_AM2_VOLTAGE_AUTOTUNE live-safety fence.
+enabled = true
 preset = "balanced_home"

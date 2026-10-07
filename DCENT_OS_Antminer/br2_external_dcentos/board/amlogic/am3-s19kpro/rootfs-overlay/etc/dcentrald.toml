@@ -4,8 +4,8 @@
 # Baked baseline for am3-aml-s19k (Amlogic A113D, BM1366 NoPic, 3 chains × 77 chips).
 # Aligns with dcentrald/dcentrald_s19k.toml for host-driven /tmp trial (Bench HOLD).
 # Identity markers: /etc/dcentos/board_target=am3-s19k (plus typed toml [platform]).
-# Values are sourced from the .78 live capture of /etc/bosminer_model.json
-# (
+# Values are sourced from the lab-unit live capture of /etc/bosminer_model.json
+# (held reference corpus
 # bosminer_model.json) but tightened to D-Central home-mining defaults:
 #   - mining disabled by default (operator opts in post-flash)
 #   - thermal envelope below industrial extremes (75/88 hot/dangerous)
@@ -78,13 +78,16 @@ decoded_reference_file = "/etc/dcentos/hashboard_decoded.json"
 cgminer_port = 4028
 http_port = 8080
 websocket = true
-cgminer_bind_lan = false
+cgminer_bind_lan = true
 cgminer_lan_writes = false
 metrics_require_auth = true
 
 [donation]
-enabled = true
-percent = 2.0
+# DCENT_OS ships with ZERO mandatory fee. Optional transparent donation:
+# set enabled = true and percent 1-5 (time-sliced, always visible, one tap
+# off). Fund development: https://d-central.tech/fund/
+enabled = false
+percent = 0.0
 pool_url = "stratum+tcp://pool.d-central.tech:3333"
 worker = "DungeonMaster"
 password = "x"
@@ -118,5 +121,13 @@ celebration_on_lucky_share = true
 chain_status_blink_codes = true
 
 [autotuner]
-enabled = false
+# Autotune is ON by default (operator decision 2026-09-01). Safety contract:
+# the tuner REFUSES to tune blind - every frequency/voltage step validates
+# against the variant BoardDesc cut-ladder + published envelope BEFORE
+# execution; variants with unknown/missing envelope datums surface
+# NOT TUNABLE instead of tuning. First boot parks at the safe-stock
+# profile until health + fans + temp-in-envelope (+ ExperimentalOptIn
+# operator ack) pass. Voltage autotune on am2 stays behind the
+# DCENT_AM2_VOLTAGE_AUTOTUNE live-safety fence.
+enabled = true
 preset = "balanced_home"

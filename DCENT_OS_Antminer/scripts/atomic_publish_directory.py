@@ -807,7 +807,9 @@ def _windows_publish(
             raise ctypes.WinError(ctypes.get_last_error())
         return handle
 
-    def information(handle: int, label: str) -> tuple[HandleInformation, Identity]:
+    def information(
+        handle: int, path: Path, label: str
+    ) -> tuple[HandleInformation, Identity]:
         value = HandleInformation()
         if not get_information(handle, ctypes.byref(value)):
             raise ctypes.WinError(ctypes.get_last_error())
@@ -815,8 +817,16 @@ def _windows_publish(
         reparse_attribute = 0x00000400
         if not value.attributes & directory_attribute or value.attributes & reparse_attribute:
             raise DirectoryPublishError(f"{label} is not a non-reparse directory")
+        # Run 15 post-mortem (2026-09-04): CPython's os.stat st_dev on Windows
+        # is NOT the raw dwVolumeSerialNumber, so a (volume_serial, index)
+        # tuple can never equal the (st_dev, st_ino) tuple that the capability
+        # descriptor and every path-based _require_identity comparison use -
+        # the opened-parent identity checks were unsatisfiable on Windows and
+        # publish always refused. Keep the file index from the HANDLE (the
+        # anti-rename anchor this pre-check exists for) and take the device
+        # component from the same lstat source all other comparisons share.
         return value, (
-            value.volume_serial,
+            _directory_metadata(path, label).st_dev,
             (value.file_index_high << 32) | value.file_index_low,
         )
 
@@ -876,12 +886,14 @@ def _windows_publish(
         destination_parent_handle = open_directory(destination.parent, movable=False)
         promoted_handle = open_directory(staged, movable=True)
         _, source_parent_identity = information(
-            source_parent_handle, "opened staging parent"
+            source_parent_handle, staged.parent, "opened staging parent"
         )
         _, destination_parent_identity = information(
-            destination_parent_handle, "opened destination parent"
+            destination_parent_handle, destination.parent, "opened destination parent"
         )
-        _, promoted_identity = information(promoted_handle, "opened staged directory")
+        _, promoted_identity = information(
+            promoted_handle, staged, "opened staged directory"
+        )
         if source_parent_identity != expected_staging_parent_identity:
             raise DirectoryPublishError("opened staging parent identity changed")
         if destination_parent_identity != expected_destination_parent_identity:

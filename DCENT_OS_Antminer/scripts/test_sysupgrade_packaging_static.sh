@@ -5,6 +5,13 @@
 
 set -eu
 
+TIER=full
+case "${1:-}" in
+    '') [ "$#" -eq 0 ] || exit 2 ;;
+    --blocking) [ "$#" -eq 1 ] || exit 2; TIER=blocking ;;
+    *) printf 'Usage: %s [--blocking]\n' "$0" >&2; exit 2 ;;
+esac
+
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 PROJECT_DIR=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd)
 
@@ -104,7 +111,11 @@ make_test_sysupgrade_package() {
     fi
 
     mkdir -p "$pkgdir"
-    printf '\047\005\031\126kernel\n' > "$pkgdir/kernel"
+    # Donor Amlogic kernel shape: 56 header bytes then the arm64 Image
+    # magic "ARM\x64" at 0x38 — the only kernel form every am3 producer
+    # ships (donor vmlinux.bin, sha-pinned by require-exact-build-inputs).
+    dd if=/dev/zero of="$pkgdir/kernel" bs=1 count=56 2>/dev/null
+    printf '\101\122\115\144kernel\n' >> "$pkgdir/kernel"
     printf '\047\005\031\126root\n' > "$pkgdir/root"
     printf 'board=am3-s19k\n' > "$pkgdir/METADATA"
 
@@ -420,6 +431,364 @@ zynq_payload_window_selftest() {
         rm -rf "$tmpdir"
         return 1
     fi
+
+    rm -rf "$tmpdir"
+    return 0
+}
+
+# make_test_route_scoped_s9_package <pkgdir> <board> <root_size> <kernel_size> <install_mode> <update_command_json>
+# AM1-A Drop-1 route scoping fixtures: a lab package whose MANIFEST carries
+# an explicit typed toolbox route contract. install_mode "" emits a legacy
+# manifest with NO toolbox block (the pre-scoping shape). The kernel is
+# bootable FIT magic + truncate to kernel_size (0 = tiny); the root is
+# squashfs magic + truncate to root_size (0 = tiny fitting root).
+make_test_route_scoped_s9_package() {
+    pkgdir=$1
+    board=$2
+    requested_root_size=$3
+    requested_kernel_size=$4
+    route_install_mode=$5
+    route_update_json=$6
+    route_installable=${7:-true}
+    package_prefix="sysupgrade-$board"
+
+    mkdir -p "$pkgdir"
+    printf '\320\015\376\355kernel\n' > "$pkgdir/kernel"
+    printf 'hsqs' > "$pkgdir/root"
+    if [ "$requested_kernel_size" -gt 14 ]; then
+        if command -v truncate >/dev/null 2>&1; then
+            truncate -s "$requested_kernel_size" "$pkgdir/kernel"
+        else
+            dd if=/dev/zero of="$pkgdir/kernel" bs=1 count=1 seek=$((requested_kernel_size - 1)) conv=notrunc >/dev/null 2>&1
+        fi
+    fi
+    if [ "$requested_root_size" -gt 4 ]; then
+        if command -v truncate >/dev/null 2>&1; then
+            truncate -s "$requested_root_size" "$pkgdir/root"
+        else
+            dd if=/dev/zero of="$pkgdir/root" bs=1 count=1 seek=$((requested_root_size - 1)) conv=notrunc >/dev/null 2>&1
+        fi
+    fi
+    printf 'board=%s\n' "$board" > "$pkgdir/METADATA"
+
+    kernel_size=$(wc -c < "$pkgdir/kernel" | tr -d ' ')
+    root_size=$(wc -c < "$pkgdir/root" | tr -d ' ')
+    metadata_size=$(wc -c < "$pkgdir/METADATA" | tr -d ' ')
+    kernel_sha=$(sha256sum "$pkgdir/kernel" | awk '{ print $1 }')
+    root_sha=$(sha256sum "$pkgdir/root" | awk '{ print $1 }')
+    metadata_sha=$(sha256sum "$pkgdir/METADATA" | awk '{ print $1 }')
+
+    if [ -n "$route_install_mode" ]; then
+        toolbox_block=",
+  \"toolbox\": {
+    \"install_command\": \"dcent install <ip> -f dcentos-sysupgrade-118.tar\",
+    \"update_command\": $route_update_json,
+    \"upload_endpoint\": null,
+    \"board_target_header\": null,
+    \"requires_inactive_slot\": false,
+    \"install_mode\": \"$route_install_mode\"
+  }"
+    else
+        toolbox_block=""
+    fi
+
+    cat > "$pkgdir/MANIFEST.json" <<EOF
+{
+  "schema": 1,
+  "manifest_profile": "dcentos.sysupgrade-unsigned-lab/v1",
+  "product": "DCENT_OS",
+  "package_type": "sysupgrade",
+  "installable": $route_installable,
+  "artifact_maturity": "experimental",
+  "board": "$board",
+  "board_target": "$board",
+  "version": "test",
+  "status": "lab_unsigned",
+  "payloads": {
+    "kernel": { "path": "$package_prefix/kernel", "size": $kernel_size, "sha256": "$kernel_sha" },
+    "rootfs": { "path": "$package_prefix/root", "size": $root_size, "sha256": "$root_sha" },
+    "metadata": { "path": "$package_prefix/METADATA", "size": $metadata_size, "sha256": "$metadata_sha" }
+  }$toolbox_block
+}
+EOF
+    (cd "$pkgdir" && sha256sum kernel root METADATA > SHA256SUMS)
+}
+
+# AM1-A Drop-1 route-scoped window admission (owner adjudication
+#
+# Option A, ratified 2026-09-15). The live-sysupgrade window stays enforced
+# for every self-update-claiming shape; only the explicit first-install-only
+# denial contract admits an over-window package (first-install route), and
+# that waiver is itself bounded by the stock phase-2 hard volumes
+# (scripts/lib/am1_s9_first_install_capacity.sh).
+make_test_denied_am3_package() {
+    pkgdir=$1
+    board=$2
+    route_installable=$3
+    package_prefix="sysupgrade-$board"
+
+    mkdir -p "$pkgdir"
+    # Donor Amlogic kernel shape: 56 header bytes then the arm64 Image
+    # magic "ARM\x64" at 0x38 (every am3 producer's only kernel form).
+    dd if=/dev/zero of="$pkgdir/kernel" bs=1 count=56 2>/dev/null
+    printf '\101\122\115\144kernel\n' >> "$pkgdir/kernel"
+    printf '\047\005\031\126root\n' > "$pkgdir/root"
+    printf 'board=%s\n' "$board" > "$pkgdir/METADATA"
+
+    kernel_size=$(wc -c < "$pkgdir/kernel" | tr -d ' ')
+    root_size=$(wc -c < "$pkgdir/root" | tr -d ' ')
+    metadata_size=$(wc -c < "$pkgdir/METADATA" | tr -d ' ')
+    kernel_sha=$(sha256sum "$pkgdir/kernel" | awk '{ print $1 }')
+    root_sha=$(sha256sum "$pkgdir/root" | awk '{ print $1 }')
+    metadata_sha=$(sha256sum "$pkgdir/METADATA" | awk '{ print $1 }')
+
+    cat > "$pkgdir/MANIFEST.json" <<EOF
+{
+  "schema": 1,
+  "manifest_profile": "dcentos.sysupgrade-unsigned-lab/v1",
+  "product": "DCENT_OS",
+  "package_type": "sysupgrade",
+  "installable": $route_installable,
+  "artifact_maturity": "experimental",
+  "board": "$board",
+  "board_target": "$board",
+  "version": "test",
+  "status": "lab_unsigned",
+  "payloads": {
+    "kernel": { "path": "$package_prefix/kernel", "size": $kernel_size, "sha256": "$kernel_sha" },
+    "rootfs": { "path": "$package_prefix/root", "size": $root_size, "sha256": "$root_sha" },
+    "metadata": { "path": "$package_prefix/METADATA", "size": $metadata_size, "sha256": "$metadata_sha" }
+  },
+  "toolbox": {
+    "install_command": null,
+    "update_command": null,
+    "upload_endpoint": null,
+    "board_target_header": null,
+    "requires_inactive_slot": false,
+    "install_mode": "package_only_denied",
+    "target_side_sysupgrade": false
+  }
+}
+EOF
+    (cd "$pkgdir" && sha256sum kernel root METADATA > SHA256SUMS)
+}
+
+s9_route_scoped_window_selftest() {
+    tmpdir=$(mktemp -d 2>/dev/null || echo "/tmp/dcentos-s9-route-selftest.$$")
+    rm -rf "$tmpdir"
+    mkdir -p "$tmpdir"
+
+    # The canonical measured fact: 17,743,872 B rootfs vs 17,014,784 B window.
+    oversized_root=$((134 * 124 * 1024 + 729088))
+    # First-install stock-transaction capacities (stage1_builder.py:640/:642).
+    fi_kernel_max=$((8 * 1024 * 1024))
+    fi_rootfs_max=$((20 * 1024 * 1024))
+
+    # (a) OVER-WINDOW rootfs (the exact measured size, 3,227,648 B under the
+    # 20 MiB first-install capacity) + typed first-install-only contract -> PASS.
+    make_test_route_scoped_s9_package \
+        "$tmpdir/fio-pkg/sysupgrade-am1-s9" am1-s9 "$oversized_root" 0 \
+        first_install_only null || { rm -rf "$tmpdir"; return 1; }
+    (cd "$tmpdir/fio-pkg" && tar cf fio.tar sysupgrade-am1-s9) || { rm -rf "$tmpdir"; return 1; }
+    if ! DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh \
+        --package-only "$tmpdir/fio-pkg/fio.tar" am1-s9 \
+        >"$tmpdir/fio.out" 2>&1; then
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    grep -F 'self-update window admission waived' "$tmpdir/fio.out" >/dev/null 2>&1 || {
+        rm -rf "$tmpdir"
+        return 1
+    }
+
+    # (b) same OVER-WINDOW rootfs CLAIMING the self-update route -> FAIL.
+    make_test_route_scoped_s9_package \
+        "$tmpdir/tsu-pkg/sysupgrade-am1-s9" am1-s9 "$oversized_root" 0 \
+        target_sysupgrade '"dcent install <ip> -f dcentos-sysupgrade-118.tar"' \
+        || { rm -rf "$tmpdir"; return 1; }
+    (cd "$tmpdir/tsu-pkg" && tar cf tsu.tar sysupgrade-am1-s9) || { rm -rf "$tmpdir"; return 1; }
+    if DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh \
+        --package-only "$tmpdir/tsu-pkg/tsu.tar" am1-s9 \
+        >"$tmpdir/tsu.out" 2>&1; then
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    grep -F 'exceeds zynq rootfs window' "$tmpdir/tsu.out" >/dev/null 2>&1 || {
+        rm -rf "$tmpdir"
+        return 1
+    }
+
+    # (b2) OVER-WINDOW rootfs with a tampered denial (update_command not
+    # null) -> FAIL: the denial must be machine-checkable, not decorative.
+    make_test_route_scoped_s9_package \
+        "$tmpdir/fio-upd-pkg/sysupgrade-am1-s9" am1-s9 "$oversized_root" 0 \
+        first_install_only '"dcent install <ip> -f dcentos-sysupgrade-118.tar"' \
+        || { rm -rf "$tmpdir"; return 1; }
+    (cd "$tmpdir/fio-upd-pkg" && tar cf fio-upd.tar sysupgrade-am1-s9) || { rm -rf "$tmpdir"; return 1; }
+    if DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh \
+        --package-only "$tmpdir/fio-upd-pkg/fio-upd.tar" am1-s9 \
+        >"$tmpdir/fio-upd.out" 2>&1; then
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    grep -F 'package authority is inconsistent' "$tmpdir/fio-upd.out" >/dev/null 2>&1 || {
+        rm -rf "$tmpdir"
+        return 1
+    }
+
+    # (b3) OVER-WINDOW rootfs with an unadmitted route value -> FAIL.
+    make_test_route_scoped_s9_package \
+        "$tmpdir/weird-pkg/sysupgrade-am1-s9" am1-s9 "$oversized_root" 0 \
+        self_update_forced null || { rm -rf "$tmpdir"; return 1; }
+    (cd "$tmpdir/weird-pkg" && tar cf weird.tar sysupgrade-am1-s9) || { rm -rf "$tmpdir"; return 1; }
+    if DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh \
+        --package-only "$tmpdir/weird-pkg/weird.tar" am1-s9 >/dev/null 2>&1; then
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # (b4) inspection-only denial (the am3-s19xp shape from run
+    # drop1-20260918-xtleogkg: package_only_denied + installable=false)
+    # -> PASS: denial is a typed contract here, not a contradiction.
+    make_test_denied_am3_package "$tmpdir/denied-pkg/sysupgrade-am3-s19xp" am3-s19xp false \
+        || { rm -rf "$tmpdir"; return 1; }
+    (cd "$tmpdir/denied-pkg" && tar cf denied.tar sysupgrade-am3-s19xp) || { rm -rf "$tmpdir"; return 1; }
+    if ! DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh \
+        --package-only "$tmpdir/denied-pkg/denied.tar" am3-s19xp \
+        >"$tmpdir/denied.out" 2>&1; then
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    grep -F 'toolbox route contract admitted (install_mode=package_only_denied)' "$tmpdir/denied.out" >/dev/null 2>&1 || {
+        rm -rf "$tmpdir"
+        return 1
+    }
+
+    # (b5) denial contradicting installable=true -> FAIL at the authority
+    # layer (the semantic helper refuses the contradiction).
+    make_test_denied_am3_package "$tmpdir/denied-true-pkg/sysupgrade-am3-s19xp" am3-s19xp true \
+        || { rm -rf "$tmpdir"; return 1; }
+    (cd "$tmpdir/denied-true-pkg" && tar cf denied-true.tar sysupgrade-am3-s19xp) || { rm -rf "$tmpdir"; return 1; }
+    if DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh \
+        --package-only "$tmpdir/denied-true-pkg/denied-true.tar" am3-s19xp \
+        >"$tmpdir/denied-true.out" 2>&1; then
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    grep -F 'package authority is inconsistent' "$tmpdir/denied-true.out" >/dev/null 2>&1 || {
+        rm -rf "$tmpdir"
+        return 1
+    }
+
+    # (c) FITTING rootfs + explicit dual-route contract -> PASS (unchanged
+    # behavior; the contract makes the self-update claim machine-checkable).
+    make_test_route_scoped_s9_package \
+        "$tmpdir/fit-tsu-pkg/sysupgrade-am1-s9" am1-s9 0 0 \
+        target_sysupgrade '"dcent install <ip> -f dcentos-sysupgrade-118.tar"' \
+        || { rm -rf "$tmpdir"; return 1; }
+    (cd "$tmpdir/fit-tsu-pkg" && tar cf fit-tsu.tar sysupgrade-am1-s9) || { rm -rf "$tmpdir"; return 1; }
+    if ! DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh \
+        --package-only "$tmpdir/fit-tsu-pkg/fit-tsu.tar" am1-s9 >/dev/null 2>&1; then
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # (d) FITTING rootfs + first-install-only contract -> PASS (denying MORE
+    # than required is a legal restrictive posture, never a safety hazard).
+    make_test_route_scoped_s9_package \
+        "$tmpdir/fit-fio-pkg/sysupgrade-am1-s9" am1-s9 0 0 first_install_only null \
+        || { rm -rf "$tmpdir"; return 1; }
+    (cd "$tmpdir/fit-fio-pkg" && tar cf fit-fio.tar sysupgrade-am1-s9) || { rm -rf "$tmpdir"; return 1; }
+    if ! DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh \
+        --package-only "$tmpdir/fit-fio-pkg/fit-fio.tar" am1-s9 >/dev/null 2>&1; then
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # (e) OVER-CAPACITY rootfs (past the stock phase-2 20 MiB hard volume)
+    # + first-install-only contract -> FAIL: the waiver is bounded; such a
+    # payload would abort the two-reboot transaction mid-phase-2 (both
+    # merge critics' follow-up).
+    make_test_route_scoped_s9_package \
+        "$tmpdir/fio-cap-pkg/sysupgrade-am1-s9" am1-s9 $((fi_rootfs_max + 1)) 0 \
+        first_install_only null || { rm -rf "$tmpdir"; return 1; }
+    (cd "$tmpdir/fio-cap-pkg" && tar cf fio-cap.tar sysupgrade-am1-s9) || { rm -rf "$tmpdir"; return 1; }
+    if DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh \
+        --package-only "$tmpdir/fio-cap-pkg/fio-cap.tar" am1-s9 \
+        >"$tmpdir/fio-cap.out" 2>&1; then
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    grep -F 'first-install rootfs payload exceeds the stock phase-2 hard volume' \
+        "$tmpdir/fio-cap.out" >/dev/null 2>&1 || {
+        rm -rf "$tmpdir"
+        return 1
+    }
+
+    # (f) OVER-CAPACITY kernel (past the stock phase-2 8 MiB hard volume)
+    # + first-install-only contract -> FAIL. The kernel is also over the
+    # self-update kernel window, so this shape is first-install-only AND
+    # has no installable route.
+    make_test_route_scoped_s9_package \
+        "$tmpdir/fio-kcap-pkg/sysupgrade-am1-s9" am1-s9 0 $((fi_kernel_max + 1)) \
+        first_install_only null || { rm -rf "$tmpdir"; return 1; }
+    (cd "$tmpdir/fio-kcap-pkg" && tar cf fio-kcap.tar sysupgrade-am1-s9) || { rm -rf "$tmpdir"; return 1; }
+    if DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh \
+        --package-only "$tmpdir/fio-kcap-pkg/fio-kcap.tar" am1-s9 \
+        >"$tmpdir/fio-kcap.out" 2>&1; then
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    grep -F 'first-install kernel payload exceeds the stock phase-2 hard volume' \
+        "$tmpdir/fio-kcap.out" >/dev/null 2>&1 || {
+        rm -rf "$tmpdir"
+        return 1
+    }
+
+    # (g) BOARD-SCOPE pin (merge-critic follow-up): a first_install_only
+    # contract on am2-s19j gets NO waiver — the waiver conjunct is
+    # am1-s9-only. Over-window for am2 = 179 LEBs x 126,976 B + 1. The
+    # failure reason must be the am2 WINDOW refusal: deleting the am1-s9
+    # board conjunct would route this package into the (bounded) waiver and
+    # change the refusal to the capacity message, breaking this suite.
+    am2_oversized_root=$((179 * 124 * 1024 + 1))
+    make_test_route_scoped_s9_package \
+        "$tmpdir/am2-fio-pkg/sysupgrade-am2-s19j" am2-s19j "$am2_oversized_root" 0 \
+        first_install_only null || { rm -rf "$tmpdir"; return 1; }
+    (cd "$tmpdir/am2-fio-pkg" && tar cf am2-fio.tar sysupgrade-am2-s19j) || { rm -rf "$tmpdir"; return 1; }
+    if DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh \
+        --package-only "$tmpdir/am2-fio-pkg/am2-fio.tar" am2-s19j \
+        >"$tmpdir/am2-fio.out" 2>&1; then
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    grep -F 'am2-s19j root payload exceeds zynq rootfs window' \
+        "$tmpdir/am2-fio.out" >/dev/null 2>&1 || {
+        rm -rf "$tmpdir"
+        return 1
+    }
+
+    # (h) MODE-SCOPE pin (merge-critic follow-up): host_driven_rootfs_window_lab
+    # claimed on an OVER-WINDOW am1-s9 package -> FAIL — only
+    # first_install_only earns the waiver. Deleting the install_mode
+    # conjunct (any-mode waives) would admit this package (it is under the
+    # 20 MiB capacity), breaking this suite.
+    make_test_route_scoped_s9_package \
+        "$tmpdir/hdr-pkg/sysupgrade-am1-s9" am1-s9 "$oversized_root" 0 \
+        host_driven_rootfs_window_lab null \
+        || { rm -rf "$tmpdir"; return 1; }
+    (cd "$tmpdir/hdr-pkg" && tar cf hdr.tar sysupgrade-am1-s9) || { rm -rf "$tmpdir"; return 1; }
+    if DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh \
+        --package-only "$tmpdir/hdr-pkg/hdr.tar" am1-s9 \
+        >"$tmpdir/hdr.out" 2>&1; then
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    grep -F 'am1-s9 root payload exceeds zynq rootfs window' \
+        "$tmpdir/hdr.out" >/dev/null 2>&1 || {
+        rm -rf "$tmpdir"
+        return 1
+    }
 
     rm -rf "$tmpdir"
     return 0
@@ -747,13 +1116,13 @@ ZYNQ_GEOMETRY_HELPER='scripts/lib/sysupgrade_zynq_geometry.sh'
 MANIFEST_JSON='scripts/lib/sysupgrade_manifest_json.py'
 AM2_POST_IMAGE='br2_external_dcentos/board/zynq/am2-s19jpro/post-image.sh'
 AM3_S19K_POST_IMAGE='br2_external_dcentos/board/amlogic/am3-s19kpro/post-image.sh'
-AM3_S21_POST_IMAGE='br2_external_dcentos/board/amlogic/am3-s21/post-image.sh'
+AM3_S21_POST_IMAGE='br2_external_dcentos/board/amlogic/post-image-family.sh'
 AM3_S19XP_MUTATION_POLICY='br2_external_dcentos/board/amlogic/am3-s19xp/rootfs-overlay/etc/dcentos/mutation_policy'
 AM3_S19JXP_MUTATION_POLICY='br2_external_dcentos/board/amlogic/am3-s19jxp/rootfs-overlay/etc/dcentos/mutation_policy'
-AM3_S21PRO_POST_IMAGE='br2_external_dcentos/board/amlogic/am3-s21pro/post-image.sh'
-AM3_S21XP_POST_IMAGE='br2_external_dcentos/board/amlogic/am3-s21xp/post-image.sh'
+AM3_S21PRO_POST_IMAGE='br2_external_dcentos/board/amlogic/post-image-family.sh'
+AM3_S21XP_POST_IMAGE='br2_external_dcentos/board/amlogic/post-image-family.sh'
 AM3_S21XP_MUTATION_POLICY='br2_external_dcentos/board/amlogic/am3-s21xp/rootfs-overlay/etc/dcentos/mutation_policy'
-AM3_T21_POST_IMAGE='br2_external_dcentos/board/amlogic/am3-t21/post-image.sh'
+AM3_T21_POST_IMAGE='br2_external_dcentos/board/amlogic/post-image-family.sh'
 AM3_T21_POST_BUILD='br2_external_dcentos/board/amlogic/am3-t21/post-build.sh'
 AM3_T21_MUTATION_POLICY='br2_external_dcentos/board/amlogic/am3-t21/rootfs-overlay/etc/dcentos/mutation_policy'
 AMLOGIC_S46POST_INSTALL='br2_external_dcentos/board/amlogic/rootfs-overlay/etc/init.d/S46post-install'
@@ -783,6 +1152,7 @@ AM2_S17PRO_POST_BUILD='br2_external_dcentos/board/zynq/am2-s17pro/post-build.sh'
 RESTORE_ROUTE='dcentrald/dcentrald-api/src/routes/restore_to_stock.rs'
 CI_BETA_XIL_RELEASE_GATES='scripts/ci_beta_xil_release_gates.sh'
 BETA_XIL_RELEASE_NAMES='scripts/verify_beta_xil_release_names.sh'
+FIRMWARE_RELEASE_NAME='scripts/firmware_release_name.sh'
 
 require_pattern "$BB_S99" 'no NAND recovery flag or fw_env commit' 'am3-bb S99upgrade declares no NAND/fw_env commit'
 require_pattern "$BB_S99" 'dcentrald API management endpoint is reachable' 'am3-bb S99upgrade uses management-readiness wording'
@@ -824,7 +1194,7 @@ require_pattern "$PACKAGE" 'infer_package_version' 'packager infers package vers
 require_pattern "$PACKAGE" 'Package version is required for fail-closed release manifests' 'packager fails closed if version cannot be set'
 require_pattern "$PACKAGE" '"version": "$PACKAGE_VERSION"' 'packager writes a non-null manifest version'
 reject_pattern "$PACKAGE" '"version": null' 'packager does not emit null manifest version'
-require_pattern "$PRE_FLASH" 'AM3 kernel/root uImage magic valid' 'package-only validator has explicit AM3 uImage profile'
+require_pattern "$PRE_FLASH" 'AM3 root uImage + kernel arm64 Image magic valid' 'package-only validator has explicit AM3 uImage-root/arm64-kernel profile'
 require_pattern "$PRE_FLASH" 'AM3 root payload fits am3 rootfs window' 'package-only validator keeps AM3 rootfs window gate'
 require_pattern "$PRE_FLASH" 'squashfs-style root payload magic valid' 'package-only validator has squashfs-style board profile'
 require_pattern "$PRE_FLASH" 'AM3 uImage/rootfs-window checks skipped for squashfs-style' 'package-only validator does not label S9/am2 packages as AM3 uImage'
@@ -835,13 +1205,62 @@ require_pattern "$ZYNQ_GEOMETRY_HELPER" 'AM2_ZYNQ_ROOTFS_PACKAGE_LEBS=179' 'cano
 require_pattern "$ZYNQ_GEOMETRY_HELPER" 'AM2_ZYNQ_KERNEL_TAR_BOUND_BYTES=' 'canonical geometry exposes a separate pre-extraction bound'
 require_pattern "$PRE_FLASH" 'assert_payload_fits_window "$board kernel" "$kernel_size" "$ZYNQ_KERNEL_MAX_BYTES" "zynq kernel window"' 'package-only validator rejects oversized Zynq kernels'
 require_pattern "$PRE_FLASH" 'assert_payload_fits_window "$board root" "$root_size" "$ZYNQ_ROOTFS_MAX_BYTES" "zynq rootfs window"' 'package-only validator rejects oversized Zynq rootfs payloads'
+# --- AM1-A Drop-1 route-scoped geometry admission (adjudication Option A) -----
+# The am1-s9 package windows are the live-sysupgrade (self-update) volume
+# plan (owner adjudication
+#
+# Option A, ratified 2026-09-15). An over-window package may serve the
+# FIRST-INSTALL route only when its manifest carries the typed
+# self-update denial; every self-update-claiming shape still fails closed.
+require_pattern "$PACKAGE" 'AM1_S9_ROOTFS_WINDOW_ADJUDICATION.md' 'packager cites the route-scoping owner adjudication'
+require_pattern "$PACKAGE" 'AM1_S9_SELF_UPDATE_FITS=0' 'packager derives the self-update route claim from payload fit'
+require_pattern "$PACKAGE" 'S9_TOOLBOX_INSTALL_MODE=first_install_only' 'packager emits the typed first-install-only contract for over-window payloads'
+require_pattern "$PACKAGE" 'S9_TOOLBOX_UPDATE_COMMAND_JSON=null' 'packager denies self-update explicitly (null update_command) for over-window payloads'
+require_pattern "$PACKAGE" 'refusing to seal a self-update contract for an oversized package' 'packager fails closed on a self-update claim with an over-window payload'
+require_pattern "$PACKAGE" 'dcent_require_toolbox_install_contract "$S9_TOOLBOX_INSTALL_COMMAND" "$S9_TOOLBOX_INSTALL_MODE"' 'packager validates its emitted contract through the shared typed-contract machinery'
+require_pattern "$PACKAGE" 'dcent_require_toolbox_update_contract "$S9_TOOLBOX_UPDATE_COMMAND_PLAIN" "$S9_TOOLBOX_INSTALL_MODE"' 'packager validates the update-command denial through the shared typed-contract machinery'
+require_pattern "$PACKAGE" 'Drop-1 FIRST-INSTALL-ONLY package' 'packager summary honestly marks a first-install-only artifact'
+require_pattern "$PACKAGE" 'Refusing --upload of a first-install-only package' 'packager refuses the live-upload self-update rail for a first-install-only package'
+require_pattern "$PRE_FLASH" 'query-install-mode' 'package-only validator reads the route contract through the typed semantic helper'
+require_pattern "$PRE_FLASH" 'self-update window admission waived' 'package-only validator records the first-install-only window waiver'
+require_pattern "$PRE_FLASH" 'is not an admitted route contract' 'package-only validator rejects unadmitted toolbox route values'
+require_pattern "$MANIFEST_JSON" 'first_install_only' 'semantic manifest helper knows the first-install-only route contract'
+require_pattern "$MANIFEST_JSON" 'require_install_mode_contract' 'semantic manifest helper exposes the typed route-contract admission'
+require_pattern "$SYSUPGRADE_COMMON" 'first_install_only)' 'shared typed-contract machinery admits the first_install_only install mode'
+require_pattern "$SYSUPGRADE_COMMON" 'first-install-only metadata must not advertise an update command' 'shared typed-contract machinery refuses an update command under the first-install-only denial'
+# First-install capacity admission (merge-critic follow-up, both critics):
+# the waiver is bounded by the stock two-reboot transaction's HARD phase-2
+# volumes — kernel -s 8MiB / rootfs -s 20MiB
+# (dcent-toolbox/src/dcent_toolbox/core/stage1_builder.py:640/:642). Defined
+# ONCE in scripts/lib/am1_s9_first_install_capacity.sh and enforced at both
+# seal time (packager) and pre-flash waiver time.
+AM1_S9_FI_CAPACITY='scripts/lib/am1_s9_first_install_capacity.sh'
+require_pattern "$AM1_S9_FI_CAPACITY" 'AM1_S9_FIRST_INSTALL_KERNEL_MAX_BYTES=$((8 * 1024 * 1024))' 'first-install capacity helper pins the 8MiB stock kernel volume'
+require_pattern "$AM1_S9_FI_CAPACITY" 'AM1_S9_FIRST_INSTALL_ROOTFS_MAX_BYTES=$((20 * 1024 * 1024))' 'first-install capacity helper pins the 20MiB stock rootfs volume'
+require_pattern "$AM1_S9_FI_CAPACITY" 'stage1_builder.py:640' 'first-install capacity helper cites the hard kernel volume site'
+require_pattern "$AM1_S9_FI_CAPACITY" 'stage1_builder.py:642' 'first-install capacity helper cites the hard rootfs volume site'
+require_pattern "$AM1_S9_FI_CAPACITY" 'dcent_am1_s9_require_first_install_capacity' 'first-install capacity helper exposes the admission proof'
+require_pattern "$PACKAGE" 'dcent_am1_s9_require_first_install_capacity "$KERNEL_SIZE" "$ROOTFS_SIZE"' 'packager refuses to seal a first-install-only package beyond the stock-transaction capacity'
+require_pattern "$PACKAGE" 'no installable route; refusing to seal' 'packager names the both-windows-and-capacity refusal'
+require_pattern "$PRE_FLASH" 'am1-s9 first-install-only waiver is bounded' 'pre-flash waiver is bounded by the stock-transaction capacity'
+require_pattern "$PRE_FLASH" 'am1_s9_first_install_capacity.sh' 'pre-flash validator sources the canonical first-install capacity helper'
+require_pattern "$PRE_FLASH" '[ "$board" = "am1-s9" ] && [ "$install_mode" = "first_install_only" ]' 'pre-flash waiver conjunct is am1-s9 AND first_install_only only (board and mode scope pinned textually)'
+# --- end AM1-A route-scoped admission coverage ---------------------------------
 require_pattern "$PRE_FLASH" 'am1-s9|am2-s19j|am2-s19jpro|am2-s19pro|am2-s17p)' 'package-only validator covers all admitted Zynq board identities'
 require_pattern "$PRE_FLASH" 'validate_package_only "$TARBALL" "am1-s9"' 'am1-s9 live pre-flash validates the package before declaring backup-floor success (CE-352)'
 require_pattern "$BUILD_DOCKER" 'BOARD_PKG_NAME="am1-s9"' 'S9 build target retains exact am1-s9 package identity'
-require_exact_line "$BUILD_DOCKER" '            s9|am3-s19kpro|am3-s19xp|am3-s19jxp|am3-s19jproplus|am3-s21|am3-s21pro|am3-s21xp|am3-s19jpro-aml|am3-t21|am2-s19jpro|am2-s19pro)' 'build_in_docker structurally validates active packages plus explicitly non-installable S21 XP/T21 recipes'
-require_exact_line "$BUILD_DOCKER" '            am3-bb|am3-bb-s19jpro)' 'build_in_docker keeps BB targets on their distinct SD-card validation branch'
+require_exact_line "$BUILD_DOCKER" '            s9|am3-s19kpro|am3-s19kpro-nopic|am3-s19xp|am3-s19jxp|am3-s19jproa|am3-s19jproplus|am3-s21|am3-s21pro|am3-s21xp|am3-s19jpro-aml|am3-t21|am2-s19jpro|am2-s19pro)' 'build_in_docker structurally validates its remaining sysupgrade tar recipes'
+require_pattern "$BUILD_DOCKER" 'if [ "$BOARD_POST_IMAGE" != native-sd ]; then' 'native SD outputs select their actual media validator outside the tar branch'
+require_pattern "$BUILD_DOCKER" 'python3 "$SCRIPT_DIR/release_producer.py" verify-native-media' 'native SD export invokes the independent current-media reader'
+require_ordered_patterns "$BUILD_DOCKER" '-sigfile "$OUTPUT_DIR/$TARBALL_NAME.sig" -in "$OUTPUT_DIR/$TARBALL_NAME"' 'python3 "$SCRIPT_DIR/release_producer.py" verify-native-media' 'native media validation follows actual outer artifact signing and verification'
+require_exact_line "$BUILD_DOCKER" '            am3-bb|am3-bb-s19jpro|am3-bb-s19jpro-payload)' 'build_in_docker keeps BB payload targets on their distinct SD-card payload validation branch'
 require_pattern "$BUILD_DOCKER" 'SD-card payload validation:' 'BB export validation remains SD-card-specific, not sysupgrade package validation'
 require_pattern "$BUILD_DOCKER" 'Package-only non-installable validation:' 'build_in_docker gives am2-s17pro a distinct non-installable validation lane'
+require_pattern "$BUILD_DOCKER" 'find buildroot/output/build -mindepth 2 -maxdepth 2 -name .applied_patches_list' 'evidence sweep removes unrecoverable half-patched package state before legal-info'
+require_pattern "$BUILD_DOCKER" '[ ! -e "$package_dir/.stamp_patched" ]' 'evidence sweep removes dirs whose patch stamp is missing'
+require_pattern "$BUILD_DOCKER" '.stamp_patched" -ot "$package_dir/.stamp_extracted"' 'evidence sweep also heals patch stamps older than their extract prerequisite'
+require_pattern "$BUILD_DOCKER" 'rm -rf "$package_dir"' 'evidence sweep completes the package-dir removal its detection prescribes'
+require_pattern "$BUILD_DOCKER" 'echo "fund_url=https://d-central.tech/fund/"' 'release metadata carries the fund link the train publication gate scans for'
 require_pattern "$BUILD_DOCKER" 'trap "rm -rf -- \"$PACKAGE_ONLY_TMP\"" EXIT HUP INT TERM' 'am2-s17pro package validator cleanup stays inside the container-script quoting boundary'
 require_pattern "$BUILD_DOCKER" 'S17 package-only manifest must declare installable=false' 'am2-s17pro wrapper preserves package-only denial'
 require_pattern "$BUILD_DOCKER" 'extract_am2_s17_kernel.py verify-fit' 'am2-s17pro wrapper re-admits the exact model-bound FIT after export'
@@ -929,7 +1348,18 @@ require_pattern "$BUILD_DOCKER" 'ERROR (DEVOPS-002): no expected SHA256 pinned' 
 require_pattern "$BUILD_DOCKER" 'TOOLCHAIN_SHA256_MANDATORY=1' 'docker release build makes toolchain SHA mismatch mandatory'
 require_pattern "$CI_BETA_XIL_RELEASE_GATES" 'verify_beta_xil_release_names.sh' 'Xilinx beta release gate verifies release-name/packet consistency before artifact checks'
 require_pattern "$BETA_XIL_RELEASE_NAMES" 'firmware_release_name.sh' 'Xilinx beta release-name verifier derives names from the canonical helper'
-if sh "$BETA_XIL_RELEASE_NAMES" >/dev/null; then
+require_pattern "$FIRMWARE_RELEASE_NAME" 'am2-t17e)              stem="DCENTOS_XIL2_T17e"' 'BM1396 ext2 lane t17e has its canonical publication name (drop1-20260922 latent: missing arm would exit the capsule at the provenance gate)'
+require_pattern "$FIRMWARE_RELEASE_NAME" 'am2-s17e)              stem="DCENTOS_XIL2_S17e"' 'BM1396 ext2 lane s17e has its canonical publication name'
+require_pattern "$FIRMWARE_RELEASE_NAME" 'am2-s19a)              stem="DCENTOS_XIL3_S19a"' 'BM1398 lane s19a has its canonical publication name (second half of the drop1-20260922 name sweep)'
+require_pattern "$FIRMWARE_RELEASE_NAME" 'am2-s19plus)           stem="DCENTOS_XIL3_S19Plus"' 'BM1398 lane s19plus has its canonical publication name'
+require_pattern 'br2_external_dcentos/configs/dcentos_am3_bb_s19jpro_defconfig' 'BR2_TOOLCHAIN_EXTERNAL_FORTRAN=y' 'BB producer defconfig declares the Linaro toolchain Fortran capability (drop1-20260922 run-25 lane 20 latent: available-but-unselected is a hard toolchain check error)'
+require_pattern 'br2_external_dcentos/configs/dcentos_am3_bb_s19jpro_defconfig' 'BR2_TOOLCHAIN_EXTERNAL_OPENMP=y' 'BB producer defconfig declares the Linaro toolchain OpenMP capability'
+require_pattern 'br2_external_dcentos/configs/dcentos_am3_bb_defconfig' 'BR2_TOOLCHAIN_EXTERNAL_FORTRAN=y' 'BB base defconfig declares the Linaro toolchain Fortran capability'
+require_pattern 'br2_external_dcentos/configs/dcentos_am3_bb_defconfig' 'BR2_TOOLCHAIN_EXTERNAL_OPENMP=y' 'BB base defconfig declares the Linaro toolchain OpenMP capability'
+reject_pattern "$BUILD_DOCKER" 'grep -qx "etc/dcentos/rescue_ssh_enabled"' 'BB payload validation follows release posture: the rescue marker is stripped from release images and must not be demanded'
+if [ "$TIER" = blocking ]; then
+    printf 'NIGHTLY: committed Xilinx publication packet/checksum metadata\n'
+elif sh "$BETA_XIL_RELEASE_NAMES" >/dev/null; then
     pass "Xilinx beta release-name verifier passes on committed packet/checksum metadata"
 else
     fail "Xilinx beta release-name verifier failed"
@@ -971,7 +1401,8 @@ require_pattern "$VERSION_GATE" 'binary string $actual_string != expected $expec
 require_pattern "$VERSION_GATE" 'staged version $staged_version from $staged_source != Cargo workspace version $cargo_version' 'dcentrald version gate compares staged metadata to Cargo workspace version'
 require_pattern "$VERSION_GATE" 'DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1' 'dcentrald version gate uses existing explicit lab override pattern'
 require_pattern "$PACKAGE" 'dcent_require_dcentrald_version_match' 'standalone packager gates staged dcentrald version when target dir is present'
-require_pattern 'scripts/build_in_docker.sh' 'build_in_docker Phase 5' 'docker build validates staged ARM dcentrald before Buildroot'
+require_pattern 'scripts/build_in_docker.sh' 'phase5_stage_binaries.sh' 'docker build wires the file-delivered Phase 5 staging script'
+require_pattern 'scripts/phase5_stage_binaries.sh' 'build_in_docker Phase 5' 'docker build validates staged ARM dcentrald before Buildroot'
 require_pattern "$BUILD_DOCKER" '--lab-unsigned' 'docker build requires explicit lab unsigned flag'
 require_pattern "$BUILD_DOCKER" 'release sysupgrade builds require DCENT_RELEASE_SIGNING_KEY' 'docker build fails closed for unsigned release sysupgrade builds'
 reject_pattern "$BUILD_DOCKER" 'DCENT_ALLOW_UNSIGNED_SYSUPGRADE="${DCENT_ALLOW_UNSIGNED_SYSUPGRADE:-1}"' 'docker build does not default to unsigned lab override'
@@ -1009,27 +1440,27 @@ require_pattern "$AM3_S19K_POST_IMAGE" 'DCENT_TOOLBOX_INSTALL_MODE=host_driven_r
 require_pattern "$AM3_S19K_POST_IMAGE" 'DCENT_PACKAGE_INSTALLABLE=true' 'am3-s19k package is structurally installable after its release prerequisites pass'
 require_pattern "$AM3_S19K_POST_IMAGE" 'DCENT_TOOLBOX_INSTALL_COMMAND="dcent install <ip>' 'am3-s19k metadata emits the guarded host install command'
 require_pattern "$AM3_S19K_POST_IMAGE" 'DCENT_TOOLBOX_UPDATE_COMMAND="$DCENT_TOOLBOX_INSTALL_COMMAND"' 'am3-s19k update remains the same guarded host transaction'
-require_pattern "$AM3_S19K_POST_IMAGE" 'DCENT_S19K_EXPECTED_RELEASE_KEY_SHA256' 'am3-s19k build requires an externally pinned release key'
-require_pattern "$AM3_S19K_POST_IMAGE" 's19k_persistent_image_verify.py' 'am3-s19k build runs the dependency-bound image contract verifier'
-require_pattern "$AM3_S19K_POST_IMAGE" 'CLEAR_FOR_FLASH=false' 'am3-s19k packaged writer remains disabled'
+require_pattern 'scripts/s19k_hermetic_image_producer.py' 'DCENT_S19K_EXPECTED_RELEASE_KEY_SHA256' 'am3-s19k build requires an externally pinned release key'
+require_pattern 'scripts/s19k_hermetic_image_producer.py' 's19k_persistent_image_verify.py' 'am3-s19k build runs the dependency-bound image contract verifier'
+require_pattern 'scripts/s19k_persistent_image_verify.py' 'CLEAR_FOR_FLASH=false' 'am3-s19k packaged writer remains disabled'
 reject_pattern "$AM3_S19K_POST_IMAGE" 'dcent ota update-fleet <ip>' 'am3-s19k build artifacts do not advertise fleet OTA'
 require_pattern "$AM3_S21_POST_IMAGE" 'host_driven_rootfs_window_lab' 'am3-s21 metadata marks host-driven lab install'
 # 2026-08-15: every manifest-bearing Amlogic package advertises the fleet OTA
 # update command for the same guarded rootfs-window rail (the packaging-side
 # update contract selftest above enforces the safety shape of this string).
 require_pattern "$AM3_S21_POST_IMAGE" 'DCENT_TOOLBOX_UPDATE_COMMAND="dcent ota update-fleet <ip> -f ${OUTPUT_BASENAME} --artifact-dir <restore_verified_dir>"' 'am3-s21 metadata advertises the fleet OTA update command'
-require_pattern "$AM3_S21PRO_POST_IMAGE" 'DCENT_TOOLBOX_UPDATE_COMMAND="dcent ota update-fleet <ip> -f dcentos-sysupgrade-am3-s21pro.tar --artifact-dir <restore_verified_dir>"' 'am3-s21pro metadata advertises the fleet OTA update command'
+require_pattern "$AM3_S21PRO_POST_IMAGE" 'DCENT_TOOLBOX_UPDATE_COMMAND="dcent ota update-fleet <ip> -f ${OUTPUT_BASENAME} --artifact-dir <restore_verified_dir>"' 'am3-s21pro metadata advertises the fleet OTA update command'
 require_pattern "$AM3_S21_POST_IMAGE" 'am3-s19xp)' 'shared A113D packager has an exact S19 XP package-only branch'
 require_pattern "$AM3_S21_POST_IMAGE" 'am3-s19jxp)' 'shared A113D packager has an exact S19j XP package-only branch'
 require_pattern "$AM3_S21_POST_IMAGE" 'PACKAGE_STORAGE_AUTHORIZED=0' 'X19 AML package branches deny storage geometry'
 require_pattern "$AM3_S21_POST_IMAGE" 'DCENT_TOOLBOX_INSTALL_MODE=package_only_denied' 'shared A113D metadata can deny X19 AML installation'
 require_pattern "$AM3_S21_POST_IMAGE" 'DCENT_PACKAGE_INSTALLABLE=false' 'shared A113D package-only branches are explicitly non-installable'
-require_exact_line "$AM3_S19XP_MUTATION_POLICY" 'management-only' 'am3-s19xp rootfs carries an immutable management-only mutation policy'
-require_exact_line "$AM3_S19JXP_MUTATION_POLICY" 'management-only' 'am3-s19jxp rootfs carries an immutable management-only mutation policy'
+require_exact_line "$AM3_S19XP_MUTATION_POLICY" 'hardware-enabled' 'am3-s19xp runtime policy enables its admitted native owner; package storage/install guards remain separate'
+require_exact_line "$AM3_S19JXP_MUTATION_POLICY" 'hardware-enabled' 'am3-s19jxp runtime policy enables its admitted native owner; package storage/install guards remain separate'
 require_pattern "$AM3_S21XP_POST_IMAGE" 'DCENT_TOOLBOX_INSTALL_MODE=package_only_denied' 'am3-s21xp metadata denies installation while its platform/storage contracts remain unproven'
 require_pattern "$AM3_S21XP_POST_IMAGE" 'DCENT_PACKAGE_INSTALLABLE=false' 'am3-s21xp package-validation artifact is explicitly non-installable'
 require_pattern "$AM3_S21XP_POST_IMAGE" 'DCENT_TOOLBOX_UPDATE_COMMAND=""' 'am3-s21xp metadata emits no fleet OTA command'
-require_exact_line "$AM3_S21XP_MUTATION_POLICY" 'management-only' 'am3-s21xp rootfs carries an immutable management-only mutation policy'
+require_exact_line "$AM3_S21XP_MUTATION_POLICY" 'hardware-enabled' 'am3-s21xp runtime policy enables its admitted native owner; package storage/install guards remain separate'
 require_pattern "$AM3_T21_POST_IMAGE" 'DCENT_TOOLBOX_INSTALL_MODE=package_only_denied' 'am3-t21 metadata denies installation while storage geometry remains unproven'
 require_pattern "$AM3_T21_POST_IMAGE" 'DCENT_PACKAGE_INSTALLABLE=false' 'am3-t21 package-validation artifact is explicitly non-installable'
 require_pattern "$AM3_T21_POST_IMAGE" 'DCENT_TOOLBOX_UPDATE_COMMAND=""' 'am3-t21 metadata emits no fleet OTA command'
@@ -1042,16 +1473,19 @@ reject_pattern "$AMLOGIC_S99UPGRADE" 'am3-s19jpro-aml|am3-s21|am3-s21pro|am3-s21
 reject_pattern "$AMLOGIC_S99UPGRADE" 'am3-s19jpro-aml|am3-s21|am3-s21pro|am3-t21' 'am3-t21 is excluded from the raw-NAND OTA-08 identity gate'
 require_ordered_patterns "$AMLOGIC_S99UPGRADE" 'require_ota_mutation_policy || exit 1' 'replay_pending_env_clear' 'am3 OTA policy gate precedes WAL replay and fw_setenv mutation'
 reject_pattern "$AM3_T21_POST_BUILD" 'cp "$REVERT_T21_SRC"' 'am3-t21 rootfs does not stage an unproven revert helper'
-reject_pattern "$AM3_T21_POST_IMAGE" 'scripts/lib/am3_geometry.sh' 'am3-t21 package recipe does not import S19K/S21 flash geometry'
+require_pattern "$AM3_T21_POST_IMAGE" 'if [ "$PACKAGE_STORAGE_AUTHORIZED" = "1" ]; then' 'shared recipe imports flash geometry only inside the authorized storage branch'
 reject_pattern 'br2_external_dcentos/board/amlogic/am3-s21xp/post-build.sh' 'cp "$REVERT_S21_SRC"' 'am3-s21xp rootfs does not stage an inherited base-S21 revert helper'
-reject_pattern "$AM3_S21XP_POST_IMAGE" 'scripts/lib/am3_geometry.sh' 'am3-s21xp package recipe does not import shared AM3 flash geometry'
+require_pattern "$AM3_S21XP_POST_IMAGE" 'am3-s21xp|am3-t21)' 'shared recipe binds S21XP and T21 to the denied storage branch'
 require_pattern "$AM3_S19K_POST_IMAGE" 'structurally installable for the host extractor, but it grants no writer' 'am3-s19k unsigned A/B package distinguishes structural installability from mutation authority'
-require_pattern "$AM3_S19JPRO_AML_POST_IMAGE" 'DCENT_TOOLBOX_UPDATE_COMMAND="dcent ota update-fleet <ip> -f dcentos-sysupgrade-am3-s19jpro-aml.tar --artifact-dir <restore_verified_dir>"' 'am3-s19jpro-aml metadata advertises the fleet OTA update command'
+# L12 posture (2026-09-15): Classic (am3-s19jpro-aml) has no compatible
+# persistent writer (mtd5=config, mtd6=nvdata; six-MTD writer incompatible),
+# so its metadata must advertise NO fleet OTA update command — pin the refusal.
+require_pattern "$AM3_S19JPRO_AML_POST_IMAGE" 'DCENT_TOOLBOX_UPDATE_COMMAND=""' 'am3-s19jpro-aml metadata advertises no fleet OTA command (six-MTD writer incompatible)'
 require_pattern "$AM3_GEOMETRY" 'DCENT_AM3_ROOTFS_OFFSET_HEX="${DCENT_AM3_ROOTFS_OFFSET_HEX:-0x05100000}"' 'am3 geometry centralizes rootfs offset'
 require_pattern "$AM3_GEOMETRY" 'DCENT_AM3_ROOTFS_WINDOW_HEX="${DCENT_AM3_ROOTFS_WINDOW_HEX:-0x02800000}"' 'am3 geometry centralizes rootfs window'
 require_pattern "$AM3_S21_REVERT" 'ROOTFS_OFFSET="$DCENT_AM3_ROOTFS_OFFSET_HEX"' 'am3-s21 revert uses shared rootfs offset'
 require_pattern "$RESTORE_ROUTE" '.arg(&post_dwell_fp.sha256)' 'restore route passes post-dwell SHA into revert helper'
-require_pattern "$S9_REVERT" 'S9 stock restore is disabled' 'S9 stock restore is an explicit containment boundary'
+require_pattern "$S9_REVERT" 'exec python3 -m dcent_toolbox.cli.stock_revert "$@" --require-board-target am1-s9' 'S9 owner-host restore delegates to the exact saved-source transaction'
 reject_executable_pattern "$S9_REVERT" 'EXPECTED_SHA256=' 'contained S9 helper does not inspect an image'
 for revert_script in "$S17_REVERT" "$AM3_S21_REVERT"; do
     require_pattern "$revert_script" 'EXPECTED_SHA256=' "stock revert helper $(basename "$revert_script") accepts expected SHA"
@@ -1403,14 +1837,17 @@ CV1835_FW_ENV='br2_external_dcentos/board/cvitek/cv1835-s19jpro/rootfs-overlay/e
 require_pattern "$CV1835_SAFE_SU" 'exit 78' 'cv1835 updater exits with unconditional unavailable status'
 require_pattern "$CV1835_REVERT" 'exit 78' 'cv1835 stock-revert exits with unconditional unavailable status'
 require_pattern "$CV1835_BUILD" 'exit 78' 'cv1835 standalone build entry point refuses every artifact lane'
-require_pattern "$CV1835_POST_BUILD" 'exit 78' 'cv1835 post-build hook refuses direct Buildroot invocation'
-require_pattern "$CV1835_POST_IMAGE" 'exit 78' 'cv1835 post-image hook refuses direct Buildroot invocation'
 require_pattern "$CV1835_SAFE_SU" 'BuiltInVolatile/mutation-denied' 'cv1835 updater records the evidenced volatile environment backend'
 reject_pattern "$CV1835_SAFE_SU" 'DCENT_ALLOW_UNSIGNED_SYSUPGRADE' 'cv1835 updater has no proof or unsigned-package override'
 if [ ! -e "$CV1835_FW_ENV" ] && [ ! -L "$CV1835_FW_ENV" ]; then
     pass 'cv1835 guessed fw_env.config remains absent'
 else
     fail 'cv1835 guessed fw_env.config was reintroduced'
+fi
+if [ ! -e 'br2_external_dcentos/board/cvitek/cv1835-s19jpro' ]; then
+    pass 'cv1835 orphan board overlay remains deleted'
+else
+    fail 'cv1835 orphan board overlay was reintroduced'
 fi
 # --- end CV1835 brick-vector retirement -------------------------------------
 
@@ -1552,6 +1989,11 @@ if zynq_payload_window_selftest; then
 else
     fail "zynq package-only selftest failed"
 fi
+if s9_route_scoped_window_selftest; then
+    pass "S9 route-scoped admission: over-window first-install-only package passes within the stock-transaction capacity bounds; over-capacity rootfs/kernel, self-update-claiming, legacy, tampered, wrong-board, and wrong-mode shapes all fail closed; fitting dual-route unchanged"
+else
+    fail "S9 route-scoped window admission behavioral selftest failed"
+fi
 if s9_export_validation_selftest; then
     pass "S9 export validation accepts a bound package and rejects wrong prefix/board, bare zImage, bad binding, and oversized kernel"
 else
@@ -1567,6 +2009,59 @@ if python3 scripts/test_sysupgrade_manifest_json.py >/dev/null; then
 else
     fail "semantic manifest JSON/version contract test failed"
 fi
+
+# --- Interpreter pinning for in-recipe host python (run
+# --- drop1-20260918-xtleogkg): Buildroot's make puts its minimal host
+# --- python3 first on PATH; release_native_sd.py and the bm1396 media
+# --- scripts need the container system python's python3-cryptography.
+# --- Static pins so a reverted pin fails offline instead of at the next
+# --- producer run.
+NATIVE_SD_POST_BUILD='scripts/release_native_sd_post_build.sh'
+NATIVE_SD_POST_IMAGE='scripts/release_native_sd_post_image.sh'
+BM1396_SD='scripts/build_sd_bm1396.sh'
+POST_IMAGE_17F='br2_external_dcentos/board/zynq/post-image-17-family.sh'
+for dcent_pinned_script in "$NATIVE_SD_POST_BUILD" "$NATIVE_SD_POST_IMAGE" "$BM1396_SD" "$POST_IMAGE_17F"; do
+    [ -f "$dcent_pinned_script" ] || fail "interpreter-pinned script missing: $dcent_pinned_script"
+done
+require_pattern "$NATIVE_SD_POST_BUILD" 'exec /usr/bin/python3 "$here/release_native_sd.py"' 'native-SD post-build pins the system python'
+require_pattern "$NATIVE_SD_POST_IMAGE" 'exec /usr/bin/python3 "$here/release_native_sd.py"' 'native-SD post-image pins the system python'
+require_pattern "$BM1396_SD" '/usr/bin/python3 "$dcent_script_dir/prepare_bm1396_sd_image.py" assemble' 'BM1396 media assembly pins the system python'
+require_pattern "$BM1396_SD" '/usr/bin/python3 "$dcent_script_dir/prepare_bm1396_sd_image.py" data-uuid' 'BM1396 data-uuid stage pins the system python'
+require_pattern "$BM1396_SD" '/usr/bin/python3 "$dcent_script_dir/prepare_bm1396_sd_image.py" root' 'BM1396 root stage pins the system python'
+require_pattern "$BM1396_SD" '/usr/bin/python3 "$dcent_script_dir/prepare_bm1396_sd_boot.py"' 'BM1396 boot stage pins the system python'
+require_pattern "$POST_IMAGE_17F" '/usr/bin/python3 "$PROJECT_ROOT/scripts/release_native_sd.py"' '17-family native SD assembly pins the system python'
+# Filesystem tools: Buildroot's host e2fsprogs 1.47.x shadows the container
+# system 1.46.x inside make recipes; the pristine ext4 schema is pinned to
+# the system tool bytes (run drop1-20260919-yomed_3s).
+NATIVE_SD_PY='scripts/release_native_sd.py'
+[ -f "$NATIVE_SD_PY" ] || fail "interpreter-pinned script missing: $NATIVE_SD_PY"
+require_pattern "$NATIVE_SD_PY" 'command("/usr/sbin/mke2fs"' 'native-SD ext4 creation pins the system mke2fs'
+require_pattern "$NATIVE_SD_PY" 'arguments = ["/usr/sbin/mke2fs"' 'native-SD new_filesystem pins the system mke2fs'
+require_pattern "$NATIVE_SD_PY" 'command("/usr/sbin/e2fsck"' 'native-SD ext4 check pins the system e2fsck'
+require_pattern "$NATIVE_SD_PY" 'command("/usr/sbin/debugfs"' 'native-SD fallocate pins the system debugfs'
+require_pattern "$NATIVE_SD_PY" 'command("/usr/sbin/mkfs.fat"' 'native-SD FAT creation pins the system mkfs.fat'
+require_pattern "$NATIVE_SD_PY" 'command("/usr/bin/mcopy"' 'native-SD FAT copy pins the system mcopy'
+require_pattern "$NATIVE_SD_PY" 'command("/usr/bin/mtype"' 'native-SD FAT readback pins the system mtype'
+require_pattern "$NATIVE_SD_PY" 'command("/usr/bin/mksquashfs"' 'native-SD squashfs pins the system mksquashfs'
+require_pattern "$NATIVE_SD_PY" '*(["-Xbcj", "arm"] if selected["board_family"] != "am1" else [])' 'native-SD am2 squashfs carries the ARM BCJ filter, am1 excluded (179-LEB window)'
+require_pattern "$NATIVE_SD_PY" 'remove_flat_tree(root, "etc/dcentos/xil25-seed")' 'native-SD strips the XIL .25 NAND-bake seed from removable media'
+require_pattern "$NATIVE_SD_PY" 'if source_board == "am2-s19j":' 'native-SD seed strip applies only to the s19j base that stages it'
+require_pattern "$NATIVE_SD_PY" 'remove(root, "usr/local/bin/dcentrald_standalone_boot.sh")' 'native-SD strips the .25 auto-pinned launcher'
+require_pattern "$NATIVE_SD_PY" 'unexpected XIL .25 seed staging in base:' 'native-SD refuses the seed on any base that does not stage it'
+require_pattern "$NATIVE_SD_PY" '"etc/dcentos/psu_config", "etc/dcentos/rail_gpio",' 'native-SD strips the am2 XIL-bake PSU/rail declarations'
+require_pattern "$NATIVE_SD_PY" '"etc/dcentos/partial_yield_floor", "etc/dcentos/fan_max_pwm",' 'native-SD strips the am2 yield/fan tuning declarations'
+# The toolbox validator is the second wall: a strip regression must fail
+# release verification, not ship. The suite imports this package, so the
+# sibling repo is already a hard prerequisite here.
+TOOLBOX_NATIVE_VALIDATOR='../dcent-toolbox/src/dcent_toolbox/core/current_native_release.py'
+require_pattern "$TOOLBOX_NATIVE_VALIDATOR" '"etc/dcentos/psu_config", "etc/dcentos/rail_gpio", "etc/dcentos/partial_yield_floor",' 'toolbox native validator forbids the PSU/rail declarations'
+require_pattern "$TOOLBOX_NATIVE_VALIDATOR" '"etc/dcentos/fan_max_pwm", "etc/init.d/S81dcentos-xil25-seed",' 'toolbox native validator forbids the fan tuning file and the XIL seed service'
+require_pattern "$BM1396_SD" '/usr/sbin/mke2fs -q -F -t ext2' 'BM1396 rootfs pins the system mke2fs'
+require_pattern "$BM1396_SD" '/usr/sbin/mke2fs -q -F -t ext4' 'BM1396 data pins the system mke2fs'
+require_pattern "$BM1396_SD" '/usr/sbin/e2fsck -f -n' 'BM1396 checks pin the system e2fsck'
+require_pattern "$BM1396_SD" '/usr/sbin/mkfs.vfat -F 32' 'BM1396 boot pins the system mkfs.vfat'
+require_pattern "$BM1396_SD" '/usr/bin/unsquashfs -processors' 'BM1396 rootfs unpack pins the system unsquashfs'
+require_pattern "$PRE_FLASH" '--package-only-noninstallable' 'denied-contract packages verify signatures in the non-installable mode'
 if release_image_hardening_coupling_selftest; then
     pass "CE-183 release-status packaging fails closed without release-image hardening and no-ops for lab status"
 else

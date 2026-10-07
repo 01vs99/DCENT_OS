@@ -45,7 +45,7 @@ impl From<&BoardDesc> for InstallMatrixRow {
             work_engine: d.work_engine,
             voltage_controller: d.voltage_controller,
             enablement: d.enablement,
-            public_beta_install: d.public_beta_install,
+            public_beta_install: d.public_beta_install(),
             mining_default_enabled: d.mining_default_enabled,
             product_install_allowed: d.product_install_allowed(),
             ab_sysupgrade: matches!(
@@ -177,21 +177,35 @@ mod tests {
     }
 
     #[test]
-    fn am1_s9se_is_denied_management_only() {
-        let row = install_matrix()
-            .into_iter()
-            .find(|row| row.board_target == "am1-s9se")
-            .expect("am1-s9se must be in the install matrix");
-        assert!(!row.public_beta_install);
-        assert!(!row.mining_default_enabled);
-        assert!(!row.product_install_allowed);
-        assert!(!row.persistent_update_allowed);
-        assert!(!row.external_media_write_allowed);
-        assert_eq!(
-            row.enablement.install_authorization,
-            InstallAuthorization::Denied
-        );
-        assert_eq!(row.chain_transport, ChainTransportKind::None);
+    fn c43_native_cards_allow_external_media_without_onboard_writer_authority() {
+        for target in ["am1-s9se", "am1-s9k"] {
+            let row = install_matrix()
+                .into_iter()
+                .find(|row| row.board_target == target)
+                .expect("C43 matrix row");
+            assert!(!row.public_beta_install);
+            assert!(!row.mining_default_enabled);
+            assert!(!row.product_install_allowed);
+            assert!(!row.persistent_update_allowed);
+            assert!(row.external_media_write_allowed);
+            assert_eq!(
+                row.enablement.install_authorization,
+                InstallAuthorization::Denied
+            );
+            assert_eq!(
+                row.enablement.external_media_authorization,
+                InstallAuthorization::LabOnly
+            );
+            assert_eq!(
+                row.enablement.external_media_maturity,
+                ExternalMediaMaturity::ArtifactGenerated
+            );
+            assert_eq!(
+                row.enablement.external_media_mode,
+                ExternalMediaMode::BootOnly
+            );
+            assert_eq!(row.chain_transport, ChainTransportKind::StockFpga);
+        }
     }
 
     #[test]
@@ -227,7 +241,17 @@ mod tests {
             );
             if matches!(
                 row.board_target,
-                "am3-s19xp" | "am3-s19jxp" | "am3-s21xp" | "am3-t21"
+                // The Unknown-storage rows: native runtime shipped/implemented,
+                // but no persistent install geometry is admitted. 2026-09-12
+                // (drift13 #6a / R10 board join): am3-s19jproa joins with the
+                // PACKAGE_ONLY promotion — its shipped package surface
+                // (shared am3-bm1362-nopic builder, package_only_denied)
+                // claims no storage writer.
+                "am3-s19xp" | "am3-s19jxp" | "am3-s21xp" | "am3-t21" | "am3-s19jproa"
+                // L12 retirement (2026-09-15): Classic has no compatible
+                // persistent writer (mtd5=config, mtd6=nvdata) — Unknown
+                // topology, no storage writer claimed.
+                | "am3-s19jpro-aml"
             ) {
                 assert_eq!(row.enablement.storage_topology, StorageTopology::Unknown);
                 assert_eq!(row.enablement.update_mechanism, UpdateMechanism::None);
@@ -296,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn s17_package_only_artifact_grants_no_update_or_media_authority() {
+    fn s17_native_card_grants_media_without_onboard_update_authority() {
         let row = install_matrix()
             .into_iter()
             .find(|row| row.board_target == "am2-s17p")
@@ -314,9 +338,20 @@ mod tests {
             row.enablement.artifact_maturity,
             ArtifactMaturity::Experimental
         );
-        assert_eq!(row.enablement.external_media_mode, ExternalMediaMode::None);
+        assert_eq!(
+            row.enablement.external_media_mode,
+            ExternalMediaMode::BootOnly
+        );
+        assert_eq!(
+            row.enablement.external_media_maturity,
+            ExternalMediaMaturity::ArtifactGenerated
+        );
+        assert_eq!(
+            row.enablement.external_media_authorization,
+            InstallAuthorization::LabOnly
+        );
         assert!(!row.persistent_update_allowed);
-        assert!(!row.external_media_write_allowed);
+        assert!(row.external_media_write_allowed);
         assert!(!row.product_install_allowed);
         assert!(!row.public_beta_install);
     }

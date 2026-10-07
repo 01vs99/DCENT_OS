@@ -1,3 +1,4 @@
+import { DCENT_DOCS_URL, fundContributeUrl } from '../../utils/links';
 import React, { useEffect, useState } from 'react';
 import { useMinerStore } from '../../store/miner';
 import { api } from '../../api/client';
@@ -6,6 +7,8 @@ import { DonationFeeCard } from './DonationFeeCard';
 import { ApiCompatibilityManifestCard } from './ApiCompatibilityManifestCard';
 import { NetworkInfoCard } from './NetworkInfoCard';
 import { MinerTypeCard } from './MinerTypeCard';
+import { BuildPanel } from './BuildPanel';
+import { ReportProblem } from './ReportProblem';
 
 // CC-2: neutral fallbacks. The previous S9-specific literals (Antminer S9 /
 // BM1387 / Zynq-7010) would assert a specific WRONG identity on a non-S9 unit
@@ -73,6 +76,8 @@ export function AboutPage() {
       </AboutCard>
 
       <ApiCompatibilityManifestCard />
+      <BuildPanel />
+      <ReportProblem />
 
       {/* Hardware Info */}
       <AboutCard title="Hardware">
@@ -110,24 +115,26 @@ export function AboutPage() {
         <DonationFeeCard variant="compact" />
       </AboutCard>
 
-      {/* W9.7 (Wave-4 honest-claims revision): "Coming from VNish?" copy.
-          The public CHANGELOG asks the firmware to make the competitor
-          devfee contrast explicit, but it must stay factual and
-          non-disparaging. VNish builds carry a binary-baked developer fee
-          (~2-3% per D-Central's reverse-engineering); DCENT_OS's donation
-          is 0-5% configurable, clearly labelled as a donation, and fully
-          disableable. Every claim here is verifiable from public RE docs
- and the donation route contract
-          (/api/donation/info). */}
+      {/* W9.7 (Wave-4 honest-claims revision; C6 2026-09-01 0%-default
+          update): "Coming from VNish?" copy. The public CHANGELOG asks the
+          firmware to make the competitor devfee contrast explicit, but it
+          must stay factual and non-disparaging. VNish builds carry a
+          binary-baked developer fee (~2-3% per D-Central's
+          reverse-engineering); DCENT_OS ships 0% — the optional donation is
+          off by default, 0-5% when opted in, clearly labelled as a donation,
+          and fully disableable. Every claim here is verifiable from public
+          RE docs and the donation route
+          contract (/api/donation/info). */}
       <AboutCard title="Coming from VNish?">
         <div style={{ fontSize: '0.85rem', color: 'var(--text, #E8E8E8)', lineHeight: 1.7 }}>
           VNish builds carry a{' '}
           <strong style={{ color: 'var(--accent, #FAA500)' }}>
             binary-baked developer fee (~2-3%)
           </strong>
-          , per D-Central&rsquo;s reverse-engineering. DCENT_OS&rsquo;s
-          donation is <strong>0-5% configurable</strong>, clearly labelled
-          as a donation rather than a fee, and fully disableable.
+          , per D-Central&rsquo;s reverse-engineering. DCENT_OS ships{' '}
+          <strong>0% by default — no mandatory fee, ever</strong>. The optional
+          donation is off until you turn it on (1-5%), clearly labelled as a
+          donation rather than a fee, and fully disableable.
         </div>
         <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)', marginTop: 10, lineHeight: 1.65 }}>
           The donation pool URL and on-chain payout address are publicly
@@ -151,9 +158,9 @@ export function AboutPage() {
             description="Official website"
           />
           <AboutLink
-            href="https://github.com/d-central-tech/dcentos"
-            label="GitHub Repository"
-            description="Source code, issues, contributions"
+            href={DCENT_DOCS_URL}
+            label="DCENT_OS Help"
+            description="Quickstart, installation and troubleshooting, available on this miner"
           />
           <AboutLink
             href="https://d-central.tech/support/"
@@ -161,7 +168,7 @@ export function AboutPage() {
             description="Help, documentation, contact"
           />
           <AboutLink
-            href="https://d-central.tech/fund/go?source=dcent_os&placement=settings"
+            href={fundContributeUrl('settings')}
             label="Fund the Sovereign Stack"
             description="Keep this open firmware alive — Bitcoin or card"
           />
@@ -209,7 +216,7 @@ export function AboutPage() {
 
       <footer style={{ marginTop: 16, fontSize: '0.78rem', color: 'var(--text-dim)' }}>
         <a
-          href="https://d-central.tech/fund/go?source=dcent_os&placement=about_footer"
+          href={fundContributeUrl('about_footer')}
           target="_blank"
           rel="noopener noreferrer"
           style={{ color: 'var(--accent, #FAA500)', fontWeight: 600 }}

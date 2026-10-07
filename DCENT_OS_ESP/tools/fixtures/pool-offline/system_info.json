@@ -1,0 +1,384 @@
+{
+ "power": 111.329834,
+ "voltage": 1214.8438,
+ "current": 23687.5,
+ "maxPower": 120,
+ "nominalVoltage": 1166,
+ "temp": 53.5625,
+ "temp2": 53.125,
+ "vrTemp": 82.5,
+ "sensorsOk": true,
+ "uptime": 4143,
+ "wifiRssi": -27,
+ "efficiency": 29.46125808425135,
+ "acceptanceRate": 99.88505747126437,
+ "acceptanceRateKnown": false,
+ "hashRate": 3778.8553925973333,
+ "hashRate_1m": 4274.924115285334,
+ "hashRate_5m": 3778.8553925973333,
+ "hashRate_10m": 3321.083461632,
+ "hashRate_15m": 2214.055641088,
+ "hashRate_1h": null,
+ "expectedHashrate": 4019.4,
+ "errorPercentage": 0.11494252873563218,
+ "bestDiff": 6048967,
+ "bestSessionDiff": 6048967,
+ "bestEverDiff": 109711166,
+ "poolDifficulty": 2986,
+ "blockHeight": 965277,
+ "poolConnected": false,
+ "isUsingFallbackStratum": 0,
+ "poolConnectionInfo": "solo.ckpool.org:3333",
+ "donationSet": true,
+ "donating": false,
+ "donationPercent": 2,
+ "isPSRAMAvailable": 1,
+ "freeHeap": 8301116,
+ "freeHeapInternal": 40672,
+ "freeHeapSpiram": 8260444,
+ "coreVoltage": 1220,
+ "coreVoltageActual": 1214,
+ "frequency": 525,
+ "ssid": "MOCK-WIFI-SSID",
+ "macAddr": "02:00:00:00:00:01",
+ "hostname": "dcentaxe-mock",
+ "ipv4": "192.0.2.42",
+ "ipv6": "",
+ "wifiStatus": "Connected",
+ "wifiRSSI": -27,
+ "apEnabled": 0,
+ "sharesAccepted": 869,
+ "sharesRejected": 9,
+ "sharesRejectedReasons": [
+  "Stale"
+ ],
+ "staleNonces": 0,
+ "slotRecoveries": 0,
+ "uptimeSeconds": 4147,
+ "asicCount": 6,
+ "coreCount": 80,
+ "smallCoreCount": 1276,
+ "dcentTotalSmallCoreCount": 7656,
+ "ASICModel": "BM1368",
+ "deviceModel": "SupraHex",
+ "swarmColor": "darkblue",
+ "stratumURL": "solo.ckpool.org",
+ "stratumPort": 3333,
+ "stratumUser": "bc1pMOCK…MOCK",
+ "stratumSuggestedDifficulty": 0,
+ "stratumExtranonceSubscribe": 0,
+ "stratumTLS": 0,
+ "stratumCert": "",
+ "stratumDecodeCoinbase": 0,
+ "stratumProtocol": "v1",
+ "stratumV2Available": false,
+ "stratumV2Experimental": true,
+ "stratumV2Status": "implemented + unit-tested; live delivery pending",
+ "miningMode": "pool",
+ "fallbackStratumURL": "",
+ "fallbackStratumPort": 0,
+ "fallbackStratumUser": "",
+ "fallbackStratumSuggestedDifficulty": 0,
+ "fallbackStratumExtranonceSubscribe": 0,
+ "fallbackStratumTLS": 0,
+ "fallbackStratumCert": "",
+ "fallbackStratumDecodeCoinbase": 0,
+ "responseTime": 0,
+ "version": "0.3.0",
+ "axeOSVersion": "0.3.0",
+ "gitHash": "c880a4ce63",
+ "gitDirty": true,
+ "buildEpoch": 1788415924,
+ "hasBap": false,
+ "displayName": "BitAxe Hex Supra",
+ "idfVersion": "v5.4",
+ "boardVersion": "701",
+ "boardVersionRecognized": true,
+ "supportStatus": "experimental",
+ "boardTarget": "bitaxe-hex-supra",
+ "resetReason": "Unknown",
+ "safeMode": false,
+ "wdtResetCount": 0,
+ "coredumpPresent": false,
+ "runningPartition": "ota_0",
+ "scriptsig": "",
+ "networkDifficulty": 0,
+ "coinbaseOutputs": [
+  {
+   "valueSats": 307023939,
+   "scriptHex": "5120deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  },
+  {
+   "valueSats": 6265794,
+   "scriptHex": "0014deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  },
+  {
+   "valueSats": 0,
+   "scriptHex": "6a24aa21a9eddeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  }
+ ],
+ "coinbaseValueTotalSatoshis": 313289733,
+ "coinbaseValueUserSatoshis": 0,
+ "overheat_mode": 0,
+ "overclockEnabled": 0,
+ "display": "",
+ "rotation": 0,
+ "invertscreen": 0,
+ "displayTimeout": 0,
+ "autofanspeed": 0,
+ "fanspeed": 100,
+ "manualFanSpeed": 100,
+ "minFanSpeed": 20,
+ "temptarget": 0,
+ "fanrpm": 2180,
+ "fan2rpm": 2180,
+ "statsFrequency": 5,
+ "blockFound": 0,
+ "showNewBlock": false,
+ "hashrateMonitor": {
+  "asics": []
+ },
+ "firmwareType": "DCENT_axe",
+ "dcentSwarm": {
+  "schema": 1,
+  "nodeId": "bitaxe-020000000001",
+  "family": "bitaxe",
+  "role": "standalone",
+  "clusterId": null,
+  "queenId": "bitaxe-020000000001",
+  "capabilities": {
+   "canCoordinate": false,
+   "roomTempInput": true,
+   "targetTempControl": false,
+   "targetWattsControl": false,
+   "identify": true,
+   "mcp": true
+  },
+  "home": {
+   "controlMode": "manual",
+   "observedRoomTempC": null,
+   "targetRoomTempC": null,
+   "targetWatts": null,
+   "heatWatts": 111.329833984375,
+   "heatBtuH": 379.87320239111324,
+   "heatingActive": true
+  }
+ },
+ "dcentaxe": {
+  "runtimeBoardTarget": "bitaxe-hex-supra",
+  "buildBoardTarget": "bitaxe-hex-supra",
+  "runtimeDeviceModel": "suprahex",
+  "buildDeviceModel": "suprahex",
+  "buildBoardVersion": "701",
+  "deployment": {
+   "hardwareFamily": "bitaxe",
+   "releaseScope": "public",
+   "supportTier": "experimental",
+   "evidenceLevel": "focused-run",
+   "runtimeMode": "mining",
+   "installPolicy": "public-beta",
+   "packagePolicy": "public",
+   "flashLayout": "standard",
+   "productionBlockers": [
+    "retained-soak",
+    "witnessed-ota-reboot-share"
+   ]
+  },
+  "autotuner": {
+   "enabled": false,
+   "mode": "BestEfficiency",
+   "targetValue": 0,
+   "currentFrequency": 0,
+   "currentVoltageMv": 0,
+   "bestEfficiency": 0,
+   "hashrate15s": 5129.9089383424,
+   "hashrate30s": 4702.416526813867,
+   "lastGoodFrequency": 0,
+   "lastGoodVoltageMv": 0,
+   "lastGoodJth": 0,
+   "lastGoodErrorRate": 0,
+   "siliconGrade": "unknown",
+   "status": "idle",
+   "phase": "idle"
+  },
+  "powerLimits": {
+   "maxPowerW": 120,
+   "maxCurrentA": 10,
+   "maxFrequency": 525,
+   "maxVoltageMv": 1300
+  },
+  "schedule": {
+   "active": null,
+   "activeIndex": null,
+   "currentHour": 7,
+   "currentMinute": 22,
+   "currentMinuteOfDay": 442,
+   "enabled": true,
+   "entries": [],
+   "nextChangeMinutes": null,
+   "timeSource": "wall_clock",
+   "timezoneOffsetMinutes": 0
+  },
+  "ota": {
+   "signatureCapable": false,
+   "signatureRequired": false,
+   "allowUnsigned": false,
+   "keyId": ""
+  },
+  "poolTruth": {
+   "connected": false,
+   "difficulty": 2986,
+   "sharesSubmitted": 882,
+   "sharesAccepted": 869,
+   "sharesRejected": 9,
+   "sharesPending": 4,
+   "sharesUnresolved": 4,
+   "oldestPendingSubmitAgeMs": 186000,
+   "responseTimeMs": 0,
+   "lastShareSubmitUnixMs": 1788419994232,
+   "lastShareResponseUnixMs": 1788419280232,
+   "lastShareAcceptedUnixMs": 1788419280232,
+   "lastShareRejectedUnixMs": 1788418989721,
+   "failoverActive": false,
+   "primaryFailbackState": "idle",
+   "primaryFailbackDetail": "",
+   "lastPrimaryReprobeUnixMs": 0,
+   "lastPrimaryFailbackUnixMs": 0,
+   "lastRejectReason": "Stale",
+   "activePool": "solo.ckpool.org:3333",
+   "protocol": "stratum-v1",
+   "rejectReasonCounts": [
+    {
+     "key": "Stale",
+     "count": 7,
+     "lastSeenUnixMs": 1788418989721
+    },
+    {
+     "key": "Unauthorized worker",
+     "count": 2,
+     "lastSeenUnixMs": 1788418029721
+    }
+   ],
+   "recentEvents": [
+    {
+     "tsUnixMs": 1788419994232,
+     "kind": "share_submitted",
+     "detail": "job=6a72bdc0000157c1 diff=4104.2"
+    },
+    {
+     "tsUnixMs": 1788420000232,
+     "kind": "pool_disconnected",
+     "detail": "solo.ckpool.org:3333 read timeout"
+    }
+   ]
+  },
+  "dispatcher": {
+   "staleNonces": 0,
+   "slotRecoveries": 0,
+   "filteredNonces": 0,
+   "noncesFound": 1021,
+   "ticketDifficulty": 2986
+  },
+  "boardTemp": 53.125,
+  "inletTemp": 53.5625,
+  "outletTemp": 53.125,
+  "inputVoltage": 11640.625,
+  "achievements": 785883,
+  "achievementCount": 16,
+  "lifetimeShares": 5068,
+  "creatureStage": "Elder",
+  "creatureMood": 4,
+  "miningEnabled": true,
+  "chips": [
+   {
+    "id": 0,
+    "temp": null,
+    "status": "unknown",
+    "hwErrors": 29,
+    "shares": 160,
+    "hashrate": null
+   },
+   {
+    "id": 1,
+    "temp": null,
+    "status": "unknown",
+    "hwErrors": 20,
+    "shares": 156,
+    "hashrate": null
+   },
+   {
+    "id": 2,
+    "temp": null,
+    "status": "unknown",
+    "hwErrors": 21,
+    "shares": 132,
+    "hashrate": null
+   },
+   {
+    "id": 3,
+    "temp": null,
+    "status": "unknown",
+    "hwErrors": 26,
+    "shares": 148,
+    "hashrate": null
+   },
+   {
+    "id": 4,
+    "temp": null,
+    "status": "unknown",
+    "hwErrors": 32,
+    "shares": 135,
+    "hashrate": null
+   },
+   {
+    "id": 5,
+    "temp": null,
+    "status": "unknown",
+    "hwErrors": 23,
+    "shares": 138,
+    "hashrate": null
+   }
+  ],
+  "voltageDomains": [
+   {
+    "chips": [
+     0,
+     1
+    ],
+    "mv": 1214
+   },
+   {
+    "chips": [
+     2,
+     3
+    ],
+    "mv": 1214
+   },
+   {
+    "chips": [
+     4,
+     5
+    ],
+    "mv": 1214
+   }
+  ],
+  "chipHealth": null,
+  "power": {
+   "source": "measured",
+   "calibrated": false,
+   "estimateSource": "estimated",
+   "networkDifficulty": 0
+  },
+  "tempSource": "board_sensor"
+ },
+ "mqtt": {
+  "enabled": false,
+  "commandsEnabled": false,
+  "brokerHost": "",
+  "brokerPort": 1883,
+  "username": "",
+  "passwordSet": false,
+  "tls": false,
+  "publishIntervalS": 30
+ }
+}

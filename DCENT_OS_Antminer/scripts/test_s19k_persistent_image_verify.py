@@ -103,6 +103,7 @@ def make_cpio(
     daemon_bytes: bytes = DAEMON,
     daemon_mode: int = 0o755,
     daemon_link_count: int = 1,
+    mutation_policy: bytes = b"boot-safeoff\n",
 ) -> bytes:
     setup = f"""#!/bin/sh
 PWR_GPIO=437
@@ -127,7 +128,7 @@ fi
         "etc/dcentos-platform": b"am3-aml-s19k\n",
         "etc/dcentos/board_target": b"am3-s19k\n",
         "etc/dcentos/rail_gpio": b"437\n",
-        "etc/dcentos/mutation_policy": b"boot-safeoff\n",
+        "etc/dcentos/mutation_policy": mutation_policy,
         "etc/dcentos/release_ed25519.pub": public_key,
         "etc/dcentos/release-image": b"# test release marker\nrelease_image=1\n",
         "etc/dcentrald.toml": b"[mining]\nenabled = false\n\n[pool]\nurl = \"\"\n",
@@ -669,6 +670,21 @@ class PersistentImageTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         return temporary, Fixture(Path(temporary.name))
 
+    def test_native_runtime_policy_keeps_disabled_boot_and_rejects_write_capabilities(self) -> None:
+        key = b"public-key-fixture"
+        for policy in (b"boot-safeoff\n", b"boot-safeoff\ndaemon-hardware\n"):
+            baseline, _ = image._safeoff_baseline(make_cpio(key, mutation_policy=policy), key)
+            self.assertFalse(baseline["mining_enabled_at_boot"])
+            self.assertEqual(baseline["mutation_policy_sha256"], digest(policy))
+        for policy in (
+            b"hardware-enabled\n", b"daemon-hardware\n",
+            b"boot-safeoff\ndaemon-hardware\npersistent-write\n",
+            b"boot-safeoff\ndaemon-hardware\nsysupgrade\n",
+        ):
+            with self.subTest(policy=policy):
+                with self.assertRaisesRegex(image.PersistentImageError, "mutation-policy"):
+                    image._safeoff_baseline(make_cpio(key, mutation_policy=policy), key)
+
     def test_signed_rootfs_rechecks_executable_static_aarch64_daemon(self) -> None:
         temporary, fixture = self.fixture()
         self.addCleanup(temporary.cleanup)
@@ -697,6 +713,38 @@ class PersistentImageTests(unittest.TestCase):
         self.assertEqual(result["classification"], "ready")
         self.assertFalse(result["install_authority_granted"])
         self.assertFalse(result["nand_writer_clear_for_flash"])
+
+    def test_current_readiness_binds_qualified_policy_and_both_generated_helpers(self) -> None:
+        for mutation in ("inverted-policy", "missing-target", "amlogic-helper", "common-helper"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                for relative in image.SOURCE_PATHS:
+                    destination = root / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes((image.REPO_ROOT / relative).read_bytes())
+                policy_path = root / image.SOURCE_PATHS[8]
+                policy = json.loads(policy_path.read_bytes())
+                if mutation == "inverted-policy":
+                    for row in policy["profiles"]:
+                        if row["board_target"] == image.BOARD:
+                            for evidence in row["evidence"]:
+                                if evidence["on_raw"] is not None:
+                                    evidence["on_raw"] = 1 - evidence["on_raw"]
+                                if evidence["off_raw"] is not None:
+                                    evidence["off_raw"] = 1 - evidence["off_raw"]
+                    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+                elif mutation == "missing-target":
+                    policy["profiles"] = [row for row in policy["profiles"]
+                                          if row["board_target"] != image.BOARD]
+                    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+                else:
+                    helper = root / image.SOURCE_PATHS[10 if mutation == "amlogic-helper" else 11]
+                    original = helper.read_bytes()
+                    changed = original.replace(b"'0 1 high'", b"'1 0 low'", 1)
+                    self.assertNotEqual(original, changed)
+                    helper.write_bytes(changed)
+                with self.assertRaisesRegex(image.PersistentImageError, "GPIO437 readiness"):
+                    image.audit_source_tree(root)
 
     def test_complete_signed_reproducible_bundle_verifies_without_authority(self) -> None:
         temporary, fixture = self.fixture()

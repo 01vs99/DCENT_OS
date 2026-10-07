@@ -59,6 +59,73 @@ pub struct TuningRun {
     pub completed: bool,
     /// All telemetry samples recorded during the run.
     pub samples: Vec<TelemetrySample>,
+    /// C3a convergence evidence for this run (rung counts, refusals,
+    /// envelope version). Absent on pre-C3a recordings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub convergence: Option<ConvergenceSnapshot>,
+}
+
+// ===================================================================
+// C3a (2026-09-01) — convergence telemetry
+// ===================================================================
+
+/// Rung counts for one tuning run's convergence evidence.
+///
+/// Semantics (mutually exclusive per chain):
+/// - `tunable` — the chain resolved an envelope and was characterized
+///   (a profile exists for it).
+/// - `not_tuned` — characterization ran but the chain fell back (failed
+///   chain, running at nominal).
+/// - `not_tunable` — the VARIANT refused to tune before any step
+///   (unknown/missing envelope datums, invalid cut-ladder, …).
+/// - `refused` — count of individual steps the variant guard refused
+///   mid-run (with reasons in [`ConvergenceSnapshot::refusal_reasons`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ConvergenceRungCounts {
+    pub tunable: u32,
+    pub not_tuned: u32,
+    pub not_tunable: u32,
+    pub refused: u32,
+}
+
+/// Per-run convergence evidence for the dashboard.
+///
+/// HONESTY CONTRACT (mirrors [`EfficiencySnapshot`]'s modeled-watts rule):
+/// `estimated_efficiency_jth` — when present — is ALWAYS a model-derived
+/// PROJECTION (`PowerModel` from voltage/frequency), never a measured
+/// wall-meter J/TH, and `efficiency_jth_estimated` is pinned `true` when the
+/// field is present. Consumers must not render it as a measured value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConvergenceSnapshot {
+    /// Tuner state at snapshot time (`Idle`, `Characterizing`, `Tuned`, …).
+    pub state: String,
+    /// Unix timestamp when the run started (0 when parked before start).
+    pub started_at: u64,
+    /// Rung counts (see [`ConvergenceRungCounts`]).
+    pub rung_counts: ConvergenceRungCounts,
+    /// Surfaced NotTunable reason, when the variant refused to tune.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_tunable_reason: Option<String>,
+    /// Distinct guard refusal reasons observed this run (bounded, newest
+    /// last). Each names the step, the bound, and the envelope source.
+    #[serde(default)]
+    pub refusal_reasons: Vec<String>,
+    /// Last tuning step presented to the guard (executed or refused).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_step: Option<String>,
+    /// Envelope version tag (e.g. `c3a-1`) naming the envelope generation.
+    pub envelope_version: String,
+    /// Envelope evidence label (e.g. `bm1387-pic16:documented-s9-band`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_source: Option<String>,
+    /// Model-derated efficiency projection — ALWAYS an estimate; see the
+    /// honesty contract above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_efficiency_jth: Option<f64>,
+    /// Pinned `true` whenever `estimated_efficiency_jth` is present, so a
+    /// consumer cannot mistake the projection for a measurement.
+    #[serde(default)]
+    pub efficiency_jth_estimated: bool,
 }
 
 /// Live-exportable telemetry state for API/WebSocket consumers.
@@ -138,6 +205,16 @@ impl TelemetryRecorder {
 
     /// Finish the current tuning run.
     pub fn finish_run(&mut self, completed: bool) {
+        self.finish_run_with_convergence(completed, None);
+    }
+
+    /// C3a: finish the current run attaching convergence evidence (rung
+    /// counts, refusals, envelope version) to the persisted recording.
+    pub fn finish_run_with_convergence(
+        &mut self,
+        completed: bool,
+        convergence: Option<ConvergenceSnapshot>,
+    ) {
         if let Some(run) = self.current_run.take() {
             let duration_s = run.start_instant.elapsed().as_secs_f64();
             let tuning_run = TuningRun {
@@ -145,6 +222,7 @@ impl TelemetryRecorder {
                 duration_s,
                 completed,
                 samples: run.samples,
+                convergence,
             };
 
             self.runs.push_back(tuning_run);
@@ -167,6 +245,15 @@ impl TelemetryRecorder {
     /// Whether a run is currently active.
     pub fn is_recording(&self) -> bool {
         self.current_run.is_some()
+    }
+
+    /// C3a: Unix timestamp the current (or most recent) run started at —
+    /// convergence-evidence anchor. `None` when no run has started.
+    pub fn current_run_started_at(&self) -> Option<u64> {
+        self.current_run
+            .as_ref()
+            .map(|r| r.started_at)
+            .or_else(|| self.runs.back().map(|r| r.started_at))
     }
 
     /// Get the last N completed tuning runs for export.
@@ -613,6 +700,7 @@ mod tests {
                     tuner_state: "Characterizing".to_string(),
                     difficulty: 256,
                 }],
+                convergence: None,
             },
             TuningRun {
                 started_at: 2,
@@ -632,6 +720,7 @@ mod tests {
                     tuner_state: "Verifying".to_string(),
                     difficulty: 512,
                 }],
+                convergence: None,
             },
         ];
 

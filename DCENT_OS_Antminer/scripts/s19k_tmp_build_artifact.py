@@ -478,6 +478,80 @@ def _require_env(values: dict[str, str], key: str, expected: str) -> None:
         fail(f"compile environment {key}={values.get(key)!r}, expected {expected!r}")
 
 
+JOURNAL_ADMISSION_SOURCE = Path("dcentrald-common") / "src" / "s19k_braiins_tmp_deploy.rs"
+JOURNAL_ADMISSION_MARKER = "pub const S19K_EPHEMERAL_JOURNAL_TRIAL_DESTINATIONS: &[&str] = &["
+JOURNAL_REFUSAL = b"S19k journal destination is not an admitted startup authority path"
+RUNNER_SCRIPT = Path("scripts") / "dcentrald_s19k_tmp_remote_run.sh"
+
+
+def daemon_journal_destinations(dcentrald_root: Path) -> list[str]:
+    """The single publisher-v1 admission set, read from dcentrald-common."""
+    source, _ = _stable_regular_bytes(
+        dcentrald_root / JOURNAL_ADMISSION_SOURCE, "S19k journal admission source"
+    )
+    text = source.decode("utf-8")
+    start = text.find(JOURNAL_ADMISSION_MARKER)
+    if start < 0:
+        fail("S19k journal admission set is missing from dcentrald-common")
+    end = text.find("];", start)
+    names = re.findall(r'"([a-z0-9_]+)"', text[start:end])
+    if len(names) < 12 or len(set(names)) != len(names):
+        fail("S19k journal admission set is malformed")
+    return names
+
+
+def runner_journal_destinations(dcentrald_root: Path) -> list[str]:
+    """Trial basenames the Track-1 runner hands to the daemon publisher."""
+    runner_path = dcentrald_root.parent / RUNNER_SCRIPT
+    runner, _ = _stable_regular_bytes(runner_path, "S19k Track-1 runner")
+    text = runner.decode("utf-8")
+    names: list[str] = []
+    for source_var, destination_var in re.findall(
+        r'^\s*publish_no_clobber_journal(?:_keep_source)? "\$([A-Z0-9_]+)" "\$([A-Z0-9_]+)"',
+        text,
+        flags=re.M,
+    ):
+        if (source_var, destination_var) == ("JOURNAL_SOURCE", "JOURNAL_DESTINATION"):
+            continue
+        if destination_var in ("RUNTIME_LOCK_OWNER", "ENDURANCE_ACK"):
+            continue
+        match = re.search(
+            rf'^\s*{re.escape(destination_var)}="\$TRIAL_DIR/([A-Za-z0-9_.-]+)"$',
+            text,
+            flags=re.M,
+        )
+        if match is None:
+            fail(f"runner journal destination {destination_var} is not a fixed trial basename")
+        names.append(match.group(1))
+    if not names:
+        fail("runner publishes no trial journals")
+    return names
+
+
+def verify_journal_destinations(blob: bytes, dcentrald_root: Path) -> dict[str, object]:
+    """Refuse to seal a daemon whose publisher cannot bind every receipt the
+    runner publishes. 2026-09-01: the sealed receipt-fix-v7 bytes carried none
+    of the five post-SafeOff receipt names, so the live bounded-work proof
+    mined and SafeOff'd cleanly and then failed at the transcript seal."""
+    admitted = daemon_journal_destinations(dcentrald_root)
+    published = runner_journal_destinations(dcentrald_root)
+    unadmitted = sorted(set(published) - set(admitted))
+    if unadmitted:
+        fail(
+            "runner publishes journal destinations the daemon source does not admit: "
+            f"{unadmitted}"
+        )
+    absent = [name for name in admitted if blob.find(name.encode("ascii")) < 0]
+    if absent:
+        fail(
+            f"artifact bytes lack admitted journal destination strings {absent}; "
+            "the sealed daemon would refuse those receipts on the bench"
+        )
+    if blob.find(JOURNAL_REFUSAL) < 0:
+        fail("artifact lacks the publisher-v1 refusal string; journal publication is not compiled in")
+    return {"admitted": admitted, "published": published}
+
+
 def verify_build(args: argparse.Namespace) -> dict[str, object]:
     if not isinstance(args.build_observation_id, str) or not HEX64.fullmatch(
         args.build_observation_id
@@ -494,6 +568,7 @@ def verify_build(args: argparse.Namespace) -> dict[str, object]:
         fail(f"artifact path={binary_path}, expected canonical output {expected_binary}")
     binary, _ = _stable_regular_bytes(binary_path, "S19k /tmp binary")
     elf = verify_armv7_artifact(binary)
+    verify_journal_destinations(binary, workspace_root)
 
     source_value, source_data = _load_json_file(Path(args.source_snapshot), "source snapshot")
     source = _validate_source_descriptor(source_value)
@@ -740,6 +815,10 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("new-observation")
     verify_elf = commands.add_parser("verify-elf")
     verify_elf.add_argument("binary")
+    verify_elf.add_argument(
+        "--dcentrald-root",
+        help="also require every runner journal destination admitted by this source tree to be present in the ELF",
+    )
     source = commands.add_parser("source-snapshot")
     source.add_argument("--repo-root", required=True)
     source.add_argument("--dcentrald-root", required=True)
@@ -784,6 +863,15 @@ def main(argv: list[str]) -> int:
         elif args.command == "verify-elf":
             binary, _ = _stable_regular_bytes(Path(args.binary), "S19k /tmp binary")
             artifact = verify_armv7_artifact(binary)
+            if args.dcentrald_root:
+                journals = verify_journal_destinations(
+                    binary, Path(args.dcentrald_root).resolve(strict=True)
+                )
+                print(
+                    "JOURNAL_DESTINATIONS="
+                    f"{len(journals['admitted'])} admitted, "
+                    f"{len(journals['published'])} runner-published, all present"
+                )
             print(f"SHA256={artifact['sha256']}")
             print(f"BYTES={artifact['bytes']}")
             print(

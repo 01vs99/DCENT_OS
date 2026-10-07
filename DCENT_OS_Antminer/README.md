@@ -78,7 +78,7 @@ fixes each one:
 
 | The home-miner problem | DCENT_OS |
 | --- | --- |
-| **Mandatory dev fees** — 1.5–2.8% of your hashrate skimmed forever, no opt-out | **No mandatory fee.** A small, fully-visible, fully-disableable voluntary donation. Zero is valid. |
+| **Mandatory dev fees** — 1.5–2.8% of your hashrate skimmed forever, no opt-out | **No mandatory fee — 0% by default.** The optional donation is off until you turn it on (1–5%), fully visible, and one tap off. |
 | **Loud by default** — fans pinned at 100% from boot | **Quiet by design.** Low-PWM boot, PID thermal control, and a policy that cuts hash before raising noise. |
 | **PSU whitelists** — refuses unrecognized or "non-smart" PSUs | **PSU bypass.** No Loki board or smart-PSU requirement on proven lanes; PSU paths stay per-platform/live-gated. |
 | **Closed firmware** — no source, no audit trail, no way to fix a bug | **Open source (GPL-3.0).** Read every line, build it yourself, fork it. |
@@ -114,8 +114,10 @@ is D-Central's own, under GPL-3.0.
   supervision with graded throttling, and a teardown that cuts hash power before fan noise.
 - **Open APIs** — REST + WebSocket, plus a CGMiner-compatible API on port 4028, so `pyasic` and
   the rest of the ecosystem work out of the box.
-- **Donation, not dev fee** — voluntary, transparent, and always visible on the dashboard when
-  active. Routes to **DCENT_Pool**, D-Central's [Solo/Guild pool](#-dcent_pool--the-sologuild-pool).
+- **Donation, not dev fee** — **off by default (0%, no mandatory fee, ever)**. Opt in at 1–5%
+  and it stays transparent and always visible on the dashboard while active. Routes to
+  **DCENT_Pool**, D-Central's [Solo/Guild pool](#-dcent_pool--the-sologuild-pool); or support the
+  project directly at [d-central.tech/fund](https://d-central.tech/fund/).
 
 ---
 
@@ -362,7 +364,7 @@ any pool you like; DCENT_OS has zero lock-in. DCENT_Pool is simply the home team
 | | **DCENT_OS** | Braiins OS+ | LuxOS | VNish |
 | --- | --- | --- | --- | --- |
 | Open source | ✅ GPL-3.0 | ⚠️ partial | ❌ closed | ❌ closed |
-| Mandatory dev/pool fee | ✅ **none** (voluntary donation) | ⚠️ 2% pool fee | ⚠️ ~2.8% | ⚠️ % skim |
+| Mandatory dev/pool fee | ✅ **0% by default** (opt-in donation, 1–5%) | ⚠️ 2–2.5% or paid 0% license | ⚠️ ~2.8% hidden | ⚠️ 2–2.8% mandatory |
 | License server / lock-in | ✅ none | ⚠️ | ⚠️ | ⚠️ |
 | Hash-board auto-detect (ChipID) | ✅ **lab-validated for mixed rigs** | ❌ | ❌ | ❌ |
 | PSU bypass | ✅ 3 modes, per-platform live-gated | ⚠️ limited | ❌ | ❌ |
@@ -380,9 +382,10 @@ For a deeper feature-by-feature breakdown see [`docs/COMPARISON.md`](docs/COMPAR
 ## ❓ FAQ
 
 **Is DCENT_OS really free, with no dev fee?**
-Yes. There is no mandatory fee and no license server. There is an *optional*, fully-visible
-donation (default ~2%, adjustable 0–5%, disableable). D-Central earns its living repairing and
-selling mining hardware — not by skimming your hashrate.
+Yes. DCENT_OS ships with the donation **off — 0% by default, no mandatory fee, ever**, and no
+license server. Nothing is taken from your hashrate unless you opt in to the *optional*,
+fully-visible donation (1–5%). D-Central earns its living repairing and selling mining
+hardware — not by skimming your hashrate.
 
 **How is it different from Braiins / LuxOS / VNish?**
 It's fully open source (GPL-3.0), has no mandatory fee, avoids smart-PSU lock-in on supported lanes,

@@ -114,6 +114,9 @@ use crate::bm1362::wire_uart_trans::{
 /// (the inverse of the `0x55 0xAA` command preamble).
 pub const SERIAL_RESP_PREAMBLE: [u8; 2] = [0xAA, 0x55];
 
+#[path = "uart_dispatch_owner.rs"]
+pub(crate) mod owned_dispatch;
+
 /// On-wire length of a BM1362 serial nonce frame (`0xAA 0x55` + 9 body bytes).
 pub const BM1362_SERIAL_NONCE_FRAME_LEN: usize = 11;
 
@@ -557,58 +560,66 @@ impl<U: ChainUart> Am335xUartTransport<U> {
                 self.rx_bm1362_serial_raw_bytes[chain_idx] += n as u64;
             }
 
-            let mut parsed_frames = 0u64;
-            let mut job_response_frames = 0u64;
-            let mut non_job_response_frames = 0u64;
-            let mut resync_bytes = 0u64;
-            let mut dropped_bytes = 0u64;
-            {
-                let buf = &mut self.rx_bm1362_serial[chain_idx];
-                let mut i = 0usize;
-                let mut consumed = 0usize;
-                while i + 1 < buf.len() {
-                    if buf[i] != SERIAL_RESP_PREAMBLE[0] || buf[i + 1] != SERIAL_RESP_PREAMBLE[1] {
-                        i += 1;
-                        consumed = i;
-                        resync_bytes += 1;
-                        continue;
-                    }
-                    if i + BM1362_SERIAL_NONCE_FRAME_LEN > buf.len() {
-                        break;
-                    }
-                    // Preamble matched + a full 11-byte frame is present: it is a
-                    // frame, so advance by 11 even if the caller later rejects it.
-                    if let Some(nr) =
-                        parse_bm1362_serial_nonce(&buf[i..i + BM1362_SERIAL_NONCE_FRAME_LEN])
-                    {
-                        if nr.flags & 0x80 != 0 {
-                            job_response_frames += 1;
-                        } else {
-                            non_job_response_frames += 1;
-                        }
-                        out.push((chain_idx, nr));
-                        parsed_frames += 1;
-                    }
-                    i += BM1362_SERIAL_NONCE_FRAME_LEN;
-                    consumed = i;
-                }
-
-                if consumed > 0 {
-                    buf.drain(..consumed);
-                }
-                if buf.len() > BM1362_SERIAL_RX_MAX_BUFFER {
-                    let keep_from = buf.len().saturating_sub(BM1362_SERIAL_NONCE_FRAME_LEN - 1);
-                    dropped_bytes += keep_from as u64;
-                    buf.drain(..keep_from);
-                }
-            }
-            self.rx_bm1362_serial_parsed_frames[chain_idx] += parsed_frames;
-            self.rx_bm1362_serial_job_response_frames[chain_idx] += job_response_frames;
-            self.rx_bm1362_serial_non_job_response_frames[chain_idx] += non_job_response_frames;
-            self.rx_bm1362_serial_resync_bytes[chain_idx] += resync_bytes;
-            self.rx_bm1362_serial_dropped_bytes[chain_idx] += dropped_bytes;
+            self.parse_bm1362_serial_buffer(chain_idx, &mut out);
         }
         out
+    }
+
+    fn parse_bm1362_serial_buffer(
+        &mut self,
+        chain_idx: usize,
+        out: &mut Vec<(usize, Bm1362SerialNonce)>,
+    ) {
+        let mut parsed_frames = 0u64;
+        let mut job_response_frames = 0u64;
+        let mut non_job_response_frames = 0u64;
+        let mut resync_bytes = 0u64;
+        let mut dropped_bytes = 0u64;
+        {
+            let buf = &mut self.rx_bm1362_serial[chain_idx];
+            let mut i = 0usize;
+            let mut consumed = 0usize;
+            while i + 1 < buf.len() {
+                if buf[i] != SERIAL_RESP_PREAMBLE[0] || buf[i + 1] != SERIAL_RESP_PREAMBLE[1] {
+                    i += 1;
+                    consumed = i;
+                    resync_bytes += 1;
+                    continue;
+                }
+                if i + BM1362_SERIAL_NONCE_FRAME_LEN > buf.len() {
+                    break;
+                }
+                // Preamble matched + a full 11-byte frame is present: it is a
+                // frame, so advance by 11 even if the caller later rejects it.
+                if let Some(nr) =
+                    parse_bm1362_serial_nonce(&buf[i..i + BM1362_SERIAL_NONCE_FRAME_LEN])
+                {
+                    if nr.flags & 0x80 != 0 {
+                        job_response_frames += 1;
+                    } else {
+                        non_job_response_frames += 1;
+                    }
+                    out.push((chain_idx, nr));
+                    parsed_frames += 1;
+                }
+                i += BM1362_SERIAL_NONCE_FRAME_LEN;
+                consumed = i;
+            }
+
+            if consumed > 0 {
+                buf.drain(..consumed);
+            }
+            if buf.len() > BM1362_SERIAL_RX_MAX_BUFFER {
+                let keep_from = buf.len().saturating_sub(BM1362_SERIAL_NONCE_FRAME_LEN - 1);
+                dropped_bytes += keep_from as u64;
+                buf.drain(..keep_from);
+            }
+        }
+        self.rx_bm1362_serial_parsed_frames[chain_idx] += parsed_frames;
+        self.rx_bm1362_serial_job_response_frames[chain_idx] += job_response_frames;
+        self.rx_bm1362_serial_non_job_response_frames[chain_idx] += non_job_response_frames;
+        self.rx_bm1362_serial_resync_bytes[chain_idx] += resync_bytes;
+        self.rx_bm1362_serial_dropped_bytes[chain_idx] += dropped_bytes;
     }
 
     /// Poll every chain's RX for nonce frames.
@@ -1700,3 +1711,7 @@ mod tests {
         assert_eq!(got[0].1.nonce, 0x55AA_55AA);
     }
 }
+
+pub use owned_dispatch::{
+    BbClosedController, BbControllerObservation, BbOwnedController, BbOwnedControllerStop,
+};

@@ -270,9 +270,10 @@ const DEPLOYED_SKU_IDENTITY_POLICY: &[(DeployedSkuMatch, AsicProtocolIdentity)] 
     //
     // STILL OPEN after the 2026-08-02 `chip_marking` work (W5-RANK-13). The lot-code
     // corroborator below (`CHIP_MARKING_FAMILY_LETTERS` / `corroborate_marking`) does
-    // NOT close this: we hold no BM1398 page, so BM1398's letter is unknown, and BM1398
-    // plausibly shares BM1362's `C` (same generation, same `0x04 0x11` preamble). Do not
-    // delete these lines on the strength of the corroborator.
+    // NOT close this: the September 2 NBP1901 pages use a different `0x11 0x42`
+    // generation, with no proven relation between their die/date strings and
+    // this format's family letter. The explicit NBP1901 decoder below joins a
+    // sealed chip observation; it does not generalize a new letter mapping.
     //
     // NOTE (corrected): this bridge DOES have a production caller now —
     // `serial_mining.rs` folds the retained hashboard pages through
@@ -486,6 +487,477 @@ pub fn observed_protocol_from_deployed_page(raw: &[u8]) -> Option<AsicProtocolId
     match corroborate_marking(observed, identity.chip_marking_family_letter()) {
         MarkingCorroboration::Agrees => Some(observed),
         MarkingCorroboration::Refuses(_) => None,
+    }
+}
+
+/// Decode the factory-programmed NBP1901 generation captured on 2026-09-02.
+///
+/// These pages have no board-name field: neither the `11 42` header nor the
+/// part/date code establishes an ASIC family. This function therefore returns
+/// decoded data, never protocol admission. It checks the exact cipher window,
+/// printable identity fields and the CRC5 verified on both distinct held pages.
+/// The raw `voltage_mv` member in the legacy zhiju DTO is *centivolts* on these
+/// pages; it must not be used as a requested operating voltage.
+pub fn decode_nbp1901_factory_page(raw: &[u8]) -> Result<ZhijuInformationBlock, &'static str> {
+    use crate::deployed_eeprom::{
+        decrypt_region, key_words, BM1398_GENERATION_LIVE_HEADER,
+        LIVE_PROVEN_BM1398_GENERATION_SLOT1_KEY, RAW_PAGE_LEN,
+    };
+    if raw.len() != RAW_PAGE_LEN {
+        return Err("NBP1901 identity requires one complete 256-byte factory page");
+    }
+    if raw[..2] != BM1398_GENERATION_LIVE_HEADER {
+        return Err("not the captured NBP1901 factory page generation");
+    }
+    let range = zhiju_eeprom::XXTEA_PAYLOAD_RANGE;
+    let key = key_words(&LIVE_PROVEN_BM1398_GENERATION_SLOT1_KEY);
+    let mut plaintext = raw[..range.start].to_vec();
+    plaintext.extend_from_slice(&decrypt_region(raw, range.start, range.end, &key));
+    let block = zhiju_eeprom::decode_zhiju_block(&plaintext)
+        .map_err(|_| "NBP1901 factory page identity fields do not decode")?;
+    if block.verify_crc5(&plaintext) != zhiju_eeprom::Crc5Check::Match {
+        return Err("NBP1901 factory page CRC5 mismatch");
+    }
+    if block.hashboard_sn.is_empty() || block.chip_die.is_empty() || block.chip_marking.is_empty() {
+        return Err("NBP1901 factory page lacks identity fields");
+    }
+    Ok(block)
+}
+
+/// Stock topol.conf `machine` names of the first-party-settled BM1398 native
+/// family bins (S19 Pro NBP1901, S19 classic NBS1902, T19 NBT1903 — Phase A
+/// §3.7 rows; sources pinned in `dcentrald_common::s19_bm1398_runtime`).
+/// `NBP1901-38` is the pre-existing 38-domain alias of the September 2
+/// runtime.
+pub const BM1398_NATIVE_STOCK_BOARD_NAMES: [&str; 6] = [
+    "NBP1901",
+    "NBP1901-38",
+    "NBS1902",
+    "NBT1903",
+    "BHB28611",
+    "BHB28701",
+];
+
+/// Facts read from the EEPROM, independent of the image-selected profile.
+/// Legacy 11/42 pages have no board-name field. Selecting an NBS1902 image
+/// must never turn an unnamed sample into an NBS1902 observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bm1398FactoryPage {
+    board_name: Option<String>,
+    serial: String,
+}
+
+impl Bm1398FactoryPage {
+    pub fn board_name(&self) -> Option<&str> {
+        self.board_name.as_deref()
+    }
+
+    pub fn serial(&self) -> &str {
+        &self.serial
+    }
+}
+
+/// Decode physical identity before power is enabled. Named records must
+/// pass both encrypted-region CRCs and match an exact stock topology name.
+/// The legacy decoder remains useful for diagnostics but does not invent a
+/// model from its serial, factory rail, marking characters or page preamble.
+pub fn decode_bm1398_factory_page(raw: &[u8]) -> Result<Bm1398FactoryPage, &'static str> {
+    if raw.get(..2) == Some(&[0x11, 0x42]) {
+        let legacy = decode_nbp1901_factory_page(raw)?;
+        return Ok(Bm1398FactoryPage {
+            board_name: None,
+            serial: legacy.hashboard_sn,
+        });
+    }
+    let named = crate::deployed_eeprom::decode_deployed_eeprom(raw)
+        .map_err(|_| "BM1398 factory identity does not decode")?;
+    if !BM1398_NATIVE_STOCK_BOARD_NAMES.contains(&named.board_name.as_str())
+        || named.board_serial.is_empty()
+        || named.region_1_crc5 != zhiju_eeprom::Crc5Check::Match
+        || named.region_2_crc5 != zhiju_eeprom::Crc5Check::Match
+    {
+        return Err("BM1398 factory identity requires exact stock name and both valid CRC regions");
+    }
+    Ok(Bm1398FactoryPage {
+        board_name: Some(named.board_name),
+        serial: named.board_serial,
+    })
+}
+
+/// Join the selected stock profile to an independently decoded exact name,
+/// both valid encrypted-region CRCs and a sealed chip-register observation.
+/// An unnamed legacy page cannot acquire its selected image's profile name.
+/// Named-format fixtures exercise parsing and refusal; no held named page
+/// for NBS1902/NBT1903/BHB28611/BHB28701 is claimed by this bridge.
+pub fn observed_protocol_from_bm1398_factory_page(
+    raw: &[u8],
+    stock_board_name: &str,
+    observed_chip: Option<crate::bm1398_get_address::Bm1398GetAddressObservation>,
+) -> Option<AsicProtocolIdentity> {
+    if !BM1398_NATIVE_STOCK_BOARD_NAMES.contains(&stock_board_name)
+        || observed_chip.map(|observation| observation.chip_id()) != Some(0x1398)
+    {
+        return None;
+    }
+    let observed = decode_bm1398_factory_page(raw).ok()?;
+    if observed.board_name() != Some(stock_board_name) {
+        return None;
+    }
+    Some(AsicProtocolIdentity::Bm1398)
+}
+
+/// Join the decoded factory page with an independently selected exact carrier
+/// and an actual register-zero chip identity. No family is inferred from the
+/// header, the lot-code characters, the operator's model label, or BHB42 alone.
+///
+/// `stock_board_name` must come from the exact controller/board composition;
+/// `observed_chip` is the sealed CRC-checked register-zero observation, never
+/// a numeric ID copied from BoardDesc. A caller must additionally certify chain coverage
+/// before work. This pure bridge performs no EEPROM writes or hardware I/O.
+pub fn observed_protocol_from_nbp1901_factory_page(
+    raw: &[u8],
+    stock_board_name: &str,
+    observed_chip: Option<crate::bm1398_get_address::Bm1398GetAddressObservation>,
+) -> Option<AsicProtocolIdentity> {
+    if !matches!(stock_board_name, "NBP1901" | "NBP1901-38") {
+        return None;
+    }
+    observed_protocol_from_bm1398_factory_page(raw, stock_board_name, observed_chip)
+}
+
+#[cfg(test)]
+mod nbp1901_factory_runtime_tests {
+    use super::*;
+    use dcentrald_common::s19_bm1398_runtime::{
+        executor::*, Bm1398FpgaMidstateMode, Bm1398HybridDeskPlan,
+    };
+    use dcentrald_common::serial_chain_proof::PacedEnumerationPolicy;
+    use std::{
+        future::Future,
+        sync::Arc,
+        task::{Context, Poll, Wake, Waker},
+        time::Duration,
+    };
+
+    // Actual Sep 2 captured ciphertext, already independently pinned in
+    // zhiju_eeprom tests. The remaining page bytes are unused by this decoder.
+    const PAGES: [&str; 2] = [
+        concat!(
+            "11422213c85248cf1657052522c82540d466dda751d68d4d5cfe15d56138b98f",
+            "8cd7565a7b393d3894ec7f42e1beeef92aeb6b75955ed63d80be85f6a8131757ade4"
+        ),
+        concat!(
+            "1142fe6b91b8ec624ae7e16b905fa3281759f33497fec9efd0c14460646f9c88",
+            "b2a0fafeeb1ec7fa7b470e52b5636dbe928f3bab3eb86b048dd0e4aa985e62215d91"
+        ),
+    ];
+    fn page(index: usize) -> Vec<u8> {
+        let mut raw = vec![0xff; 256];
+        for (i, pair) in PAGES[index].as_bytes().chunks_exact(2).enumerate() {
+            raw[i] = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
+        }
+        raw[255] = 0x5a;
+        raw
+    }
+    fn chip_observation() -> crate::bm1398_get_address::Bm1398GetAddressObservation {
+        let raw = [0x13, 0x98, 0x18, 0, 0, 0, 0x04];
+        crate::bm1398_get_address::parse_bm1398_get_address_body(&raw).unwrap()
+    }
+    #[test]
+    fn unnamed_held_factory_pages_do_not_acquire_the_selected_profile_name() {
+        for (i, serial) in ["HQDZYI3BJJDBG0566", "E015YI3BJAAAH0013"]
+            .iter()
+            .enumerate()
+        {
+            let raw = page(i);
+            let decoded = decode_nbp1901_factory_page(&raw).unwrap();
+            assert_eq!(decoded.hashboard_sn, *serial);
+            let observed = decode_bm1398_factory_page(&raw).unwrap();
+            assert_eq!(observed.serial(), *serial);
+            assert_eq!(observed.board_name(), None);
+            assert_eq!(decoded.voltage_mv, 1280); // raw centivolts, not a request
+            assert_eq!(
+                observed_protocol_from_nbp1901_factory_page(
+                    &raw,
+                    "NBP1901",
+                    Some(chip_observation())
+                ),
+                None
+            );
+            assert_eq!(observed_protocol_from_deployed_page(&raw), None);
+            assert_eq!(
+                observed_protocol_from_nbp1901_factory_page(
+                    &raw,
+                    "BHB42601",
+                    Some(chip_observation())
+                ),
+                None
+            );
+            assert_eq!(
+                observed_protocol_from_nbp1901_factory_page(&raw, "NBP1901", None),
+                None
+            );
+        }
+    }
+    #[test]
+    fn nbp1901_factory_decoder_rejects_truncation_corruption_and_header_only() {
+        let raw = page(0);
+        assert!(decode_nbp1901_factory_page(&raw[..66]).is_err());
+        let mut broken = raw.clone();
+        broken[35] ^= 0x80;
+        assert!(decode_nbp1901_factory_page(&broken).is_err());
+        let mut unknown = raw.clone();
+        unknown[0] = 4;
+        assert!(decode_nbp1901_factory_page(&unknown).is_err());
+        let mut empty = vec![0; 256];
+        empty[..2].copy_from_slice(&[0x11, 0x42]);
+        assert!(decode_nbp1901_factory_page(&empty).is_err());
+    }
+
+    /// A captured legacy page carries no board name. Selecting any exact
+    /// BM1398 profile must not supply that missing physical observation.
+    #[test]
+    fn bm1398_family_join_refuses_unnamed_pages_for_every_selected_profile() {
+        let raw = page(0);
+        for name in BM1398_NATIVE_STOCK_BOARD_NAMES {
+            assert_eq!(
+                observed_protocol_from_bm1398_factory_page(&raw, name, Some(chip_observation())),
+                None,
+                "{name} must not label the captured unnamed generation"
+            );
+        }
+        for name in ["BHB42601", "NBS1903", "NBT1902", "", "nbp1901"] {
+            assert_eq!(
+                observed_protocol_from_bm1398_factory_page(&raw, name, Some(chip_observation())),
+                None,
+                "{name:?} must never join"
+            );
+        }
+        // The NBP1901-only wrapper keeps exactly its two names.
+        assert_eq!(
+            observed_protocol_from_nbp1901_factory_page(&raw, "NBS1902", Some(chip_observation())),
+            None
+        );
+        assert_eq!(
+            observed_protocol_from_nbp1901_factory_page(&raw, "NBP1901", Some(chip_observation())),
+            None
+        );
+    }
+
+    struct NoopWake;
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+    fn ready<F: Future>(future: F) -> F::Output {
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut cx = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("recorded transport fixture must complete synchronously"),
+        }
+    }
+
+    struct StockFixtureIo {
+        events: Arc<std::sync::Mutex<Vec<Bm1398RuntimeAction>>>,
+        pic_version: u8,
+        psu_version: u8,
+        short_chain: bool,
+        fail_work: bool,
+    }
+    impl Bm1398RuntimeIo for StockFixtureIo {
+        async fn execute(
+            &mut self,
+            action: &Bm1398RuntimeAction,
+        ) -> Result<Bm1398RuntimeReply, String> {
+            self.events.lock().unwrap().push(action.clone());
+            use Bm1398RuntimeAction as A;
+            use Bm1398RuntimeReply as R;
+            match action {
+                A::ReadMiscControl { chain } => Ok(R::RegisterValue(
+                    self.events
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .rev()
+                        .find_map(|event| match event {
+                            A::Asic {
+                                chain: observed_chain,
+                                operation:
+                                    dcentrald_common::TransportOp::SendWriteRegBroadcastBm1397Plus {
+                                        reg: 0x18,
+                                        value,
+                                    },
+                            } if observed_chain == chain => Some(*value),
+                            _ => None,
+                        })
+                        .unwrap_or(0x0000_7a31),
+                )),
+                A::VerifyFactoryIdentity { .. } => {
+                    let decoded = decode_nbp1901_factory_page(&page(0)).map_err(str::to_owned)?;
+                    Ok(R::FactoryIdentity {
+                        // Reconstructed exact-name transport fixture. The
+                        // legacy held page above proves only the serial.
+                        stock_board_name: Some("NBP1901".into()),
+                        serial: decoded.hashboard_sn,
+                    })
+                }
+                A::I2c(exchange) => {
+                    // Responses are reconstructed from exact stock exchange
+                    // grammar, not claimed to be a live DCENT transport capture.
+                    let response = match (exchange.endpoint, exchange.request[3]) {
+                        (Bm1398FramedEndpoint::Pic { .. }, 0x17) => {
+                            assert_eq!(exchange.request, [0x55, 0xaa, 4, 0x17, 0, 0x1b]);
+                            vec![
+                                5,
+                                0x17,
+                                self.pic_version,
+                                0,
+                                self.pic_version.wrapping_add(0x1c),
+                            ]
+                        }
+                        (Bm1398FramedEndpoint::Pic { .. }, 0x15) => {
+                            assert_eq!(exchange.request[5], 0);
+                            assert_eq!(exchange.request[6], 0x1a + exchange.request[4]);
+                            vec![0x15, 1]
+                        }
+                        (Bm1398FramedEndpoint::Pic { .. }, 0x16) => {
+                            assert_eq!(exchange.request, [0x55, 0xaa, 4, 0x16, 0, 0x1a]);
+                            vec![6, 0x16, 1, 0, 0, 0x1d]
+                        }
+                        (Bm1398FramedEndpoint::Apw12, command @ (2 | 0x83)) => {
+                            let data = if command == 2 {
+                                self.psu_version
+                            } else {
+                                exchange.request[4]
+                            };
+                            let checksum = u16::from(data) + u16::from(command) + 6;
+                            vec![
+                                0x55,
+                                0xaa,
+                                6,
+                                command,
+                                data,
+                                0,
+                                checksum as u8,
+                                (checksum >> 8) as u8,
+                            ]
+                        }
+                        _ => return Err("unexpected command: fixture does not implement it".into()),
+                    };
+                    Ok(R::Bytes(response))
+                }
+                A::ReadChipAddresses { .. } => {
+                    let count = if self.short_chain { 113 } else { 114 };
+                    let id = chip_observation().chip_id();
+                    Ok(R::ChipAddresses((0..count).map(|i| (i * 2, id)).collect()))
+                }
+                A::Work { .. } if self.fail_work => Err("injected FIFO write failure".into()),
+                _ => Ok(R::Complete),
+            }
+        }
+    }
+    fn fixture() -> (
+        StockFixtureIo,
+        Arc<std::sync::Mutex<Vec<Bm1398RuntimeAction>>>,
+        Bm1398RuntimeConfig,
+    ) {
+        let events = Arc::new(std::sync::Mutex::new(vec![]));
+        let io = StockFixtureIo {
+            events: events.clone(),
+            pic_version: 0x89,
+            psu_version: 0x71,
+            short_chain: false,
+            fail_work: false,
+        };
+        let policy = PacedEnumerationPolicy::new(
+            Duration::from_millis(1),
+            Duration::from_millis(10),
+            Duration::from_millis(500),
+            1,
+        )
+        .unwrap();
+        let config = Bm1398RuntimeConfig {
+            plan: Bm1398HybridDeskPlan::s19_pro(policy, Bm1398FpgaMidstateMode::Four),
+            active_chains: vec![0],
+            frequency_mhz: 525,
+            voltage_cv: 1280,
+        };
+        (io, events, config)
+    }
+    #[test]
+    fn nbp1901_factory_runtime_executes_startup_work_and_power_first_shutdown() {
+        let (io, events, config) = fixture();
+        let mut runtime = Bm1398Runtime::new("am2-s19pro", config, io).unwrap();
+        ready(runtime.start()).unwrap();
+        assert_eq!(runtime.state(), Bm1398RuntimeState::Ready);
+        // Exercise a real extended identifier beyond the old256-slot ledger.
+        ready(runtime.submit_work(0, &[0xfffc; 36])).unwrap();
+        let before_shutdown = events.lock().unwrap().len();
+        ready(runtime.shutdown()).unwrap();
+        let trace = events.lock().unwrap();
+        assert_eq!(
+            trace[before_shutdown],
+            Bm1398RuntimeAction::TerminalPowerOff
+        );
+        assert!(trace.iter().any(
+            |a| matches!(a, Bm1398RuntimeAction::Work { chain: 0, words } if words.len() == 36)
+        ));
+        let assignments = trace
+            .iter()
+            .filter(|a| {
+                matches!(
+                    a,
+                    Bm1398RuntimeAction::Asic {
+                        operation: dcentrald_common::TransportOp::SendSetAddressBm1397Plus { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(assignments, 114);
+        assert_eq!(runtime.state(), Bm1398RuntimeState::Stopped);
+    }
+    #[test]
+    fn nbp1901_factory_runtime_refuses_incomplete_chain_before_pll_or_work() {
+        let (mut io, events, config) = fixture();
+        io.short_chain = true;
+        let mut runtime = Bm1398Runtime::new("am2-s19pro", config, io).unwrap();
+        assert!(ready(runtime.start()).is_err());
+        let trace = events.lock().unwrap();
+        assert!(!trace.iter().any(|a| matches!(
+            a,
+            Bm1398RuntimeAction::ConfigureWork { .. } | Bm1398RuntimeAction::Work { .. }
+        )));
+        assert!(trace.contains(&Bm1398RuntimeAction::HashPower { enabled: false }));
+        assert!(trace.contains(&Bm1398RuntimeAction::TerminalPowerOff));
+    }
+    #[test]
+    fn nbp1901_factory_runtime_unknown_pic_never_receives_mutating_pic_commands() {
+        let (mut io, events, config) = fixture();
+        io.pic_version = 0x86;
+        let mut runtime = Bm1398Runtime::new("am2-s19pro", config, io).unwrap();
+        assert!(ready(runtime.start()).is_err());
+        let trace = events.lock().unwrap();
+        assert!(!trace.iter().any(|a| matches!(a, Bm1398RuntimeAction::I2c(e) if e.request[3] == 0x15 || e.request[3] == 0x16 || e.request[3] == 0x83)));
+        assert!(!trace.contains(&Bm1398RuntimeAction::HashPower { enabled: true }));
+    }
+    #[test]
+    fn nbp1901_factory_runtime_work_failure_permanently_faults_and_cuts_power() {
+        let (mut io, events, config) = fixture();
+        io.fail_work = true;
+        let mut runtime = Bm1398Runtime::new("am2-s19pro", config, io).unwrap();
+        ready(runtime.start()).unwrap();
+        let failure = ready(runtime.submit_work(0, &[0; 36])).unwrap_err();
+        assert_eq!(failure.detail, "injected FIFO write failure");
+        assert!(failure.shutdown_errors.is_empty());
+        assert_eq!(runtime.state(), Bm1398RuntimeState::Faulted);
+        let trace = events.lock().unwrap();
+        let work = trace
+            .iter()
+            .position(|a| matches!(a, Bm1398RuntimeAction::Work { .. }))
+            .unwrap();
+        assert_eq!(trace[work + 1], Bm1398RuntimeAction::TerminalPowerOff);
     }
 }
 

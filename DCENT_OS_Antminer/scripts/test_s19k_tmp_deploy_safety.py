@@ -17,6 +17,51 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 SUPERVISOR_CUSTODY = SCRIPTS / "dcentrald_s19k_braiins_supervisor_custody.sh"
 STOCK_RESTART_HELPER = SCRIPTS / "dcentrald_s19k_stock_restart_from_safeoff.sh"
+COMMON_DEPLOY_RS = ROOT / "dcentrald" / "dcentrald-common" / "src" / "s19k_braiins_tmp_deploy.rs"
+
+
+def daemon_admitted_journal_destinations() -> list[str]:
+    """Trial basenames the daemon's publisher-v1 admits, read from the single
+    Rust admission set so no fake daemon below can be more permissive than the
+    sealed binary (2026-09-01: the live daemon refused every post-SafeOff
+    receipt while the fake daemon linked anything)."""
+    source = COMMON_DEPLOY_RS.read_text(encoding="utf-8")
+    start = source.index(
+        "pub const S19K_EPHEMERAL_JOURNAL_TRIAL_DESTINATIONS: &[&str] = &["
+    )
+    end = source.index("];", start)
+    names = re.findall(r'"([a-z0-9_]+)"', source[start:end])
+    if len(names) < 7 or len(set(names)) != len(names):
+        raise AssertionError("daemon journal admission set is unreadable")
+    return names
+
+
+DAEMON_ADMITTED_JOURNAL_DESTINATIONS = daemon_admitted_journal_destinations()
+
+
+def publisher_admission_sh(source_var: str, destination_var: str, indent: str) -> str:
+    """POSIX-sh mirror of classify_s19k_ephemeral_journal_destination() for the
+    fake daemons: same-directory trial journals from the admitted set, the
+    global lock ``owner`` (the harness remaps the lock dir to
+    ``<trial>.board-global-lock``), and ``endurance_evidence/acks/ack.NNNNNN.kv``
+    from a ``.ack.*`` scratch beside it. Anything else exits 87 without linking."""
+    names = "|".join(DAEMON_ADMITTED_JOURNAL_DESTINATIONS)
+    lines = [
+        f'P_DST_NAME=${{{destination_var}##*/}}; P_DST_DIR=${{{destination_var}%/*}}; '
+        f'P_SRC_DIR=${{{source_var}%/*}}; P_SRC_NAME=${{{source_var}##*/}}',
+        'case "$P_DST_NAME" in',
+        f'    {names}) [ "$P_DST_DIR" = "$P_SRC_DIR" ] && [ "${{P_SRC_DIR##*/}}" != acks ] '
+        '&& [ "${P_SRC_NAME#.}" != "$P_SRC_NAME" ] || exit 87 ;;',
+        '    owner) case "$P_DST_DIR" in /tmp/dcent-s19k-track1-runtime-lock|*.board-global-lock) ;; '
+        '*) exit 87 ;; esac ;;',
+        '    ack.[0-9][0-9][0-9][0-9][0-9][0-9].kv) [ "$P_DST_DIR" = "$P_SRC_DIR" ] '
+        '&& [ "${P_SRC_DIR##*/}" = acks ] && [ "${P_SRC_NAME#.ack.}" != "$P_SRC_NAME" ] || exit 87 ;;',
+        "    *) exit 87 ;;",
+        "esac",
+    ]
+    return "".join(f"{indent}{line}\n" for line in lines)
+
+
 
 # Fake Track-1 daemon for the J2/release orphan regression. It implements the
 # daemon-v1 pre-runtime bootstrap contract exactly (C1/J1 ordered journals,
@@ -259,6 +304,14 @@ exit 0
 # runner path must never appear as a whole argv element of this launcher (the
 # runner's competing-wrapper scan globs "$PREFIX"*/run_trial), so every path is
 # derived from $0.
+J2_ORPHAN_FAKE_DAEMON = J2_ORPHAN_FAKE_DAEMON.replace(
+    'if [ -n "$P_SRC" ] && [ -n "$P_DST" ]; then\n    ln "$P_SRC" "$P_DST"\n',
+    'if [ -n "$P_SRC" ] && [ -n "$P_DST" ]; then\n'
+    + publisher_admission_sh("P_SRC", "P_DST", "    ")
+    + '    ln "$P_SRC" "$P_DST"\n',
+)
+assert J2_ORPHAN_FAKE_DAEMON.count("exit 87") == 4
+
 J2_ORPHAN_LAUNCHER = r'''#!/bin/sh
 TRIGGER=$1; OUT=$2; PIDFILE=$3; shift 3
 BASE=${0%.launcher}
@@ -2379,8 +2432,9 @@ exit 0
                 "--s19k-track1-durable-replace-new-bytes) previous=durable_new_bytes; continue ;; esac\n"
                 "  previous=\n"
                 "done\n"
-                "if [ -n \"$source_path\" ] && [ -n \"$destination_path\" ]; then "
-                "ln \"$source_path\" \"$destination_path\"; exit $?; fi\n"
+                "if [ -n \"$source_path\" ] && [ -n \"$destination_path\" ]; then\n"
+                + publisher_admission_sh("source_path", "destination_path", "  ")
+                + "  ln \"$source_path\" \"$destination_path\"; exit $?; fi\n"
                 "if [ -n \"$durable_source\" ] || [ -n \"$durable_destination\" ]; then\n"
                 "  [ -n \"$durable_source\" ] && [ -n \"$durable_destination\" ] && "
                 "[ -n \"$durable_old_sha\" ] && [ -n \"$durable_old_bytes\" ] && "
@@ -6958,6 +7012,153 @@ class S19kInstallCustodyStaticTests(unittest.TestCase):
         self.assertIn("next_authority=exact-stock-restart-helper-only", self.runner)
         self.assertIn("stock restart remains pending", self.runner)
 
+
+class S19kJournalPublisherAdmissionTests(unittest.TestCase):
+    """The daemon's publisher-v1 destination set, the runner's publications,
+    and the offline fake daemons must agree. 2026-09-01 live regression: the
+    sealed daemon refused every post-SafeOff receipt the runner published
+    (``S19k journal destination is not an admitted startup authority path``)
+    while the fake daemon linked anything, so 40/40 offline scenarios stayed
+    green through a bench failure."""
+
+    RECEIPTS = (
+        "runtime_install_custody_transcript",
+        "runtime_handoff_no_work_transcript",
+        "runtime_bounded_work_transcript",
+        "runtime_endurance_work_receipt",
+        "runtime_endurance_failure_receipt",
+    )
+
+    def setUp(self) -> None:
+        self.runner = (SCRIPTS / "dcentrald_s19k_tmp_remote_run.sh").read_text(
+            encoding="utf-8"
+        )
+        self.common = COMMON_DEPLOY_RS.read_text(encoding="utf-8")
+        self.rust = (
+            ROOT / "dcentrald" / "dcentrald" / "src" / "serial_mining.rs"
+        ).read_text(encoding="utf-8")
+
+    @staticmethod
+    def runner_publications(script: str) -> list[tuple[str, str]]:
+        calls = re.findall(
+            r'^\s*publish_no_clobber_journal(?:_keep_source)? "\$([A-Z0-9_]+)" "\$([A-Z0-9_]+)"',
+            script,
+            flags=re.M,
+        )
+        return [
+            (source, destination)
+            for source, destination in calls
+            if (source, destination) != ("JOURNAL_SOURCE", "JOURNAL_DESTINATION")
+        ]
+
+    @staticmethod
+    def trial_assignment(script: str, var: str) -> str | None:
+        match = re.search(
+            rf'^\s*{re.escape(var)}="\$TRIAL_DIR/([A-Za-z0-9_.-]+)"$', script, flags=re.M
+        )
+        return match.group(1) if match else None
+
+    def test_runner_destinations_are_all_daemon_admitted(self) -> None:
+        publications = self.runner_publications(self.runner)
+        self.assertGreaterEqual(len(publications), 12)
+        trial_names: list[str] = []
+        special: list[str] = []
+        for _source, destination in publications:
+            name = self.trial_assignment(self.runner, destination)
+            if name is None:
+                special.append(destination)
+                continue
+            trial_names.append(name)
+        self.assertEqual(sorted(set(special)), ["ENDURANCE_ACK", "RUNTIME_LOCK_OWNER"])
+        self.assertEqual(
+            sorted(set(trial_names) - set(DAEMON_ADMITTED_JOURNAL_DESTINATIONS)), []
+        )
+        for receipt in self.RECEIPTS:
+            self.assertIn(receipt, trial_names)
+            self.assertIn(receipt, DAEMON_ADMITTED_JOURNAL_DESTINATIONS)
+
+    def test_daemon_publisher_and_runner_contract_share_the_set(self) -> None:
+        self.assertIn(
+            "classify_s19k_ephemeral_journal_destination(source, destination)", self.rust
+        )
+        self.assertNotIn('| "runtime_startup_j2_child_bound"', self.rust)
+        self.assertIn("fn s19k_ephemeral_ack_parent(", self.rust)
+        contract = self.common[
+            self.common.index("pub fn admit_s19k_tmp_remote_runner_ephemeral(") :
+        ]
+        contract = contract[: contract.index("\npub struct S19kTmpDeployRequest")]
+        self.assertIn("admit_s19k_runner_journal_destinations(script)?;", contract)
+        for receipt in self.RECEIPTS:
+            self.assertIn(f'    "{receipt}",\n', self.common)
+
+    def test_fake_daemons_carry_the_admission_snippet(self) -> None:
+        self.assertIn(publisher_admission_sh("P_SRC", "P_DST", "    "), J2_ORPHAN_FAKE_DAEMON)
+        source = Path(__file__).read_text(encoding="utf-8")
+        self.assertIn(
+            'publisher_admission_sh("source_path", "destination_path", "  ")', source
+        )
+
+    def test_fake_daemon_refuses_what_the_daemon_refuses(self) -> None:
+        # One WSL invocation for every case: a burst of wsl.exe sessions can
+        # trip WSL_E_TTY_LIMIT and masquerade as a stub failure.
+        admitted = [
+            (f".{name}.tmp.1.2", name) for name in DAEMON_ADMITTED_JOURNAL_DESTINATIONS
+        ] + [("endurance_evidence/acks/.ack.3.tmp.1.2", "endurance_evidence/acks/ack.000003.kv")]
+        refused = [
+            (
+                ".runtime_bounded_work_transcript.tmp.9.9",
+                "runtime_bounded_work_transcript_v2",
+            ),
+            (".ack.4.tmp.1.2", "ack.000004.kv"),
+            (
+                "endurance_evidence/acks/.runtime_startup_release.tmp.1.2",
+                "endurance_evidence/acks/runtime_startup_release",
+            ),
+            (".runtime_startup_release.tmp.3.3", "endurance_evidence/runtime_startup_release"),
+        ]
+        probe = ["#!/bin/sh", 'D=$(dirname "$0")', "mkdir -p \"$D/endurance_evidence/acks\""]
+        probe.append(
+            'run() { printf \'x\\n\' > "$D/$1"; sh "$D/dcentrald" --s19k-track1-journal-source "$D/$1" '
+            '--s19k-track1-journal-destination "$D/$2" >/dev/null 2>&1; rc=$?; '
+            'if [ -e "$D/$2" ]; then ex=1; else ex=0; fi; printf \'%s %s %s\\n\' "$rc" "$ex" "$2"; }'
+        )
+        for source, destination in admitted + refused:
+            probe.append(f'run "{source}" "{destination}"')
+        remote_dir = subprocess.check_output(
+            ["wsl.exe", "mktemp", "-d", "/tmp/dcentrald_bench_t1_pubstub.XXXXXX"],
+            text=True,
+        ).strip()
+        try:
+            subprocess.run(
+                [
+                    "wsl.exe",
+                    "sh",
+                    "-c",
+                    f"cat > {shlex.quote(remote_dir)}/dcentrald "
+                    f"&& chmod 700 {shlex.quote(remote_dir)}/dcentrald",
+                ],
+                input=J2_ORPHAN_FAKE_DAEMON.encode("utf-8"),
+                check=True,
+            )
+            subprocess.run(
+                ["wsl.exe", "sh", "-c", f"cat > {shlex.quote(remote_dir)}/probe.sh"],
+                input="\n".join(probe).encode("utf-8") + b"\n",
+                check=True,
+            )
+            output = subprocess.check_output(
+                ["wsl.exe", "sh", f"{remote_dir}/probe.sh"], text=True
+            )
+        finally:
+            subprocess.run(["wsl.exe", "rm", "-rf", remote_dir], check=False)
+        observed = {}
+        for line in output.splitlines():
+            code, exists, destination = line.split(" ", 2)
+            observed[destination] = (int(code), exists == "1")
+        for _source, destination in admitted:
+            self.assertEqual(observed.get(destination), (0, True), destination)
+        for _source, destination in refused:
+            self.assertEqual(observed.get(destination), (87, False), destination)
+        self.assertEqual(len(observed), len(admitted) + len(refused))
 
 if __name__ == "__main__":
     unittest.main()

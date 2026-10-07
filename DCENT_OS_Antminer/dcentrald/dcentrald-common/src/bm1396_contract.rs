@@ -112,7 +112,12 @@ pub const BM1396_FAN_TACH_SPECIAL_RPM_PER_COUNT: u32 = 240;
 /// code truncates FPGA offset 0 to signed i16 before comparing, so upper bits
 /// are intentionally ignored.
 pub const BM1396_FAN_TACH_DOUBLE_RATE_HW_ID_LOW16: u16 = 0xb025;
+/// Exact signed-2020 T17e startup sets 100% at 0x18b50/0x18b54
+/// (`set_fan_pwm` 0x4a3d0), before calling validation(4000, 1) at
+/// 0x194d4..0x194dc. This threshold belongs to that high-PWM startup.
+pub const BM1396_STOCK_STARTUP_FAN_PWM_PERCENT: u8 = 100;
 pub const BM1396_STARTUP_FAN_MIN_RPM: u32 = 4_000;
+pub const BM1396_QUIET_FAN_PWM_PERCENT: u8 = 30;
 pub const BM1396_RUNTIME_FAN_MIN_RPM: u32 = 400;
 /// Exact integer passed to the recovered delay wrapper after a bad sample.
 pub const BM1396_STARTUP_FAN_BAD_SAMPLE_DELAY_CALL_VALUE: u32 = 2_000;
@@ -479,6 +484,17 @@ pub const fn bm1396_fan_validation_policy(
     }
 }
 
+/// Quiet30 uses the recovered running-fan predicate in every powered phase.
+/// Signed-2020 T17e calls validation(400, 0) at 0x4f418..0x4f420 and
+/// 0x4f4b0..0x4f4b8. The stock 100%-PWM/4000-RPM startup test cannot be
+/// transplanted beneath the home PWM30 cap, and no linear PWM/RPM law is
+/// established by those bytes. This policy checks four spinning fans; actual
+/// quiet-profile airflow remains a physical qualification, with independent
+/// temperature limits and immediate source cutoff retained.
+pub const fn bm1396_quiet_fan_validation_policy() -> Bm1396FanValidationPolicy {
+    bm1396_fan_validation_policy(Bm1396FanValidationPhase::Runtime)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bm1396FanTachReading {
     pub fan_id: u8,
@@ -799,15 +815,17 @@ pub enum Bm1396SensorAggregationFamily {
     Other,
 }
 
-/// Model-specific sensor-type grouping used only for aggregation bins. It does
-/// not select the channel-1 transform; that is the caller sampling mode.
+/// Model-specific sensor chip-ordinal grouping used only for aggregation bins.
+/// Exact signed topology constructors 4bb74/4c764 populate this discriminator;
+/// it is not the sensor manufacturer ID read from register FE. It does not
+/// select the channel-1 transform; that is the caller sampling mode.
 pub const fn bm1396_sensor_aggregation_family(
     model: Bm1396Model,
-    sensor_type: u8,
+    sensor_chip_ordinal: u8,
 ) -> Bm1396SensorAggregationFamily {
     let family_a = match model {
-        Bm1396Model::S17e => sensor_type == 0x1b || sensor_type == 0x63,
-        Bm1396Model::T17e => sensor_type == 0x11 || sensor_type == 0x41,
+        Bm1396Model::S17e => sensor_chip_ordinal == 0x1b || sensor_chip_ordinal == 0x63,
+        Bm1396Model::T17e => sensor_chip_ordinal == 0x11 || sensor_chip_ordinal == 0x41,
     };
     if family_a {
         Bm1396SensorAggregationFamily::FamilyA
@@ -1329,6 +1347,33 @@ mod tests {
             plan_bm1396_vendor_voltage_dac_ramp(1900, 2200),
             Err(Bm1396VoltageOutsideVendorEnvelope { requested_cv: 2200 })
         );
+    }
+
+    #[test]
+    fn quiet30_uses_four_spinning_fans_without_importing_stock_full_pwm_startup() {
+        let policy = bm1396_quiet_fan_validation_policy();
+        assert_eq!(BM1396_STOCK_STARTUP_FAN_PWM_PERCENT, 100);
+        assert_eq!(BM1396_QUIET_FAN_PWM_PERCENT, 30);
+        assert_eq!(
+            policy,
+            bm1396_fan_validation_policy(Bm1396FanValidationPhase::Runtime)
+        );
+        assert_eq!(policy.minimum_rpm, 400);
+        let readings: Vec<_> = (0..8)
+            .map(|index| bm1396_decode_fan_tach(0, ((index % 4) << 8) | 4))
+            .collect();
+        assert!(readings.iter().all(|reading| reading.rpm == 480));
+        assert!(bm1396_fan_sample_passes(policy, &readings));
+        assert!(!bm1396_fan_sample_passes(
+            bm1396_fan_validation_policy(Bm1396FanValidationPhase::Startup),
+            &readings
+        ));
+        let stopped: Vec<_> = (0..8)
+            .map(|index| bm1396_decode_fan_tach(0, ((index % 4) << 8) | 3))
+            .collect();
+        assert!(!bm1396_fan_sample_passes(policy, &stopped));
+        let repeated = vec![bm1396_decode_fan_tach(0, 40); 8];
+        assert!(!bm1396_fan_sample_passes(policy, &repeated));
     }
 
     #[test]

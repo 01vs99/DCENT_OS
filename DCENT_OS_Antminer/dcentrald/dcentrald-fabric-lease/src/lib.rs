@@ -125,10 +125,17 @@ pub mod topology {
     /// Evidence:  section 15.
     pub const STOCK_S9_FPGA_IIC: PhysicalI2cFabricId = PhysicalI2cFabricId::topology_defined(2);
 
+    /// Exact AM3 S21 software I2C on GPIO476/477 (AXG GPIOX18/19).
+    /// The held DTB's enabled I2C1-Z and AO adapters use different wires.
+    /// A future kernel I2C2 alias on these pins MUST share this identity.
+    /// Evidence: beta campaign evidence/r13/production-psu.md.
+    pub const AM3_PSU_GPIO: PhysicalI2cFabricId = PhysicalI2cFabricId::topology_defined(3);
+
     /// Machine-readable registry used by collision tests and documentation.
     pub const NAMED_PHYSICAL_I2C_FABRICS: &[(&str, PhysicalI2cFabricId)] = &[
         ("am2-psu-gpio", AM2_PSU_GPIO),
         ("stock-s9-fpga-iic", STOCK_S9_FPGA_IIC),
+        ("am3-psu-gpio", AM3_PSU_GPIO),
     ];
 }
 

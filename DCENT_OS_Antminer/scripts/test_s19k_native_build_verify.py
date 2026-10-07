@@ -289,6 +289,12 @@ class NativeBuildReceiptTests(unittest.TestCase):
                 result["manifest_public_key_sha256"],
                 hashlib.sha256(bytes.fromhex(MANIFEST_PUBLIC_KEY_HEX)).hexdigest(),
             )
+            self.assertEqual(
+                fixture.capsule_receipt["compile_environment"]["entries"]["CARGO_BUILD_JOBS"], "2"
+            )
+            self.assertEqual(
+                fixture.capsule_receipt["compile_environment"]["entries"]["CARGO_INCREMENTAL"], "0"
+            )
             self.assertFalse(result["network_nonuse_proven"])
             self.assertEqual(result["network_contract"], build.NETWORK_CONTRACT)
             self.assertFalse(result["release_authority_granted"])
@@ -358,6 +364,39 @@ class NativeBuildReceiptTests(unittest.TestCase):
                 build.verify_receipt(
                     fixture.receipt_path, fixture.artifact, repo_root=fixture.repo
                 )
+
+    def test_missing_or_unbounded_cargo_resources_are_rejected(self) -> None:
+        temporary, fixture = self.fixture()
+        with temporary:
+            for key, value in (
+                ("CARGO_BUILD_JOBS", None),
+                ("CARGO_BUILD_JOBS", "1"),
+                ("CARGO_BUILD_JOBS", "3"),
+                ("CARGO_BUILD_JOBS", "02"),
+                ("CARGO_INCREMENTAL", None),
+                ("CARGO_INCREMENTAL", "1"),
+                ("CARGO_INCREMENTAL", "false"),
+                ("CARGO_INCREMENTAL", "00"),
+            ):
+                with self.subTest(key=key, value=value):
+                    nested = copy.deepcopy(fixture.capsule_receipt)
+                    entries = dict(nested["compile_environment"]["entries"])
+                    if value is None:
+                        del entries[key]
+                    else:
+                        entries[key] = value
+                    nested["compile_environment"] = context(
+                        "inventory/compile-env.txt",
+                        [f"{name}={item}" for name, item in sorted(entries.items())],
+                        entries,
+                    )
+                    with self.assertRaisesRegex(build.NativeBuildError, "sanitized"):
+                        build.make_receipt(
+                            fixture.artifact,
+                            capsule_build_receipt=nested,
+                            cargo_metadata_data=fixture.metadata_data,
+                            repo_root=fixture.repo,
+                        )
 
     def test_hostile_compile_environment_is_rejected(self) -> None:
         temporary, fixture = self.fixture()

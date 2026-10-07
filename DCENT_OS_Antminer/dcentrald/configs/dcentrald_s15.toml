@@ -43,8 +43,9 @@ http_port = 8080
 websocket = true
 
 [donation]
+# DCENT_OS ships 0% by default; percent only matters when opted in.
 enabled = false
-percent = 2.0
+percent = 0.0
 pool_url = ""
 worker = ""
 password = "x"

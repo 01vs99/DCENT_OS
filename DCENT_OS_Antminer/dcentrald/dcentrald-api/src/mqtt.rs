@@ -1078,8 +1078,10 @@ pub use crate::mqtt_security::{
 /// Apply TLS transport when the broker URL requests it.
 ///
 /// Default builds (`mqtt-tls` cargo feature OFF) refuse `mqtts://` rather than
-/// silently downgrade to plaintext TCP. Opt-in builds set rumqttc's rustls
-/// transport. MQTT itself stays default-OFF (`[mqtt] enabled = false`).
+/// silently downgrade to plaintext TCP. Opt-in builds inject a modern rustls
+/// config with an explicit ring provider and the platform's trust roots. This
+/// bypasses rumqttc's legacy PEM configuration branch; no global provider or
+/// unmaintained PEM parser is needed. MQTT stays default-OFF in configuration.
 pub fn apply_mqtt_tls_transport(
     mqttoptions: &mut MqttOptions,
     broker_url: &str,
@@ -1089,7 +1091,13 @@ pub fn apply_mqtt_tls_transport(
     }
     #[cfg(feature = "mqtt-tls")]
     {
-        mqttoptions.set_transport(rumqttc::Transport::tls_with_default_config());
+        let native = rustls_native_certs::load_native_certs();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add_parsable_certificates(native.certs);
+        let config = mqtt_tls_client_config(roots)?;
+        mqttoptions.set_transport(rumqttc::Transport::tls_with_config(
+            rumqttc::TlsConfiguration::Rustls(std::sync::Arc::new(config)),
+        ));
         Ok(())
     }
     #[cfg(not(feature = "mqtt-tls"))]
@@ -1103,6 +1111,22 @@ pub fn apply_mqtt_tls_transport(
             broker_display
         )
     }
+}
+
+#[cfg(feature = "mqtt-tls")]
+fn mqtt_tls_client_config(roots: rustls::RootCertStore) -> anyhow::Result<rustls::ClientConfig> {
+    anyhow::ensure!(
+        !roots.is_empty(),
+        "MQTT TLS requires at least one valid platform trust root"
+    );
+    Ok(
+        rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(roots)
+        .with_no_client_auth(),
+    )
 }
 
 pub fn mqtt_command_token_is_present() -> bool {
@@ -1730,6 +1754,82 @@ mod ha_discovery_schema_tests {
 #[cfg(test)]
 mod broker_tls_guard_tests {
     use super::*;
+
+    #[cfg(feature = "mqtt-tls")]
+    fn tls_handshake(ca: &[u8], server_name: &'static str) -> Result<(), rustls::Error> {
+        use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
+        use std::io::Cursor;
+        use std::sync::Arc;
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(CertificateDer::from(ca.to_vec())).unwrap();
+        let client_config = mqtt_tls_client_config(roots).unwrap();
+        let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from(
+                include_bytes!("../tests/fixtures/mqtt_tls/server.der").to_vec(),
+            )],
+            PrivatePkcs8KeyDer::from(
+                include_bytes!("../tests/fixtures/mqtt_tls/server-key.der").to_vec(),
+            )
+            .into(),
+        )
+        .unwrap();
+        let mut client = rustls::ClientConnection::new(
+            Arc::new(client_config),
+            ServerName::try_from(server_name).unwrap(),
+        )?;
+        let mut server = rustls::ServerConnection::new(Arc::new(server_config))?;
+        // Real TLS certificate verification over in-memory records. No socket,
+        // broker, external certificate authority, or miner is contacted.
+        for _ in 0..16 {
+            let mut outbound = Vec::new();
+            client.write_tls(&mut outbound).unwrap();
+            if !outbound.is_empty() {
+                server.read_tls(&mut Cursor::new(outbound)).unwrap();
+                server.process_new_packets()?;
+            }
+            let mut inbound = Vec::new();
+            server.write_tls(&mut inbound).unwrap();
+            if !inbound.is_empty() {
+                client.read_tls(&mut Cursor::new(inbound)).unwrap();
+                client.process_new_packets()?;
+            }
+            if !client.is_handshaking() && !server.is_handshaking() {
+                return Ok(());
+            }
+        }
+        panic!("in-memory MQTT TLS handshake did not complete");
+    }
+
+    #[cfg(feature = "mqtt-tls")]
+    #[test]
+    fn mqtt_tls_verifies_trust_and_hostname_with_explicit_ring() {
+        let ca = include_bytes!("../tests/fixtures/mqtt_tls/ca.der");
+        tls_handshake(ca, "broker.example").unwrap();
+        assert!(matches!(
+            tls_handshake(ca, "wrong.example"),
+            Err(rustls::Error::InvalidCertificate(_))
+        ));
+        assert!(matches!(
+            tls_handshake(
+                include_bytes!("../tests/fixtures/mqtt_tls/untrusted-ca.der"),
+                "broker.example"
+            ),
+            Err(rustls::Error::InvalidCertificate(_))
+        ));
+    }
+
+    #[cfg(feature = "mqtt-tls")]
+    #[test]
+    fn mqtt_tls_refuses_missing_trust_roots() {
+        assert!(mqtt_tls_client_config(rustls::RootCertStore::empty()).is_err());
+    }
 
     /// FAIL-CLOSED PIN (MQTT-TLS-DOWNGRADE-1): every TLS-requesting scheme is
     /// detected so the connect sites refuse rather than silently downgrade an

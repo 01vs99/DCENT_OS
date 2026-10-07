@@ -62,23 +62,34 @@ esac
 # build_in_docker.sh's target list and the memory rule's mapping table.
 case "$target" in
     s9|am1-s9)             stem="DCENTOS_XIL1_S9" ;;
+    am1-s9i)              stem="DCENTOS_XIL1_S9i" ;;
+    am1-s9j)              stem="DCENTOS_XIL1_S9j" ;;
+    am1-s9se)             stem="DCENTOS_XIL1_S9SE" ;;
+    am1-s9k)              stem="DCENTOS_XIL1_S9k" ;;
     am1-s15)               stem="DCENTOS_XIL1_S15" ;;
     am1-t15)               stem="DCENTOS_XIL1_T15" ;;
     am2-s17p|am2-s17pro)   stem="DCENTOS_XIL2_S17" ;;
     am2-s17plus)           stem="DCENTOS_XIL2_S17Plus" ;;
     am2-t17)               stem="DCENTOS_XIL2_T17" ;;
     am2-t17plus)           stem="DCENTOS_XIL2_T17Plus" ;;
+    am2-t17e)              stem="DCENTOS_XIL2_T17e" ;;
+    am2-s17e)              stem="DCENTOS_XIL2_S17e" ;;
     x17-s17e-dspic-planned) stem="DCENTOS_XIL2_S17e" ;;
     x17-t17e-pic16-planned) stem="DCENTOS_XIL2_T17e" ;;
     am2-s19)               stem="DCENTOS_XIL3_S19" ;;
+    am2-s19a)              stem="DCENTOS_XIL3_S19a" ;;
+    am2-s19plus)           stem="DCENTOS_XIL3_S19Plus" ;;
     am2-s19pro)            stem="DCENTOS_XIL3_S19Pro" ;;   # BM1398. GEN=3 (S19-era); operator to confirm 2 vs 3.
     am2-s19j)              stem="DCENTOS_XIL3_S19j" ;;
     am2-s19jpro|am2-s19jpro-zynq|am2-s19jpro-sd) stem="DCENTOS_XIL3_S19jPro" ;;
     am2-t19)               stem="DCENTOS_XIL3_T19" ;;
-    am3-bb|am3-bb-s19jpro|am3-bb-s19jpro-vnish) stem="DCENTOS_BB3_S19jPro" ;;
+    am3-bb|am3-bb-s19jpro|am3-bb-s19jpro-vnish|am3-bb-s19jpro-payload) stem="DCENTOS_BB3_S19jPro" ;;
     am3-s21)               stem="DCENTOS_AML3_S21" ;;
     am3-s19k|am3-s19kpro|am3-aml-s19kpro)  stem="DCENTOS_AML3_S19kPro" ;;
     am3-s19xp)             stem="DCENTOS_AML3_S19XP" ;;
+    am3-s19jxp)            stem="DCENTOS_AML3_S19jXP" ;;
+    am3-s19jproa)          stem="DCENTOS_AML3_S19jProA" ;;
+    am3-s19jproplus)       stem="DCENTOS_AML3_S19jProPlus" ;;
     am3-s19jpro-aml)       stem="DCENTOS_AML3_S19jPro" ;;
     am3-t21)               stem="DCENTOS_AML3_T21" ;;
     am3-s21pro)            stem="DCENTOS_AML3_S21Pro" ;;

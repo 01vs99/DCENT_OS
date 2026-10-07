@@ -45,9 +45,11 @@ driver = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 workflow = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 
 target_case = driver.split('case "$TARGET" in', 1)[1].split("esac", 1)[0]
-driver_targets = set(
-    re.findall(r"^    ([a-z0-9][a-z0-9-]*)\)$", target_case, flags=re.MULTILINE)
-)
+driver_targets = {
+    target
+    for arm in re.findall(r"^    ([a-z0-9][a-z0-9|-]*)\)$", target_case, flags=re.MULTILINE)
+    for target in arm.split("|")
+}
 assert driver_targets == policy.BUILD_DRIVER_TARGETS, (
     sorted(driver_targets),
     sorted(policy.BUILD_DRIVER_TARGETS),
@@ -58,13 +60,18 @@ assert "cv1835-s19jpro" not in policy.BUILD_DRIVER_TARGETS
 assert policy.TARGET_BUILD_INPUTS["cargo-workspace"] == ()
 for target in policy.BUILD_TARGET_POLICIES:
     selected = policy.TARGET_BUILD_INPUTS[target]
-    assert selected
+    assert selected or target == "am3-bb-s19jpro-payload", target
     assert set(policy.COMMON_CARGO_BUILD_INPUTS).isdisjoint(selected), target
 for target in policy.BLOCKED_BUILD_INPUT_TARGETS:
     assert target not in policy.TARGET_BUILD_INPUTS, target
 
 assert policy.TARGET_BUILD_INPUTS["am2-s19jpro-sd"] == policy.TARGET_BUILD_INPUTS["am2-s19jpro"]
-assert policy.TARGET_BUILD_INPUTS["am2-s19pro"] == policy.TARGET_BUILD_INPUTS["am2-s19jpro"]
+assert policy.TARGET_BUILD_INPUTS["am2-s19pro"] == (policy.AM2_S17_DONOR_RELATIVE_PATH,)
+assert policy.TARGET_BUILD_INPUTS["am1-s9se"] == policy.C43_NATIVE_INPUTS
+assert policy.TARGET_BUILD_INPUTS["am1-s9k"] == policy.C43_NATIVE_INPUTS
+assert policy.TARGET_BUILD_INPUTS["am1-s15"] == policy.BM1391_NATIVE_INPUTS
+assert policy.TARGET_BUILD_INPUTS["am1-t15"] == policy.BM1391_NATIVE_INPUTS
+assert policy.TARGET_BUILD_INPUTS["am3-bb-s19jpro-payload"] == ()
 assert policy.TARGET_BUILD_INPUTS["am2-s17pro"] == (
     policy.AM2_S17_DONOR_RELATIVE_PATH,
 )
@@ -94,11 +101,8 @@ assert selected.isdisjoint(reference_only)
 assert selected.isdisjoint(separately_verified)
 assert reference_only.isdisjoint(separately_verified)
 assert set(manifest) == selected | reference_only | separately_verified
-# The old flat S9/AM2 matrix directly invoked the inner packaging driver. The
-# admitted workflow now has one S9 capsule lane whose portable verifier checks
-# the closure-v4 retained set, while AM2 is an explicit unavailable job until it
-# owns the same lifecycle. Keep the required S9 receipt pair pinned here rather
-# than inferring authority from a mutable workflow matrix.
+# The smoke workflow delegates both explicit producers to one authenticated
+# cohort. It verifies the signed result after private-stage cleanup.
 assert tuple(sorted(policy.PREBUILT_RUST_INPUTS_BY_TARGET["s9"])) == (
     "dcentos-init",
     "dcentrald",
@@ -120,7 +124,7 @@ for readme_path in board_docs.glob("**/README.md"):
     assert not re.search(r"(?m)^\s*make\s+dev(?:\s|$)", readme), readme_path
     assert not re.search(r"(?m)^\s*make\s+release(?:\s|$)", readme), readme_path
 
-# The inner packaging driver is capability-bound. Only its authenticated S9
+# The inner packaging driver is capability-bound. Only its authenticated common
 # capsule may execute it; other build helpers may describe it but cannot use it
 # as a mutable fallback.
 scripts_dir = repo_root / "DCENT_OS_Antminer/scripts"
@@ -128,7 +132,7 @@ direct_inner_driver = re.compile(
     r"""^\s*(?:bash\s+)?["']?(?:\$[A-Z_]+/)?build_in_docker\.sh["']?(?:\s|$)"""
 )
 for wrapper_path in scripts_dir.glob("build*.sh"):
-    if wrapper_path.name in {"build_in_docker.sh", "build_s9_release_capsule.sh"}:
+    if wrapper_path.name in {"build_in_docker.sh", "build_release_capsule.sh"}:
         continue
     for line_number, line in enumerate(
         wrapper_path.read_text(encoding="utf-8").splitlines(), start=1
@@ -143,7 +147,7 @@ assert "has no authenticated real-key packaging capsule" in signing_rehearsal
 makefile = (repo_root / "DCENT_OS_Antminer/Makefile").read_text(encoding="utf-8")
 assert "RELEASE_TARGET=s9|am2" not in makefile
 assert "DEV_TARGET=s9|am2" not in makefile
-assert "Production S9 capsule only" in makefile
+assert "Selected producer capsule" in makefile
 assert "Image packaging disabled until a separate lab capsule exists" in makefile
 
 xil25_runbook = (
@@ -162,16 +166,17 @@ assert "no lab package is produced" in release_readme
 assert "does not grant packaging authority" in release_readme
 
 for required in (
-    "bash scripts/build_s9_release_capsule.sh",
-    "python3 scripts/portable_release_evidence.py verify",
-    "portable-release-evidence.json.sig",
-    ".dcent-release-set.json",
-    "DCENT_PUBLISHED_RELEASE",
+    "bash scripts/build_release_capsule.sh",
+    "--producer s9",
+    "--producer am2-s19jpro",
+    "--result-json",
+    "verify-cohort-result",
     "runs-on: [self-hosted, linux, x64, dcentos-restricted-inputs]",
     "provision_build_inputs.sh --source",
-    "AM2 package smoke: intentionally unavailable",
 ):
     assert required in workflow, required
+for obsolete in ("portable-release-evidence.json", "AM2 package smoke: intentionally unavailable", "mapfile -d"):
+    assert obsolete not in workflow, obsolete
 PY
 
 # Direct packaging has no invocation/source/result authority and must stop

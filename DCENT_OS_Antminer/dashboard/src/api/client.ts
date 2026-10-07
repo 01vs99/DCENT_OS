@@ -1,9 +1,12 @@
 // DCENTos REST API Client — typed fetch wrappers for all endpoints
 
+import { rememberUpdateJob } from '../utils/updateJob';
+
 import type {
   StatusResponse, ConfigResponse, ConfigUpdateRequest, ConfigUpdateResponse,
   DonationConfig, DonationConfigResponse, DonationInfoResponse,
   DashboardVersionResponse,
+  DiagnosticsResponse,
   SystemInfoResponse, SystemHealthResponse, SystemStatsResponse, SystemUpgradeStatusResponse, SystemAsicResponse,
   PsuOverrideRequest, PsuOverrideResponse,
   ApiCompatibilityManifestResponse,
@@ -23,6 +26,7 @@ import type {
   HeaterStatusResponse, HeaterTargetRequest, HeaterTargetResponse,
   HeaterPresetsResponse, RoomTempRequest, NightModeResponse, NightModeRequest,
   ActionResponse, FirmwareUploadResponse,
+  ChannelUpdateCheck, ChannelUpdateOperation,
   PowerCalibrationRequest, PowerCalibrationResponse,
   PsuControlRequest, PsuControlResponse,
   RegisterReadResponse, RegisterWriteRequest,
@@ -41,6 +45,7 @@ import type {
   Sv2StatusResponse, Sv2HandshakeResponse, Sv2MessagesResponse,
   JobDeclarationStatus, JobDeclarationConfig,
   OperatingMode, SetupStatusResponse, SetupCircuitRequest, SetupEconomicsRequest,
+  SshKeyStatus, SshKeyEnrollmentResult,
   OffGridConfigPayload, OffGridConfigResponse, OffGridConfigSaveResponse, OffGridPresetsResponse, OffGridProbeResponse, OffGridStatusResponse,
   NetworkHostnameResponse, NetworkInfoResponse, MinerTypeResponse,
   PvtTableResponse,
@@ -646,6 +651,10 @@ export const api = {
     }
   },
   getSetupStatus: (timeoutMs?: number) => get<SetupStatusResponse>('/api/setup/status', timeoutMs),
+  getSshKeyStatus: () => get<SshKeyStatus>('/api/system/ssh/keys'),
+  enrollSshKeys: (publicKeys: string, enableSsh: boolean) => post<SshKeyEnrollmentResult>(
+    '/api/system/ssh/keys', { public_keys: publicKeys, enable_ssh: enableSsh },
+  ),
   setupSafety: () => post<unknown>('/api/setup/step1-safety'),
   setupCircuit: (circuit: SetupCircuitRequest) => post<unknown>('/api/setup/step2-circuit', circuit),
   setupMode: (mode: OperatingMode, hostname?: string) =>
@@ -725,6 +734,17 @@ export const api = {
   getNetworkBlock: () => get<NetworkBlockResponse>('/api/network/block'),
   getSystemStats: () => get<SystemStatsResponse>('/api/system/stats'),
   getSystemUpgradeStatus: () => get<SystemUpgradeStatusResponse>('/api/system/upgrade/status'),
+  checkChannelUpdate: () => get<ChannelUpdateCheck>('/api/system/update/check', 9000),
+  fetchChannelUpdate: (feedSha256: string, artifactSha256: string) =>
+    post<ChannelUpdateOperation>('/api/system/update/fetch', { feed_sha256: feedSha256, artifact_sha256: artifactSha256 }),
+  getChannelUpdateStatus: (operationId: string) =>
+    get<ChannelUpdateOperation>(`/api/system/update/operation?operation_id=${encodeURIComponent(operationId)}`),
+  getChannelDownloads: () => get<{ download_ids: string[] }>('/api/system/update/downloads'),
+  discardChannelDownload: (downloadId: string) =>
+    post<{ discarded: boolean }>('/api/system/update/discard', { download_id: downloadId }),
+  applyChannelUpdate: (downloadId: string, feedSha256: string, artifactSha256: string, confirmation: string) =>
+    post<ChannelUpdateOperation>('/api/system/update/apply', { download_id: downloadId, feed_sha256: feedSha256,
+      artifact_sha256: artifactSha256, confirmation }),
   getSystemHealth: async (): Promise<SystemHealthResponse | null> => {
     try {
       return await get<SystemHealthResponse>('/api/system/health');
@@ -879,6 +899,8 @@ export const api = {
   // Actions
   restart: () => post<ActionResponse>('/api/action/restart'),
   reboot: () => post<ActionResponse>('/api/action/reboot'),
+  getDiagnostics: () => get<DiagnosticsResponse>('/api/diagnostics'),
+  resetSettings: (confirmation: string) => post<{ status: string; detail: string }>('/api/system/reset-settings', { confirmation }),
   sleep: () => post<ActionResponse>('/api/action/sleep'),
   wake: () => post<ActionResponse>('/api/action/wake'),
 
@@ -1062,10 +1084,12 @@ export const api = {
         }
 
         if (xhr.status >= 200 && xhr.status < 300) {
-          resolve((payload ?? {
+          const response = (payload ?? {
             status: 'transport_accepted',
             message: 'Firmware package accepted at transport level; staging or scheduling proof was not returned.',
-          }) as FirmwareUploadResponse);
+          }) as FirmwareUploadResponse;
+          rememberUpdateJob(response);
+          resolve(response);
           return;
         }
 

@@ -193,12 +193,36 @@ fi
 # fires only on the .25 MAC, so F5 (fresh unit = management-only) holds fleet-wide.
 # SHA auto-pin keeps the boot launcher matched to the dcentrald just built.
 #
+#
+# LAB-ONLY (2026-10-06 image-content leak gate): the .25 seed is a single home
+# unit's lab payload (MAC, worker suffix, LAN addresses). It is staged ONLY when
+# the explicit lab opt-in DCENT_LAB_XIL25_SEED=1 is set (default OFF), and the
+# build FAILS if that opt-in is combined with a release build (RELEASE posture
+# or DCENT_REQUIRE_RELEASE_KEY=1). Without the opt-in, the overlay-copied
+# S81dcentos-xil-seed seeder and any seed residue are removed from TARGET_DIR
+# so a release image never carries them.
 # -----------------------------------------------------------------------------
+. "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/release_posture.sh"
+XIL25_LAB_OPT_IN=0
+case "${DCENT_LAB_XIL25_SEED:-0}" in
+    1|true|TRUE|yes|YES|y|Y) XIL25_LAB_OPT_IN=1 ;;
+esac
+if [ "$XIL25_LAB_OPT_IN" = "1" ]; then
+    if dcent_release_posture_is_release || [ "${DCENT_REQUIRE_RELEASE_KEY:-0}" = "1" ]; then
+        echo "DCENTos post-build (am2-s19jpro): ERROR: DCENT_LAB_XIL25_SEED=1 is lab-only and must never be combined with a release build (release posture or DCENT_REQUIRE_RELEASE_KEY=1)" >&2
+        exit 1
+    fi
+fi
 XIL25_LAUNCHER_SRC="${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/dcentrald_standalone_boot_25.sh"
 XIL25_SEED_CFG="${BR2_EXTERNAL_DCENTOS_PATH}/../dcentrald/configs/dcentrald_s19jpro_xil25_seed.toml"
 XIL25_SEED_MGMT="${BR2_EXTERNAL_DCENTOS_PATH}/../dcentrald/configs/dcentrald_s19jpro_xil25_seed_mgmt.toml"
 XIL25_SEED_ENV="${BR2_EXTERNAL_DCENTOS_PATH}/../dcentrald/configs/dcentrald_s19jpro_xil25_seed-env"
-if [ -f "$XIL25_LAUNCHER_SRC" ] && [ -f "$XIL25_SEED_CFG" ] && [ -f "$XIL25_SEED_MGMT" ] && [ -f "$XIL25_SEED_ENV" ]; then
+if [ "$XIL25_LAB_OPT_IN" != "1" ]; then
+    rm -f "${TARGET_DIR}/etc/init.d/S81dcentos-xil25-seed" \
+          "${TARGET_DIR}/usr/local/bin/dcentrald_standalone_boot.sh"
+    rm -rf "${TARGET_DIR}/etc/dcentos/xil25-seed"
+    echo "DCENTos post-build (am2-s19jpro): XIL .25 lab seed NOT staged (DCENT_LAB_XIL25_SEED unset; seeder removed; image ships management-only default)"
+elif [ -f "$XIL25_LAUNCHER_SRC" ] && [ -f "$XIL25_SEED_CFG" ] && [ -f "$XIL25_SEED_MGMT" ] && [ -f "$XIL25_SEED_ENV" ]; then
     XIL25_BAKED_SHA=$(sha256sum "$STAGED_BIN" | awk '{print tolower($1)}')
     XIL25_SEED_DIR="${TARGET_DIR}/etc/dcentos/xil25-seed"
     mkdir -p "$XIL25_SEED_DIR"
@@ -284,7 +308,8 @@ echo "DCENTos post-build (am2-s19jpro): sha256 $(cat "${TARGET_DIR}/etc/dcentos/
 #   * pool.url / pool.worker = "" (operator configures via dashboard)
 #   * mining.enabled = false (idle-first until pool configured)
 #   * watchdog.enabled = true (HW watchdog ON by default — workspace safety rule)
-#   * donation.enabled = true (transparent 2% production policy)
+#   * donation.enabled = false (0% mandatory-fee posture; opt-in transparent
+#     donation of 1-5% is available in Settings — C6, operator 2026-09-01)
 #   * api.cgminer_port = 4028 (clean image owns the port)
 #
 # Always stamp this over the shared Zynq overlay default — the shared overlay
@@ -558,8 +583,11 @@ else
 fi
 
 # Production-readiness matrix §7 #1 (public-image trust boundary): release-image
-# marker + first-boot SSH posture when DCENT_RELEASE_IMAGE=1. NO-OP on DEV/LAB.
+# marker + first-boot SSH posture on the RELEASE posture — the DEFAULT since
+# WS-A4 (2026-09-01; canonical resolution scripts/lib/release_posture.sh).
+# NO-OP on an explicit DEV/LAB opt-out (DCENT_DEV_IMAGE=1).
 . "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/release_image_provision.sh"
+python3 "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/provision_runtime_policy.py" "$TARGET_DIR"
 dcent_provision_release_image "$TARGET_DIR" "am2-s19jpro"
 
 strip_sysupgrade_offline_harness() {

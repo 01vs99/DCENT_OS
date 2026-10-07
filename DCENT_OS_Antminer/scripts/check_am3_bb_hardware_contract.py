@@ -260,7 +260,7 @@ def validate_repository(root: Path, catalog_path: Path = DEFAULT_CATALOG) -> Lis
         )
 
     docker = read_text(root, DOCKER_BUILD, errors)
-    require_literal(docker, "am3-bb-s19jpro)", "Docker product target", errors)
+    require_literal(docker, "am3-bb-s19jpro|am3-bb-s19jpro-payload)", "Docker product and payload targets", errors)
     require_literal(docker, 'BR_DEFCONFIG="dcentos_am3_bb_s19jpro_defconfig"', "Docker product defconfig", errors)
     helper_path = Path(inventory["dtb_contract_helper"])
     helper = read_text(root, helper_path, errors)

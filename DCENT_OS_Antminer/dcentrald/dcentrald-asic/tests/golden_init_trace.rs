@@ -1,7 +1,5 @@
 #![cfg(feature = "sim-hal")]
 
-use std::path::Path;
-
 use dcentrald_asic::drivers::{ChipDriverMaturity, ChipRegistry};
 use dcentrald_hal::chain_backend::Bm1397PlusChainBackend;
 use dcentrald_hal::fpga_chain::FpgaChain;
@@ -39,6 +37,19 @@ fn parse_vector(contents: &str) -> (Value, Vec<TraceEvent>) {
         .map(|line| serde_json::from_str(line).expect("valid trace event JSON"))
         .collect();
     (header, events)
+}
+
+fn repository_relative_provenance(source: &str) -> bool {
+    !source.contains(['\\', ':'])
+        && source.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+#[test]
+fn provenance_requires_normalized_repository_relative_paths() {
+    assert!(repository_relative_provenance(""));
+    for invalid in ["", "/model.md", "../model.md", "docs/../model.md", "docs//model.md", "C:\\model.md"] {
+        assert!(!repository_relative_provenance(invalid), "{invalid:?}");
+    }
 }
 
 /// The driver maturity each golden model is registered at.
@@ -101,16 +112,18 @@ fn assert_init_vector_with_strictness(
     assert_eq!(header["model"], slug);
     assert_eq!(header["strictness"], expected_strictness);
 
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
     let provenance = header["provenance"].as_array().expect("provenance array");
     assert!(provenance.len() >= 2);
     for source in provenance {
         let source = source.as_str().expect("provenance path");
         assert!(
-            repository_root.join(source).exists(),
-            "golden source does not exist: {source}"
+            repository_relative_provenance(source),
+            "golden provenance must name a repository-relative source: {source}"
         );
     }
+    // Historical provenance is descriptive metadata and may be outside a
+    // sparse checkout. The committed literal event vector below remains the
+    // independent, exact byte oracle; no historical document is loaded here.
 
     let evidence = dcentrald_re_catalog::model_evidence(slug).expect("model catalog row");
     let registry = registry_admitting_catalogued_driver(slug, evidence.chip_id);

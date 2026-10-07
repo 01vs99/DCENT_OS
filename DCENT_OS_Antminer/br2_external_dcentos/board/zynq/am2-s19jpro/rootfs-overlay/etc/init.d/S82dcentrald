@@ -9,16 +9,16 @@
 #      (zynq-bm3-am2 / am2-s19j) vs am1-s9.
 #   2. Injects --s19j-hybrid into dcentrald launch on am2 (belt-and-suspenders
 #      with Agent α's /etc/bos_platform auto-detection in main.rs).
-#   3. **MILESTONE-PATH ENV VARS (Phase 4A, 2026-05-15 .109 FIRST ACCEPTED
+#   3. **MILESTONE-PATH ENV VARS (Phase 4A, 2026-05-15 lab-unit FIRST ACCEPTED
 #      SHARES)** — exports the three DCENT_AM2_* env vars that unlocked the
 #      first AM2 accepted-share proof on Public Pool (20/20 accepted in 5
 #      minutes). Without them, dcentrald falls through to the FPGA-FIFO path
 #      which has never produced an AM2 nonce, S99upgrade health gate fails,
 #      and U-Boot auto-reverts the firmware. See:
-#        -  (CE finding #4)
-#
-#
-#   4. Leaves I2C ownership to dcentrald. The production .139 path can use
+#        - internal engineering notes (CE finding #4)
+#        - am2 serial dispatch bip320 version rolling required rule
+#        - xil s19jpro bringup rule
+#   4. Leaves I2C ownership to dcentrald. The production lab-unit path can use
 #      gpio_bitbang PSU transport and must not force-bind xiic-i2c from init.
 #
 # Variant scope: only zynq-bm3-am2 (AM2 S19j Pro / S19 Pro Zynq) gets the
@@ -155,12 +155,12 @@ if [ "$IS_AM2" = "1" ]; then
     # profile. dcentrald treats the flag as idempotent.
     EXTRA_ARGS="$EXTRA_ARGS --s19j-hybrid"
 
-    # **MILESTONE-PATH ENV VARS** — `a lab unit` FIRST ACCEPTED SHARES (2026-05-15,
+    # **MILESTONE-PATH ENV VARS** — lab-unit FIRST ACCEPTED SHARES (2026-05-15,
     # 20/20 accepted on Public Pool). These three flags re-create the exact
     # `dcentrald` runtime that proved AM2 native mining. They are exported
     # here (not just prefixed on one launch line) so the wrapper's restart
     # loop, the safety subcommand, and any child `sh -c` re-fork all inherit
-    # them. finding #4.
+    # them. See internal engineering notes finding #4.
     #
     #   DCENT_AM2_SKIP_FAST_UART      — keep command/work path at 115200
     #                                    (FastUART handoff never produced an
@@ -171,7 +171,7 @@ if [ "$IS_AM2" = "1" ]; then
     #   DCENT_AM2_SKIP_115200_PER_CHIP — leave BM1362 cores broadcast-only
     #                                    activated (per-chip A8/MiscCtrl x3
     #                                    sequence collapses chain addressing
-    #                                    on AM2 — proven on .79 only)
+    #                                    on AM2 — proven on a lab unit only)
     #
     # NOT exported (operator-opt-in diagnostic only, default-OFF, additive):
     #   DCENT_AM2_VERIFY_PRESENCE_AFTER_EACH_PHASE — PR-019 / R11-2 ablation.
@@ -196,8 +196,8 @@ if [ "$IS_AM2" = "1" ]; then
     #
     # Sources of truth (do NOT diverge):
     #   - DCENT_OS_Antminer/scripts/run_wave54_25_PROVEN_MINING.sh
-    #
-    #
+    #   - am2 25 proven mining recipe 2026 05 24 rule
+    #   - internal engineering notes
     #
     # The `-f` test makes this source line a no-op on overlays that don't
     # ship the env file (S9 am1, am3-aml, am3-bb).
@@ -230,7 +230,7 @@ fi
 #
 #   * strace-verified sequence — gpio907 reads `1` during the reset hold and
 #     `0` coincident with "PSU: Enable", i.e. 0 = rail ON
-#     ( line 52).
+#     (internal engineering notes line 52).
 #   * `W1_2_JIG_VS_DCENT_OP_DIFF.md` states "gpio907 rail polarity active-LOW".
 #   * `/etc/default/dcentrald-am2-xil-env` documents the same, citing
 #     `psu_gpio_gate.rs:111-120`: "0" = rail ON, "1" = rail OFF.
@@ -238,7 +238,7 @@ fi
 # `am2_power_cut_proven()` below INVERTS its gpio907 comparison based on this
 # flag, so asserting ACTIVE_HIGH on an active-LOW board makes the script report
 # "power cut proven" at exactly the value that means the rail is ENERGIZED —
-# a false safe-off proof on the operator's home `a lab unit` unit.
+# a false safe-off proof on the operator's home lab unit.
 #
 # Polarity is per-unit evidence, not a board-target constant: the env file
 # deliberately scopes ACTIVE_LOW to the proven xil branch and leaves every
@@ -318,7 +318,7 @@ ensure_i2c0_kernel_bound() {
 # PIC watchdog cuts voltage within 10-60s if dcentrald is dead.
 # NEVER PWM 127 — home mining, noise is unacceptable.
 #
-# Platform dispatch:
+# Platform dispatch (am2 fan control devmem unreliable use uio mmap rule):
 #   am2 (zynq-bm3-am2): the fan-control IP @ 0x42800000 is UIO-bound — devmem
 #     reads/writes are a proven NO-OP there (a /dev/mem shadow). The ONLY
 #     reliable am2 fan write is the fan-control UIO mmap path, exposed as the
@@ -345,7 +345,7 @@ am2_power_cut_proven() {
     fi
 }
 
-# AUDIT FIX (2026-05-29, ):
+# AUDIT FIX (2026-05-29, am2 never leave unit without fan manager rule):
 # On AM2 (XIL Zynq) the fan PWM is held only while a process owns the uio16 mmap
 # AND keeps re-commanding it. The old `$DAEMON --set-fan N` here wrote the PWM
 # once and EXITED, so the board's fan IP drifted the fans back to its full-speed
@@ -397,7 +397,7 @@ fan_safety_override() {
             fi
             # Persistent custodian, NOT the exit-immediately --set-fan one-shot
             # (which left the AM2 board to revert fans to full speed). See
-            # am2_start_fan_custodian + .
+            # am2_start_fan_custodian + am2 never leave unit without fan manager rule.
             am2_start_fan_custodian "$FAN_PWM"
             return $?
         else
@@ -604,7 +604,7 @@ case "$1" in
         # resident (fan_safety_override -> am2_start_fan_custodian -> dcentrald
         # --hold-fan, PWM 10 since power is cut) so a 5-crash give-up does not
         # leave a home unit blasting. Reaped on the next start/stop/safety.
-        #
+        # (am2 never leave unit without fan manager rule)
         fan_safety_override
         ;;
 

@@ -176,6 +176,27 @@ def source_paths() -> list[Path]:
     return [root, *sorted(path for path in SOURCE_ROOT.glob("*.rs") if path != root)]
 
 
+def private_test_children() -> dict[str, str]:
+    """Account for the exact compiled test child without making it public."""
+    children = {"bm1393_native_tests": "bm1393_native"}
+    for child, parent in children.items():
+        source = (SOURCE_ROOT / f"{parent}.rs").read_text(encoding="utf-8")
+        marker = f'#[cfg(test)]\n#[path = "{child}.rs"]\nmod tests;'
+        if marker not in source:
+            raise AssertionError(f"private test-child binding drifted: {parent}/{child}")
+    return children
+
+
+def generated_source_includes() -> dict[str, str]:
+    """Bind generated source fragments without counting them as public modules."""
+    fragments = {"amlogic_gpio437_table": "amlogic_gpio437"}
+    for child, parent in fragments.items():
+        source = (SOURCE_ROOT / f"{parent}.rs").read_text(encoding="utf-8")
+        if f'include!("{child}.rs");' not in source:
+            raise AssertionError(f"generated source binding drifted: {parent}/{child}")
+    return fragments
+
+
 def integration_paths() -> list[Path]:
     return sorted(TEST_ROOT.rglob("*.rs"))
 
@@ -292,7 +313,7 @@ def build_registry() -> dict[str, object]:
 
     return {
         "schema_version": 1,
-        "generated": "2026-08-23",
+        "generated": "2026-09-07",
         "crate": "dcentrald-common",
         "crate_root": relative(CRATE_ROOT),
         "authority_ceiling": (
@@ -304,7 +325,7 @@ def build_registry() -> dict[str, object]:
         ),
         "source_policy": {
             "rust_source_files": len(sources),
-            "declared_public_modules": len(sources) - 1,
+            "declared_public_modules": len(sources) - 1 - len(private_test_children()) - len(generated_source_includes()),
             "source_bytes": sum(int(row["bytes"]) for row in rows),
             "source_tree_sha256": canonical_tree_sha256(sources),
             "public_definition_census": public_totals,
@@ -320,6 +341,8 @@ def build_registry() -> dict[str, object]:
             "production_effect_owners": effect_owners,
         },
         "sources": rows,
+        "private_test_children": private_test_children(),
+        "generated_source_includes": generated_source_includes(),
         "integration_tests": {
             "files": integration_rows,
             "test_attributes": integration_test_attributes,
@@ -363,6 +386,19 @@ def build_registry() -> dict[str, object]:
                         "Feature-gated PIC command and flash planners remain pure "
                         "descriptions with no transport, device, execution, install, "
                         "or recovery authority."
+                    ),
+                },
+                "lab": {
+                    "enabled_features": ["lab"],
+                    "target_cfg": "unix",
+                    "expected_unit_harness_tests": unix_default_unit_tests,
+                    "expected_package_harness_tests": (
+                        unix_default_unit_tests + integration_test_attributes
+                    ),
+                    "authority_ceiling": (
+                        "Compile-time hardware environment readers are enabled; "
+                        "this capability cannot authorize signed Beta/Stable runtime. "
+                        "Destructive PIC recovery planner symbols remain absent."
                     ),
                 },
             },
@@ -434,37 +470,56 @@ class DcentraldCommonSurfaceRegistryTests(unittest.TestCase):
     def test_registry_is_exact_and_complete(self) -> None:
         self.assertEqual(self.registry, self.expected)
         policy = self.registry["source_policy"]
-        self.assertEqual(policy["rust_source_files"], 139)
-        self.assertEqual(policy["declared_public_modules"], 138)
-        self.assertEqual(policy["unit_test_attributes"], 1466)
+        self.assertEqual(policy["rust_source_files"], 160)
+        self.assertEqual(policy["declared_public_modules"], 157)
+        self.assertEqual(policy["unit_test_attributes"], 1643)
         self.assertEqual(policy["benchmark_attributes"], 0)
         self.assertEqual(policy["unsafe_code_constructs"], 0)
-        self.assertEqual(self.registry["complete_rust_tree"]["files"], 140)
-        self.assertEqual(self.registry["complete_rust_tree"]["test_attributes"], 1478)
+        self.assertEqual(self.registry["complete_rust_tree"]["files"], 164)
+        self.assertEqual(self.registry["complete_rust_tree"]["test_attributes"], 1671)
 
     def test_module_declarations_and_sources_are_one_to_one(self) -> None:
         root_text = (SOURCE_ROOT / "lib.rs").read_text(encoding="utf-8")
         declared = set(
             re.findall(r"^pub mod ([A-Za-z0-9_]+);", root_text, re.MULTILINE)
         )
+        # An explicit #[path] child is a real compiled module but is not a
+        # root lib.rs declaration. Bind its parent, source and public alias.
+        nested = []
+        for parent in sorted(declared):
+            text = (SOURCE_ROOT / f"{parent}.rs").read_text(encoding="utf-8")
+            for child_source, alias in re.findall(
+                r'#\[path\s*=\s*"([^"/]+\.rs)"\]\s*pub mod ([A-Za-z0-9_]+);', text
+            ):
+                nested.append((parent, child_source, alias))
+        self.assertEqual(nested, [("s19_bm1398_runtime", "s19_bm1398_executor.rs", "executor")])
+        declared.update(Path(child_source).stem for _, child_source, _ in nested)
         source_modules = {
             path.stem for path in SOURCE_ROOT.glob("*.rs") if path.name != "lib.rs"
         }
+        children = private_test_children()
+        self.assertEqual(self.registry["private_test_children"], children)
+        fragments = generated_source_includes()
+        self.assertEqual(self.registry["generated_source_includes"], fragments)
+        children = {**children, **fragments}
+        source_modules.difference_update(children)
         registered = {
-            row["module"] for row in self.registry["sources"] if row["module"] != "lib"
+            row["module"] for row in self.registry["sources"]
+            if row["module"] != "lib" and row["module"] not in children
         }
         self.assertEqual(declared, source_modules)
         self.assertEqual(declared, registered)
-        self.assertEqual(len(declared), 138)
+        self.assertEqual(len(declared), 157)
         self.assertTrue(
             all(row["benchmark_attributes"] == 0 for row in self.registry["sources"])
         )
 
     def test_manifest_features_dependencies_and_consumers_are_exact(self) -> None:
         manifest = self.registry["manifest"]
-        self.assertEqual(manifest["direct_dependencies"], ["dcent-schema"])
+        self.assertEqual(manifest["direct_dependencies"], ["dcent-schema", "sha2"])
         self.assertEqual(manifest["dev_dependencies"], ["proptest"])
-        self.assertEqual(manifest["features"], ["default", "recovery-tool"])
+        self.assertEqual(manifest["features"], ["default", "lab", "recovery-tool"])
+        self.assertEqual(set(manifest["feature_profiles"]), set(manifest["features"]))
         self.assertEqual(manifest["direct_consumers"], DIRECT_CONSUMERS)
         self.assertEqual(
             manifest["recovery_feature_forwarding_consumers"], ["dcentrald-hal"]
@@ -477,7 +532,7 @@ class DcentraldCommonSurfaceRegistryTests(unittest.TestCase):
         self.assertEqual(effects["filesystem"], PRODUCTION_FILESYSTEM_MODULES)
         self.assertEqual(
             effects["environment"],
-            ["atomic_file", "mutation_disposition", "s19k_bm1366_wire_b"],
+            ["atomic_file", "lab_env", "mutation_disposition"],
         )
         for forbidden in ("network", "subprocess", "async_runtime", "ffi"):
             self.assertEqual(effects[forbidden], [])
@@ -496,20 +551,24 @@ class DcentraldCommonSurfaceRegistryTests(unittest.TestCase):
         self.assertEqual(
             manifest["test_harness_census"],
             {
-                "lexical_unit_test_attributes": 1466,
+                "lexical_unit_test_attributes": 1643,
                 "recovery_tool_unit_test_attributes": 6,
                 "non_unix_only_unit_test_attributes": 2,
-                "integration_test_attributes": 12,
+                "integration_test_attributes": 28,
             },
         )
         default = manifest["feature_profiles"]["default"]
         recovery = manifest["feature_profiles"]["recovery-tool"]
         self.assertEqual(default["target_cfg"], "unix")
-        self.assertEqual(default["expected_unit_harness_tests"], 1458)
-        self.assertEqual(default["expected_package_harness_tests"], 1470)
+        self.assertEqual(default["expected_unit_harness_tests"], 1635)
+        self.assertEqual(default["expected_package_harness_tests"], 1663)
         self.assertEqual(recovery["target_cfg"], "unix")
-        self.assertEqual(recovery["expected_unit_harness_tests"], 1464)
-        self.assertEqual(recovery["expected_package_harness_tests"], 1476)
+        self.assertEqual(recovery["expected_unit_harness_tests"], 1641)
+        self.assertEqual(recovery["expected_package_harness_tests"], 1669)
+        lab = manifest["feature_profiles"]["lab"]
+        self.assertEqual(lab["expected_unit_harness_tests"], 1635)
+        self.assertEqual(lab["expected_package_harness_tests"], 1663)
+        self.assertIn("cannot authorize signed Beta/Stable", lab["authority_ceiling"])
         for row in self.registry["sources"]:
             if row["module"] in RECOVERY_TOOL_MODULES:
                 self.assertNotIn("network", row["production_effects"])
@@ -521,10 +580,12 @@ class DcentraldCommonSurfaceRegistryTests(unittest.TestCase):
 
     def test_integration_surface_is_exact(self) -> None:
         rows = self.registry["integration_tests"]["files"]
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["module"], "addr_interval_declared_with_fallback")
-        self.assertEqual(self.registry["integration_tests"]["test_attributes"], 12)
-        self.assertEqual(rows[0]["unsafe_code_constructs"], 0)
+        self.assertEqual([row["module"] for row in rows], [
+            "addr_interval_declared_with_fallback", "am1_dspic_session_replay",
+            "lab_env", "runtime_hardware_recipe",
+        ])
+        self.assertEqual(self.registry["integration_tests"]["test_attributes"], 28)
+        self.assertTrue(all(row["unsafe_code_constructs"] == 0 for row in rows))
 
     def test_bench_go_marker_is_regular_file_only_and_fail_closed(self) -> None:
         source = (SOURCE_ROOT / "s19k_bm1366_wire_b.rs").read_text(encoding="utf-8")
@@ -613,6 +674,7 @@ def main() -> int:
         REGISTRY_PATH.write_text(
             json.dumps(build_registry(), indent=2, ensure_ascii=True) + "\n",
             encoding="ascii",
+            newline="\n",
         )
         return 0
     if args.summary:

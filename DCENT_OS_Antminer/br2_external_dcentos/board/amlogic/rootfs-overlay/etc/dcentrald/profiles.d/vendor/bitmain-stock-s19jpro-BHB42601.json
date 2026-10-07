@@ -154,6 +154,6 @@
     "secure_boot_set_seen": false,
     "hashcore_root_hash_seen": false,
     "atlas_ssh_key_present": false,
-    "notes": "Extracted from levels.json inside Bitmain stock S19j Pro firmware (2022-12-26) \u2014  wall_watts + hashrate_ths left null (vendor source has only freq+voltage)."
+    "notes": "Extracted from levels.json inside Bitmain stock S19j Pro firmware (2022-12-26) \u2014 etc/levels.json in the stock firmware image. wall_watts + hashrate_ths left null (vendor source has only freq+voltage)."
   }
 }

@@ -37,6 +37,7 @@
 //! ("this thing runs, binds an API, can be cancelled") and nothing more.
 
 pub mod api;
+pub(crate) mod cold_activation;
 pub mod efficiency;
 pub mod hardware_info;
 pub mod impls;

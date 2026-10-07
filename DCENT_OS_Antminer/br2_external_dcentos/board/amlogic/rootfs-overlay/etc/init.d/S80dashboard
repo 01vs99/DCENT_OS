@@ -2,7 +2,7 @@
 #
 # S80dashboard - Start DCENT_OS dashboard reverse proxy
 #
-# The dashboard owns port 80. It serves the static UI and proxies dcentrald
+# The dashboard owns HTTPS port 443 and HTTP redirect port 80. It serves the static UI and proxies dcentrald
 # REST/WebSocket requests to the daemon API on 127.0.0.1:8080.
 #
 
@@ -129,7 +129,7 @@ case "$1" in
                     sleep $RESTART_DELAY
                 done
             "
-        echo "  [OK] dashboard supervisor started (HTTP :$PORT)"
+        echo "  [OK] dashboard supervisor started (HTTPS :443, redirect :$PORT)"
         echo "  Log: $LOGFILE"
         ;;
 
@@ -172,7 +172,7 @@ case "$1" in
         if [ -f "$CHILD_PIDFILE" ]; then
             CHILD_PID=$(cat "$CHILD_PIDFILE" 2>/dev/null || true)
             if [ -n "$CHILD_PID" ] && kill -0 "$CHILD_PID" 2>/dev/null; then
-                echo "dashboard is running (PID $CHILD_PID, HTTP :$PORT)"
+                echo "dashboard is running (PID $CHILD_PID, HTTPS :443, redirect :$PORT)"
                 exit 0
             fi
         fi

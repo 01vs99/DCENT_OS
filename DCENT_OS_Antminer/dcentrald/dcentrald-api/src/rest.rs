@@ -29,6 +29,8 @@
 //!   /api/diagnostics/*   - Diagnostic test management
 
 use std::collections::VecDeque;
+mod home_target;
+pub(crate) use home_target::apply_home_power_target_to_table;
 #[cfg(test)]
 use std::io;
 use std::io::{Read, Seek, SeekFrom};
@@ -492,7 +494,8 @@ fn read_configured_power_target(mode: crate::OperatingMode) -> Option<Configured
     let table: toml::Table = toml::from_str(&contents).ok()?;
 
     if mode == crate::OperatingMode::Home {
-        if let Some(home) = table.get("home").and_then(|value| value.as_table()) {
+        if let Some(home) = table.get("mode").and_then(|v| v.get("home"))
+            .or_else(|| table.get("home")).and_then(|value| value.as_table()) {
             let target_watts = home
                 .get("target_watts")
                 .and_then(|value| value.as_integer())
@@ -762,6 +765,14 @@ fn antminer_support_tier(
     }
 
     match chip_id {
+        Some(0x1387)
+            if matches!(
+                antminer_declared_board_target(hw),
+                Some("am1-s9i" | "am1-s9j")
+            ) =>
+        {
+            CapabilitySupportTier::Experimental
+        }
         Some(0x1489) => CapabilitySupportTier::Unsupported,
         Some(0x1372 | 0x1373) => CapabilitySupportTier::Unknown, // NF-05: S23 dual-key
         Some(0x1397 | 0x1398 | 0x1362 | 0x1366 | 0x1368 | 0x1370) if profile.is_some() => {
@@ -1071,6 +1082,15 @@ fn build_antminer_capability_descriptor(
     let grants_mutations =
         antminer_grants_mutating_capabilities(support, confidence) && board_desc.is_some();
     let mut runtime_caps = antminer_runtime_caps(grants_mutations, board_desc);
+    // Saving configuration precedes ASIC detection on a fresh image. A known,
+    // exact image declaration may persist pools/config without granting any
+    // physical control, install, reboot, tuning, or measured identity claim.
+    // Observer-only/auth/CSRF and complete config validation remain separate.
+    let grants_configuration = board_desc.is_some();
+    if grants_configuration {
+        push_runtime_cap(&mut runtime_caps, RuntimeCapability::PoolsRw);
+        push_runtime_cap(&mut runtime_caps, RuntimeCapability::ConfigRw);
+    }
     let power_writes_enabled = grants_mutations
         && profile
             .map(|profile| profile.pic_type != dcentrald_asic::drivers::PicType::NoPic)
@@ -1179,7 +1199,16 @@ fn build_antminer_capability_descriptor(
             frequency_mhz: profile.map(|profile| profile.default_freq_mhz),
             voltage_mv: profile.map(|profile| profile.default_voltage_mv),
         },
-        fail_safe: antminer_fail_safe_policy(support, grants_mutations),
+        fail_safe: if grants_configuration && !grants_mutations {
+            FailSafePolicy {
+                read_only: false,
+                mining_start_allowed: false,
+                mutating_routes_allowed: true,
+                reason: "Exact image declaration permits saved pool/configuration changes; hardware controls still require their runtime owner.".to_string(),
+            }
+        } else {
+            antminer_fail_safe_policy(support, grants_mutations)
+        },
     }
 }
 
@@ -2926,7 +2955,19 @@ fn swarm_status_payload(
 }
 
 /// Get the active config file path (prefers /data/dcentrald.toml, falls back to /etc/).
+#[cfg(test)]
+static CONFIG_TEST_PATHS: std::sync::OnceLock<(&'static str, &'static str)> =
+    std::sync::OnceLock::new();
+
 pub(crate) fn get_config_path() -> &'static str {
+    #[cfg(test)]
+    if let Some((persistent, baked)) = CONFIG_TEST_PATHS.get() {
+        return if Path::new(persistent).exists() {
+            persistent
+        } else {
+            baked
+        };
+    }
     if std::path::Path::new("/data/dcentrald.toml").exists() {
         "/data/dcentrald.toml"
     } else {
@@ -2936,6 +2977,10 @@ pub(crate) fn get_config_path() -> &'static str {
 
 /// First-boot setup must always materialize a persistent config in /data.
 pub(crate) fn get_writable_config_path() -> &'static str {
+    #[cfg(test)]
+    if let Some((persistent, _)) = CONFIG_TEST_PATHS.get() {
+        return persistent;
+    }
     "/data/dcentrald.toml"
 }
 
@@ -3047,36 +3092,6 @@ pub(crate) fn home_economics_from_table(table: &toml::Table) -> HomeEconomics {
         rate_usd_per_kwh: rate,
         currency,
         rate_calibrated,
-    }
-}
-
-/// CFG-1/CFG-2: apply a `[home]` power-target write to a *full* effective config
-/// table in place, mutating ONLY the `[home].target_watts` (and optional
-/// `[home].preset`) keys.
-///
-/// This is the pure core of [`post_home_power_target`]. It MUST be fed the full
-/// effective table from [`load_config_table_for_write`] (which merges the baked
-/// `/etc` config when `/data` is absent) so that on a fresh beta install the
-/// first home-UX touch does not write a `[home]`-only file that shadows the
-/// baked `[pool]`/`[power]`/`[thermal]`/`[auth]` sections on the next reboot.
-/// Every section other than `[home]` is left byte-for-byte; only the two home
-/// keys are inserted/overwritten. Host-safe for unit tests.
-pub(crate) fn apply_home_power_target_to_table(
-    table: &mut toml::Table,
-    target_watts: u32,
-    preset: Option<&str>,
-) {
-    let home = table
-        .entry("home".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    if let toml::Value::Table(ref mut home_table) = home {
-        home_table.insert(
-            "target_watts".into(),
-            toml::Value::Integer(target_watts as i64),
-        );
-        if let Some(preset) = preset {
-            home_table.insert("preset".into(), toml::Value::String(preset.to_string()));
-        }
     }
 }
 
@@ -3306,9 +3321,11 @@ fn competitive_decentralization_gate() -> serde_json::Value {
         "mandatory_fee": false,
         "fee_route": "transparent_donation",
         "donation": {
-            "default_enabled": true,
+            // 0% default posture (operator decision 2026-09-01): donation
+            // is opt-in. Static contract mirrors DonationConfig::default().
+            "default_enabled": false,
             "current_enabled": null,
-            "default_percent": 2.0,
+            "default_percent": 0.0,
             "current_percent": null,
             "cycle_duration_s_default": 3600,
             "current_cycle_duration_s": null,
@@ -4293,6 +4310,26 @@ const API_COMPATIBILITY_DCENT_ROUTES: &[ApiCompatibilityRouteEntry] = &[
     },
     ApiCompatibilityRouteEntry {
         method: "GET",
+        path: "/api/diagnostics",
+        support: "implemented_read_only",
+        mutates: false,
+        compatibility: &["DCENT diagnostics", "support bundle"],
+        provenance: "bounded build/crash observations; signature state uses actual compiled-key image verification",
+        unsupported_fields: &["unredacted_secrets"],
+        limitations: &["Missing build/slot/crash observations are reported as unavailable; no hardware probe or authority is minted."],
+    },
+    ApiCompatibilityRouteEntry {
+        method: "POST",
+        path: "/api/system/reset-settings",
+        support: "implemented_gated",
+        mutates: true,
+        compatibility: &["DCENT settings recovery"],
+        provenance: "retained reset worker requires signed mining-off defaults and checked owner shutdown under deployment admission",
+        unsupported_fields: &["vendor_partition_reset", "force"],
+        limitations: &["Exact typed confirmation required; no reset on an image without signed settings defaults."],
+    },
+    ApiCompatibilityRouteEntry {
+        method: "GET",
         path: "/api/firmware/luxos_web_map",
         support: "implemented_catalog",
         mutates: false,
@@ -4400,6 +4437,66 @@ const API_COMPATIBILITY_DCENT_ROUTES: &[ApiCompatibilityRouteEntry] = &[
         provenance: "mounted in rest::build_router and backed by HAL-free dcentrald-api-types catalogs",
         unsupported_fields: &["hardware_probe", "control_action"],
         limitations: &["Read-only reverse-engineering catalog; no hardware, config, filesystem, or mining-control side effects."],
+    },
+    ApiCompatibilityRouteEntry {
+        method: "GET",
+        path: "/api/system/update/check",
+        support: "implemented",
+        mutates: false,
+        compatibility: &["DCENT dashboard"],
+        provenance: "channel_update::router merged into the authenticated REST router",
+        unsupported_fields: &[],
+        limitations: &["Explicit signed-channel check; exact installed image, target, recipe and OTA policy are required before HTTPS access."],
+    },
+    ApiCompatibilityRouteEntry {
+        method: "POST",
+        path: "/api/system/update/fetch",
+        support: "implemented",
+        mutates: true,
+        compatibility: &["DCENT dashboard"],
+        provenance: "channel_update::router merged into the authenticated REST router",
+        unsupported_fields: &[],
+        limitations: &["Explicit bounded download and verification; stores at most two candidates and never starts installation."],
+    },
+    ApiCompatibilityRouteEntry {
+        method: "POST",
+        path: "/api/system/update/apply",
+        support: "implemented",
+        mutates: true,
+        compatibility: &["DCENT dashboard"],
+        provenance: "channel_update::router merged into the authenticated REST router",
+        unsupported_fields: &[],
+        limitations: &["Exact confirmation revalidates the selected artifact through the existing OTA worker; scheduled does not prove reboot or boot acceptance."],
+    },
+    ApiCompatibilityRouteEntry {
+        method: "GET",
+        path: "/api/system/update/operation",
+        support: "implemented",
+        mutates: false,
+        compatibility: &["DCENT dashboard"],
+        provenance: "channel_update::router merged into the authenticated REST router",
+        unsupported_fields: &[],
+        limitations: &["Reports the current process-local channel operation; does not replace the existing OTA status endpoint."],
+    },
+    ApiCompatibilityRouteEntry {
+        method: "GET",
+        path: "/api/system/update/downloads",
+        support: "implemented",
+        mutates: false,
+        compatibility: &["DCENT dashboard"],
+        provenance: "channel_update::router merged into the authenticated REST router",
+        unsupported_fields: &[],
+        limitations: &["Lists bounded retained verified download candidates; does not install them."],
+    },
+    ApiCompatibilityRouteEntry {
+        method: "POST",
+        path: "/api/system/update/discard",
+        support: "implemented",
+        mutates: true,
+        compatibility: &["DCENT dashboard"],
+        provenance: "channel_update::router merged into the authenticated REST router",
+        unsupported_fields: &[],
+        limitations: &["Explicitly discards the named candidate under the shared operation lock; no firmware or mining change."],
     },
 ];
 
@@ -4665,11 +4762,11 @@ const API_COMPATIBILITY_SURFACES: &[ApiCompatibilitySurface] = &[
         label: "CGMiner TCP API",
         protocol: "cgminer-tcp-json",
         default_port: Some(4028),
-        default_bind: Some("127.0.0.1 unless cgminer_bind_lan=true"),
+        default_bind: Some("0.0.0.0 (LAN read-only; writes disabled by default)"),
         compatibility: &["CGMiner", "pyasic", "hass-miner"],
         routes: &[],
         commands: API_COMPATIBILITY_CGMINER_COMMANDS,
-        limitations: &["Unauthenticated TCP compatibility API is localhost-only by default unless explicitly configured for LAN binding."],
+        limitations: &["Unauthenticated TCP API: LAN monitoring is enabled by default; LAN control requires separate explicit opt-in."],
     },
     ApiCompatibilitySurface {
         id: "websocket",
@@ -5047,6 +5144,7 @@ fn validate_mining_write(table: &toml::Table) -> std::result::Result<(), String>
 /// value would risk a start-time crash-loop). Each check is defensive: it only
 /// fires when the key is present and parseable.
 fn validate_imported_config_table(table: &toml::Table) -> std::result::Result<(), String> {
+    cgminer_settings::validate(table)?;
     if let Some(thermal) = table.get("thermal").and_then(|v| v.as_table()) {
         let target = thermal.get("target_temp_c").and_then(toml_value_as_i64);
         let hot = thermal.get("hot_temp_c").and_then(toml_value_as_i64);
@@ -6551,6 +6649,7 @@ pub fn build_router() -> Router<Arc<AppState>> {
             "/api/system/upgrade",
             post(post_system_upgrade).layer(DefaultBodyLimit::max(SYSTEM_UPGRADE_MAX_UPLOAD_BYTES)),
         )
+        .merge(crate::channel_update::router())
         .route(
             "/api/v1/system/upgrade",
             post(post_system_upgrade).layer(DefaultBodyLimit::max(SYSTEM_UPGRADE_MAX_UPLOAD_BYTES)),
@@ -6801,6 +6900,7 @@ pub fn build_router() -> Router<Arc<AppState>> {
         // Read-only; degrades gracefully when sources are missing. See
         // routes/stock_parity.rs.
         .merge(crate::routes::stock_parity::router())
+        .merge(crate::routes::reset_settings::router())
         // W13.D1 — `/api/miner/pvt-table` returns the full per-SKU PVT
         // freq/voltage table for the detected hashboard. Sourced from
         // `dcentrald-silicon-profiles::bm1362::Bm1362HashboardSku`. See
@@ -6844,6 +6944,7 @@ pub fn build_router() -> Router<Arc<AppState>> {
         // profile save/restore (byte-exact round trip). See
         // routes/vf_profile.rs.
         .merge(crate::routes::vf_profile::router())
+        .merge(crate::routes::ssh_keys::router())
         .layer(axum::middleware::map_response(normalize_api_error_response))
 }
 
@@ -9615,6 +9716,9 @@ async fn post_pools_test(Json(body): Json<PoolRequest>) -> impl IntoResponse {
 }
 
 /// GET /api/config -- Current configuration.
+#[path = "rest/cgminer_settings.rs"]
+mod cgminer_settings;
+
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mode = *state.mode_rx.borrow();
     let miner = state.state_rx.borrow().clone();
@@ -9626,12 +9730,17 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "firmware_version": miner.firmware_version,
         "api": {
             "cgminer_port": state.config.cgminer_port,
+            "cgminer_bind_lan": state.config.cgminer_bind_lan,
+            "cgminer_lan_writes": state.config.cgminer_lan_writes,
+            "cgminer_saved": load_config_table_for_write().ok()
+                .and_then(|table| cgminer_settings::saved(&table).ok()),
             "http_port": state.config.http_port,
             "http_bind": state.config.http_bind.clone(),
             "websocket_enabled": state.config.websocket_enabled,
             "websocket_tickets": state.config.websocket_tickets,
             "auth_enabled": crate::auth::is_password_set(),
         },
+        "initial_idle_activation_available": crate::cold_activation::initial_idle_activation_available(),
     }))
 }
 
@@ -9833,6 +9942,9 @@ const CONFIG_ALLOWED_KEYS: &[&str] = &[
 ];
 
 mod capabilities;
+#[cfg(test)]
+#[path = "rest/initial_idle_api_tests.rs"]
+mod initial_idle_api_tests;
 mod late;
 use capabilities::*;
 // CE-052: re-export the narrow bridge guards so the daemon crate can call
@@ -9840,6 +9952,7 @@ use capabilities::*;
 // `dcent_schema` capability dependency.
 pub use capabilities::{bridge_guard_asic_options, bridge_guard_identify};
 use late::*;
+pub(crate) use late::{require_channel_update_policy, finish_channel_package};
 pub(crate) use late::{
     compute_commanded_fan_pwm, dispatch_autotuner_mode_command, onboarding_device_ready,
     onboarding_password_opt_out_active, persist_autotuner_mode, post_action_sleep,

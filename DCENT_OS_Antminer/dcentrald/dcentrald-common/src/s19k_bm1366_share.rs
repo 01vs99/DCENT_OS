@@ -1680,22 +1680,31 @@ pub fn admit_s19k_production_run_skips_init_bm1366_chain(src: &str) -> Result<()
     Ok(())
 }
 
-/// NoPic serial observation facade requires BM1368/BM1370, not BM1366.
+/// The NoPic serial observation facade is no longer BM1368/BM1370-only: the
+/// landed XP-pair (am3-s19xp/am3-s19jxp BM1366) and S19j Pro A/Plus (BM1362)
+/// native serial routes join it through the typed
+/// `modern_s21_profile(target, identity)` table. The fence that must survive
+/// is target-exactness: the facade admits only exact native model x ASIC rows
+/// from that table, and the S19k BM1366 production target never appears in it
+/// (its lane stays ExactSerialRoute::S19kNative).
 pub fn admit_s19k_nopic_observation_refuses_bm1366(src: &str) -> Result<(), &'static str> {
     let Some(start) = src.find("fn begin_nopic_observation(") else {
         return Err("missing begin_nopic_observation");
     };
     let win = src.get(start..start.saturating_add(1800)).unwrap_or("");
-    if !win.contains("AsicProtocolIdentity::Bm1368")
-        || !win.contains("AsicProtocolIdentity::Bm1370")
+    if !win.contains("modern_s21_profile(dispatch.board_target(), dispatch.identity()).is_some()")
     {
-        return Err("NoPic observation must require BM1368/BM1370 identity");
+        return Err("NoPic observation must gate on the exact native model/ASIC profile table");
     }
-    if win.contains("AsicProtocolIdentity::Bm1366") {
-        return Err("NoPic observation must not admit BM1366 identity");
+    if !win.contains("NoPic observation requires an exact native model and ASIC identity") {
+        return Err("NoPic observation must refuse an unmatched model/identity pair");
     }
-    if !win.contains("NoPic observation requires BM1368/BM1370 identity") {
-        return Err("NoPic observation must refuse non-BM1368/1370 identity");
+    let Some(table_at) = src.find("fn modern_s21_profile(") else {
+        return Err("missing modern_s21_profile gate table");
+    };
+    let table = src.get(table_at..table_at.saturating_add(1200)).unwrap_or("");
+    if table.contains(r#"("am3-s19k""#) {
+        return Err("S19k BM1366 production target must not join the NoPic profile table");
     }
     Ok(())
 }
@@ -1803,21 +1812,33 @@ pub fn refuse_s19k_nopic_probe_as_track1_first_read() -> Result<(), &'static str
     Err("NoPic observe_candidate is BM1368/BM1370 only; not S19k Track-1 first-read")
 }
 
+fn am2_hybrid_source_method<'a>(
+    source: &'a str,
+    signature: &str,
+) -> Result<&'a str, &'static str> {
+    let start = source.find(signature).ok_or("missing AM2 hybrid source method")?;
+    // This is an impl method. Bound the complete method at its closing
+    // indentation, independently of parameter additions and body length.
+    let method = &source[start..];
+    let Some(end) = method.find("\n    }") else {
+        return Err("missing AM2 hybrid source method boundary");
+    };
+    Ok(&method[..end])
+}
+
 /// AM2 hybrid baud-wake is Zynq BM1362. Do not borrow require_bm1366.
 pub fn admit_s19k_am2_hybrid_reset_is_not_bm1366(hybrid_src: &str) -> Result<(), &'static str> {
-    let Some(start) = hybrid_src.find("fn reset_asic_baud(serial_device: &str)") else {
-        return Err("missing AM2 hybrid reset_asic_baud");
-    };
-    let win = hybrid_src
-        .get(start..start.saturating_add(1800))
-        .unwrap_or("");
+    let win = am2_hybrid_source_method(hybrid_src, "fn reset_asic_baud(")?;
     if !win.contains("HotStartHostClass::Zynq") {
         return Err("AM2 hybrid reset_asic_baud must use Zynq hot-start class");
     }
     if !win.contains("plan_hot_start_hybrid_wake_ops") {
         return Err("AM2 hybrid reset_asic_baud must use hybrid wake ops");
     }
-    if win.contains("require_bm1366_response_body") || win.contains("BM1366_UART_RESP_BODY_LEN") {
+    if win.contains("require_bm1366_response_body")
+        || win.contains("open_passthrough_bm1366")
+        || win.contains("BM1366_UART_RESP_BODY_LEN")
+    {
         return Err("AM2 hybrid reset_asic_baud must not borrow BM1366 first-read");
     }
     Ok(())
@@ -1991,13 +2012,11 @@ pub fn refuse_s19k_init_bm1362_as_track1_first_read() -> Result<(), &'static str
 
 /// AM2 RANK-5 companion PL-UART is Zynq BM1362 dual-UART, not S19k Track-1.
 pub fn admit_s19k_am2_companion_open_is_not_bm1366(hybrid_src: &str) -> Result<(), &'static str> {
-    let Some(start) = hybrid_src.find("let companion_dev = am2_dual_chain_second_uart()") else {
+    let win = am2_hybrid_source_method(hybrid_src, "fn init_asic_chain(")?;
+    if !win.contains("let companion_dev = am2_dual_chain_second_uart()") {
         return Err("missing AM2 companion UART open");
-    };
-    let win = hybrid_src
-        .get(start..start.saturating_add(2500))
-        .unwrap_or("");
-    if !win.contains("SerialChainBackend::open(0, &companion_dev, 115_200)") {
+    }
+    if !win.contains("SerialChainBackend::open_with_preference(0, &companion_dev, 115_200, uart_preference)") {
         return Err("AM2 companion must open companion_dev at 115200");
     }
     if !win.contains("assert_mcr_out2") {
@@ -2018,22 +2037,25 @@ pub fn refuse_s19k_am2_companion_open_as_track1_first_read() -> Result<(), &'sta
 
 /// AM2 Phase 3b1-relay is BM1362 UART relay lab stage, not S19k Track-1.
 pub fn admit_s19k_am2_phase3b1_relay_is_not_bm1366(hybrid_src: &str) -> Result<(), &'static str> {
-    let Some(start) = hybrid_src.find("dcentrald_hal::serial_chain::SerialChainBackend::open(")
-    else {
-        return Err("missing Phase 3b1-relay SerialChainBackend::open");
-    };
-    let win = hybrid_src
-        .get(start..start.saturating_add(1800))
-        .unwrap_or("");
-    if !win.contains("maybe_write_bm1362_uart_relay") {
+    let method = am2_hybrid_source_method(hybrid_src, "pub async fn run(")?;
+    let relay = method.find("// Phase 3b1-relay: send BM1362 UART relay enable")
+        .ok_or("missing Phase 3b1-relay boundary")?;
+    let win = &method[relay..];
+    let end = win.find("// Phase 3b2b:").ok_or("missing Phase 3b1-relay end")?;
+    let relay = &win[..end];
+    let compact: String = relay.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if !compact.contains("SerialChainBackend::open_with_preference(fpga_chain_id,&chain_uart_device,115_200,uart_preference,)") {
+        return Err("Phase 3b1-relay must use the typed 115200 UART open");
+    }
+    if !relay.contains("maybe_write_bm1362_uart_relay") {
         return Err("Phase 3b1-relay must write BM1362 UART relay");
     }
-    if !win.contains("bm1362_phase3b1_pre_gate") {
+    if !relay.contains("bm1362_phase3b1_pre_gate") {
         return Err("Phase 3b1-relay must name bm1362_phase3b1_pre_gate");
     }
-    if win.contains("require_bm1366_response_body")
-        || win.contains("open_passthrough_bm1366")
-        || win.contains("BM1366_UART_RESP_BODY_LEN")
+    if method.contains("require_bm1366_response_body")
+        || method.contains("open_passthrough_bm1366")
+        || method.contains("BM1366_UART_RESP_BODY_LEN")
     {
         return Err("Phase 3b1-relay must not borrow BM1366 first-read");
     }
@@ -2046,12 +2068,7 @@ pub fn refuse_s19k_am2_phase3b1_relay_as_track1_first_read() -> Result<(), &'sta
 
 /// AM2 PL UART probe is BM1362 fallback sweep, not S19k Track-1 first-read.
 pub fn admit_s19k_am2_probe_uart_is_not_bm1366(hybrid_src: &str) -> Result<(), &'static str> {
-    let Some(start) = hybrid_src.find("fn probe_uart_for_chips(") else {
-        return Err("missing probe_uart_for_chips");
-    };
-    let win = hybrid_src
-        .get(start..start.saturating_add(2500))
-        .unwrap_or("");
+    let win = am2_hybrid_source_method(hybrid_src, "fn probe_uart_for_chips(")?;
     if !win.contains("BM1362_RESP_BODY_LEN") {
         return Err("AM2 UART probe must set BM1362 response body");
     }
@@ -2076,24 +2093,13 @@ pub fn refuse_s19k_am2_probe_uart_as_track1_first_read() -> Result<(), &'static 
 
 /// AM2 hybrid init_asic_chain primary 115200 open is BM1362, not S19k Track-1.
 pub fn admit_s19k_am2_init_asic_open_is_not_bm1366(hybrid_src: &str) -> Result<(), &'static str> {
-    let Some(fn_at) = hybrid_src.find("fn init_asic_chain(") else {
-        return Err("missing AM2 init_asic_chain");
-    };
-    let head = hybrid_src
-        .get(fn_at..fn_at.saturating_add(800))
-        .unwrap_or("");
-    if !head.contains("=== BM1362 ASIC INIT") {
+    let win = am2_hybrid_source_method(hybrid_src, "fn init_asic_chain(")?;
+    if !win.contains("=== BM1362 ASIC INIT") {
         return Err("AM2 init_asic_chain must name BM1362 ASIC INIT");
     }
-    let rest = hybrid_src.get(fn_at..).unwrap_or("");
-    let Some(open_at) =
-        rest.find("let mut serial = SerialChainBackend::open(0, serial_device, 115_200)")
-    else {
+    if !win.contains("let mut serial = SerialChainBackend::open_with_preference(0, serial_device, 115_200, uart_preference)") {
         return Err("AM2 init_asic_chain must open primary UART at 115200");
-    };
-    let win = rest
-        .get(open_at..open_at.saturating_add(1500))
-        .unwrap_or("");
+    }
     if !win.contains("am2_post_reset_settle_ms") {
         return Err("AM2 init_asic_chain primary open must settle via am2_post_reset_settle_ms");
     }
@@ -2115,23 +2121,22 @@ pub fn refuse_s19k_am2_init_asic_open_as_track1_first_read() -> Result<(), &'sta
 
 /// AM2 hybrid mining-on passthrough is BM1362 DEFAULT-7 open, not S19k Track-1.
 pub fn admit_s19k_am2_passthrough0_is_not_bm1366(hybrid_src: &str) -> Result<(), &'static str> {
-    let Some(start) =
-        hybrid_src.find("PASSTHROUGH: skipping Phase 1-7 (bosminer owns PIC+chain init)")
-    else {
+    let method = am2_hybrid_source_method(hybrid_src, "pub async fn run(")?;
+    let Some(start) = method.find("PASSTHROUGH: skipping Phase 1-7 (bosminer owns PIC+chain init)") else {
         return Err("missing AM2 hybrid passthrough skip");
     };
-    let win = hybrid_src
-        .get(start..start.saturating_add(800))
-        .unwrap_or("");
-    if !win.contains("open_passthrough(0, &serial_device)") {
-        return Err("AM2 hybrid passthrough must open_passthrough(0)");
+    let win = &method[start..];
+    let end = win.find("\n        } else {").ok_or("missing AM2 passthrough arm boundary")?;
+    let passthrough = &win[..end];
+    if !passthrough.contains("open_passthrough_with_preference(0, &serial_device, uart_preference)") {
+        return Err("AM2 hybrid passthrough must use the typed chain-0 open");
     }
-    if !win.contains("BM1362_RESP_BODY_LEN") {
+    if !passthrough.contains("BM1362_RESP_BODY_LEN") {
         return Err("AM2 hybrid passthrough must set BM1362 response body");
     }
-    if win.contains("require_bm1366_response_body")
-        || win.contains("open_passthrough_bm1366")
-        || win.contains("BM1366_UART_RESP_BODY_LEN")
+    if method.contains("require_bm1366_response_body")
+        || method.contains("open_passthrough_bm1366")
+        || method.contains("BM1366_UART_RESP_BODY_LEN")
     {
         return Err("AM2 hybrid passthrough must not borrow BM1366 first-read");
     }
@@ -2192,6 +2197,29 @@ pub fn refuse_bm1368_job_id_extract(id: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_am2_method_rejects_bm1366_at_tail(
+        source: &str,
+        signature: &str,
+        validate: fn(&str) -> Result<(), &'static str>,
+        expected_error: &'static str,
+    ) {
+        let start = source.find(signature).expect("real AM2 method");
+        let method = am2_hybrid_source_method(source, signature).unwrap();
+        let tail = start + method.len();
+        for forbidden in [
+            "require_bm1366_response_body",
+            "open_passthrough_bm1366",
+            "BM1366_UART_RESP_BODY_LEN",
+        ] {
+            let mutated = format!(
+                "{}\n        {forbidden};{}",
+                &source[..tail],
+                &source[tail..]
+            );
+            assert_eq!(validate(&mutated), Err(expected_error), "{signature}: {forbidden}");
+        }
+    }
 
     #[test]
     fn s21_comparative_nonce_reconstructs_after_remainder_zero_admission() {
@@ -2384,10 +2412,25 @@ mod tests {
         assert!(refuse_s19k_nopic_probe_as_track1_first_read().is_err());
         const HYBRID: &str = include_str!("../../dcentrald/src/s19j_hybrid_mining.rs");
         assert!(admit_s19k_am2_hybrid_reset_is_not_bm1366(HYBRID).is_ok());
-        assert!(admit_s19k_am2_hybrid_reset_is_not_bm1366(
-            "fn reset_asic_baud(serial_device: &str)\nHotStartHostClass::Zynq\nplan_hot_start_hybrid_wake_ops\nrequire_bm1366_response_body"
-        )
-        .is_err());
+        // Extend the real method with diagnostics before inserting either
+        // BM1366 first-read form beyond the former 1800-byte window.
+        for forbidden in [
+            "require_bm1366_response_body",
+            "open_passthrough_bm1366",
+            "BM1366_UART_RESP_BODY_LEN",
+        ] {
+            let diagnostics = "serial wake diagnostic ".repeat(80);
+            let mutated = HYBRID.replacen(
+                "info!(\"Baud reset complete\");",
+                &format!("/* {diagnostics} */\n        {forbidden};\n        info!(\"Baud reset complete\");"),
+                1,
+            );
+            assert_ne!(mutated, HYBRID, "real AM2 baud-reset mutation must apply");
+            assert_eq!(
+                admit_s19k_am2_hybrid_reset_is_not_bm1366(&mutated),
+                Err("AM2 hybrid reset_asic_baud must not borrow BM1366 first-read")
+            );
+        }
         assert!(refuse_s19k_am2_hybrid_open_as_track1_first_read().is_err());
         assert!(admit_s19k_am2_reset_baseline_is_not_bm1366(serial).is_ok());
         assert!(admit_s19k_am2_reset_baseline_is_not_bm1366(
@@ -2427,34 +2470,44 @@ mod tests {
         .is_err());
         assert!(refuse_s19k_init_bm1362_as_track1_first_read().is_err());
         assert!(admit_s19k_am2_companion_open_is_not_bm1366(HYBRID).is_ok());
-        assert!(admit_s19k_am2_companion_open_is_not_bm1366(
-            "let companion_dev = am2_dual_chain_second_uart()\nSerialChainBackend::open(0, &companion_dev, 115_200)\nrequire_bm1366_response_body"
-        )
-        .is_err());
+        assert_am2_method_rejects_bm1366_at_tail(
+            HYBRID,
+            "fn init_asic_chain(",
+            admit_s19k_am2_companion_open_is_not_bm1366,
+            "AM2 companion must not borrow BM1366 first-read",
+        );
         assert!(refuse_s19k_am2_companion_open_as_track1_first_read().is_err());
         assert!(admit_s19k_am2_phase3b1_relay_is_not_bm1366(HYBRID).is_ok());
-        assert!(admit_s19k_am2_phase3b1_relay_is_not_bm1366(
-            "dcentrald_hal::serial_chain::SerialChainBackend::open(\nmaybe_write_bm1362_uart_relay\nbm1362_phase3b1_pre_gate\nopen_passthrough_bm1366"
-        )
-        .is_err());
+        assert_am2_method_rejects_bm1366_at_tail(
+            HYBRID,
+            "pub async fn run(",
+            admit_s19k_am2_phase3b1_relay_is_not_bm1366,
+            "Phase 3b1-relay must not borrow BM1366 first-read",
+        );
         assert!(refuse_s19k_am2_phase3b1_relay_as_track1_first_read().is_err());
         assert!(admit_s19k_am2_probe_uart_is_not_bm1366(HYBRID).is_ok());
-        assert!(admit_s19k_am2_probe_uart_is_not_bm1366(
-            "fn probe_uart_for_chips(\nBM1362_RESP_BODY_LEN\nhybrid_send_get_address\nread_bm1362_serial_drain_summary\nrequire_bm1366_response_body"
-        )
-        .is_err());
+        assert_am2_method_rejects_bm1366_at_tail(
+            HYBRID,
+            "fn probe_uart_for_chips(",
+            admit_s19k_am2_probe_uart_is_not_bm1366,
+            "AM2 UART probe must not borrow BM1366 first-read",
+        );
         assert!(refuse_s19k_am2_probe_uart_as_track1_first_read().is_err());
         assert!(admit_s19k_am2_init_asic_open_is_not_bm1366(HYBRID).is_ok());
-        assert!(admit_s19k_am2_init_asic_open_is_not_bm1366(
-            "fn init_asic_chain(\n=== BM1362 ASIC INIT\nlet mut serial = SerialChainBackend::open(0, serial_device, 115_200)\nFailed to open serial port at 115200\nam2_post_reset_settle_ms\nrequire_bm1366_response_body"
-        )
-        .is_err());
+        assert_am2_method_rejects_bm1366_at_tail(
+            HYBRID,
+            "fn init_asic_chain(",
+            admit_s19k_am2_init_asic_open_is_not_bm1366,
+            "AM2 init_asic_chain must not borrow BM1366 first-read",
+        );
         assert!(refuse_s19k_am2_init_asic_open_as_track1_first_read().is_err());
         assert!(admit_s19k_am2_passthrough0_is_not_bm1366(HYBRID).is_ok());
-        assert!(admit_s19k_am2_passthrough0_is_not_bm1366(
-            "PASSTHROUGH: skipping Phase 1-7 (bosminer owns PIC+chain init)\nopen_passthrough(0, &serial_device)\nBM1362_RESP_BODY_LEN\nrequire_bm1366_response_body"
-        )
-        .is_err());
+        assert_am2_method_rejects_bm1366_at_tail(
+            HYBRID,
+            "pub async fn run(",
+            admit_s19k_am2_passthrough0_is_not_bm1366,
+            "AM2 hybrid passthrough must not borrow BM1366 first-read",
+        );
         assert!(refuse_s19k_am2_passthrough0_as_track1_first_read().is_err());
         const HAL: &str = include_str!("../../dcentrald-hal/src/serial_chain.rs");
         assert!(admit_s19k_hal_open_passthrough_bm1366(HAL).is_ok());

@@ -1,0 +1,2 @@
+# Python 3.11+ already provides tomllib; older developer hosts use this backport.
+tomli==2.4.1; python_version < "3.11"

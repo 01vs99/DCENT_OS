@@ -40,9 +40,23 @@ ENGINE_MODULES = (
 # inventory 2026-07-29). Full orphan list is larger; these are safety/protocol
 # tiers expanded in residual waves.
 SERIAL_MUST_WIRE_UNDER_TESTS = (
+    # L08 production job-ID selector, cursor and response decoder.
+    "serial_job_id_steps_and_wrap_match_each_supported_family",
+    "serial_job_id_rejects_unknown_chips_and_mismatched_xp_dialect",
+    "bm1370_job_id_dispatch_cycle_round_trips_all_small_cores",
     # Protocol honesty (tier-1)
     "serial_rolled_version_reconstructs_when_pool_did_not_negotiate_mask",
-    "serial_rolled_version_accepts_only_negotiated_mask_bits",
+    "serial_rolled_version_retains_full_field_for_later_pool_admission",
+    # Native/PTY and complete-field BIP320 contracts are offline exact tests.
+    "bm1362_aml_cold_parser_keeps_short_identity_separate_from_assigned_coverage",
+    "bm1362_aml_native_actual_init_work_and_known_nonce_on_a_and_plus_ptys",
+    "bm1362_aml_runtime_clock_and_hcn_share_all_three_uart_fences",
+    "bm1366_xp_native_actual_init_work_and_known_nonce_on_xp_and_jxp_ptys",
+    "bm1370_native_actual_init_work_and_known_nonce_on_pro_and_xp_ptys",
+    "s21_native_selected_uart_work_and_genesis_nonce_round_trip",
+    "serial_pool_version_checks_both_set_and_cleared_base_bits",
+    "serial_pool_version_genesis_matches_the_actual_v1_wire_header",
+    "serial_pool_version_leaves_bm1398_and_s19k_reconstruction_unchanged",
     "exact_am2_source_clears_stale_work_when_hash_on_disconnect_is_false",
     # Heartbeat / watchdog / terminal (tier-2, 2026-07-29)
     "bm1362_heartbeat_terminal_limit_precedes_short_watchdog_reset_windows",
@@ -121,6 +135,7 @@ SERIAL_MUST_WIRE_UNDER_TESTS = (
     "serial_night_fan_path_publishes_watch_and_applies_helper",
     "serial_night_frequency_init_uses_shared_helper",
     "serial_night_frequency_midrun_enqueues_pll0_write",
+    "active_capacity_frequency_requires_completed_serial_pll_write",
     #  aggregate drift: S19k actor publication/ordering contracts.
     "s19k_actor_publishes_ownership_only_after_physical_send",
     "s19k_actor_orders_physical_commit_before_following_rx",
@@ -144,6 +159,7 @@ SERIAL_MUST_WIRE_UNDER_TESTS = (
     "s19k_track1_route_is_distinct_fenced_and_api_denied",
     "s19k_watchdog_requires_recent_history_admitted_nonce_on_every_active_tx_path",
     "s19k_wrap_epoch_advances_only_in_physical_commit_consumer",
+    "s19k_stale_epoch_commit_retires_under_present_authority",
     "track1_live_identity_command_is_bounded_and_reaps_a_hung_probe",
     "track1_live_identity_parsers_pin_cpu_mtd_and_profile_aware_v2_transcripts",
     "track1_live_identity_reader_refuses_symlink_and_oversize_file",
@@ -153,7 +169,7 @@ SERIAL_MUST_WIRE_UNDER_TESTS = (
     # ownership, evidence freshness, cooling, and panic-closeout isolation.
     "bm1366_native_cold_executor_is_exact_multi_uart_and_owner_gated",
     "bm1366_native_post_baud_admission_requires_exact_host_pair_and_fresh_geometry",
-    "bm1366_native_route_is_default_off_then_evidence_joined",
+    "bm1366_native_route_requires_configured_request_then_evidence_joined",
     "s19k_native_cold_start_opt_in_is_strict_and_never_the_token_issuer",
     "s19k_native_cooling_pins_all_four_channels_at_2000_rpm",
     "s19k_native_mapping_and_panic_closeout_are_not_generic_nopic",
@@ -195,6 +211,12 @@ SERIAL_MUST_WIRE_UNDER_TESTS = (
     # certificate; these two pins keep that rebasing exact-wired.
     "track1_reenrollment_and_coverage_back_onto_the_shared_serial_chain_contract",
     "track1_ladder_cadence_is_representable_in_the_shared_paced_policy",
+    # 2026-08-31 full-line-beta Phase 0: the S19k install-custody terminal
+    # contracts added to serial_mining::tests must stay exact-wired under CI.
+    "install_custody_is_a_pre_uart_gpio437_only_terminal_composition",
+    "install_custody_panic_and_receipt_contracts_remain_cut_only",
+    "install_custody_receipt_contract_rejects_both_mode_mismatches",
+    "s19k_install_custody_cli_must_match_the_immutable_runtime_binding",
 )
 
 EXACT_PREFIX = "sh ../scripts/run_exact_cargo_test.sh "

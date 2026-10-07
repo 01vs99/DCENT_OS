@@ -304,7 +304,10 @@ fn voltage_bounds_for_profile(
             config.min_voltage_mv.max(DSPIC_MIN_VOLTAGE_MV),
             DSPIC_MAX_VOLTAGE_MV,
         ),
-        PicType::Pic16F1704 => (config.min_voltage_mv, 9440),
+        // c3a-2 (DCENT_EE merge condition): BM1387 chain-rail ceiling is
+        // 9400 mV (PIC DAC 6, safe operating ceiling) — moves together with
+        // tuner.rs's 0x1387 clamp and the guard band.
+        PicType::Pic16F1704 => (config.min_voltage_mv, 9400),
         PicType::NoPic => (config.min_voltage_mv, 15000),
     }
 }
@@ -485,54 +488,52 @@ async fn assert_w30_chip_family_e2e(case: W30ChipCase) {
     while let Ok(event) = out_rx.try_recv() {
         events.push(event);
     }
-    let target = tuner
-        .last_applied_silicon_target_for_test(chain_id)
-        .expect("silicon target applied");
-    let (min_voltage_mv, max_voltage_mv) = voltage_bounds_for_profile(miner_profile, &config);
 
+    // C3a (2026-09-01 gauntlet): the variant envelope guard changed the
+    // apply-side contract for these families. BM1366 / BM1368 (and an
+    // unclassified BM1362) have NO published per-variant envelope datums
+    // desk-side, so under the operator's autotune-default-ON decision the
+    // tuner REFUSES every mutating step for them — profile import and
+    // active-selection still succeed (asserted above), but no SetChainFreq /
+    // SetVoltage may be dispatched, and the refusal must be surfaced with
+    // the NotTunable reason naming the variant (refuse, never tune blind).
+    // The pre-C3a clamped-apply behavior is retained for envelope-bearing
+    // variants (see test_autotuner_runtime's BM1387/PIC16 W15-A tests).
+    let guard = tuner.variant_guard_telemetry();
     assert!(
-        (config.min_freq_mhz..=miner_profile.max_freq_mhz).contains(&target.0),
-        "{} frequency {} MHz outside {}..={} MHz",
+        !guard.tunable,
+        "{}: expected the C3a variant guard to mark this family NotTunable          (no published envelope datums); envelope source = {:?}",
         case.label,
-        target.0,
-        config.min_freq_mhz,
-        miner_profile.max_freq_mhz
+        guard.envelope_source
     );
-    assert_eq!(
-        target.0, miner_profile.max_freq_mhz,
-        "{} should clamp the 1000 MHz synthetic preset to dcentrald-asic max_freq_mhz",
+    assert!(
+        tuner
+            .last_applied_silicon_target_for_test(chain_id)
+            .is_none(),
+        "{}: a NotTunable variant must not record an applied silicon target",
         case.label
     );
     assert!(
-        (min_voltage_mv..=max_voltage_mv).contains(&target.1),
-        "{} voltage {} mV outside {}..={} mV",
+        events.is_empty(),
+        "{}: a NotTunable variant must not dispatch any FreqCommand; got {:?}",
         case.label,
-        target.1,
-        min_voltage_mv,
-        max_voltage_mv
+        events
     );
-    assert_eq!(
-        target.1, miner_profile.default_voltage_mv,
-        "{} should apply the dcentrald-asic default chain-rail voltage",
+    assert!(
+        guard.refused_steps > 0,
+        "{}: the refusal must be counted in the guard telemetry",
         case.label
     );
+    let last_refusal = guard
+        .last_refusal
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     assert!(
-        events
-            .iter()
-            .any(|(chain, freq, voltage)| *chain == chain_id
-                && *freq == target.0
-                && voltage.is_none()),
-        "{} missing SetChainFreq event; got {:?}",
+        last_refusal.contains("nottunable") || last_refusal.contains("not tunable"),
+        "{}: refusal must carry the NotTunable reason, got {:?}",
         case.label,
-        events
-    );
-    assert!(
-        events.iter().any(|(chain, _, voltage)| {
-            *chain == chain_id && voltage.map(|mv| mv == target.1).unwrap_or(false)
-        }),
-        "{} missing SetVoltage event; got {:?}",
-        case.label,
-        events
+        guard.last_refusal
     );
 }
 

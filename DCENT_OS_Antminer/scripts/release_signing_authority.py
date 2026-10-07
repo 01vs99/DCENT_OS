@@ -85,15 +85,22 @@ class CreatedAuthority(NamedTuple):
     invocation_id: str
 
     def cli_result(self) -> Dict[str, Any]:
+        def transport_path(value: pathlib.Path) -> str:
+            # Consumers (bash normalize_shell_path, Docker -v mounts, the
+            # Docker transport colon validator) require the plain native
+            # form; the internal NT long-path prefix is create-time only.
+            prefix = chr(92) * 2 + "?" + chr(92)  # NT long-path prefix
+            return str(value).replace(prefix, "")
+
         return {
             "authority_id": self.authority_id,
-            "capability": str(self.capability),
-            "descriptor": str(self.descriptor),
+            "capability": transport_path(self.capability),
+            "descriptor": transport_path(self.descriptor),
             "invocation_id": self.invocation_id,
-            "private_key": str(self.private_key),
-            "public_key": str(self.public_key),
+            "private_key": transport_path(self.private_key),
+            "public_key": transport_path(self.public_key),
             "schema": RESULT_SCHEMA,
-            "stage": str(self.stage),
+            "stage": transport_path(self.stage),
         }
 
 
@@ -137,8 +144,40 @@ def _is_reparse(metadata: os.stat_result) -> bool:
     return bool(attributes & marker)
 
 
+def host_path_text(value: str) -> str:
+    """Rewrite Git-Bash (MSYS) drive paths (/d/dir) and long-path prefixes.
+
+    MSYS automatic argument conversion is per-argument and inconsistent on
+    long release command lines (see runs drop1-20260916-cyg3sjwi and
+    drop1-20260917-gnscaudk/c1e73bep). Normalizing at the lexical layer
+    makes the shell conversion behavior irrelevant. POSIX and native
+    inputs are returned unchanged; on non-Windows hosts this is identity.
+    """
+    if os.name != "nt" or not isinstance(value, str):
+        return value
+    text = value
+    if text.startswith("\\\\?\\UNC\\"):
+        text = "\\\\" + text[8:]
+    elif text.startswith("//?/UNC/"):
+        text = "//" + text[8:]
+    else:
+        for prefix in ("\\\\?\\", "//?/"):
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+                break
+    if (
+        len(text) >= 2
+        and text[0] == "/"
+        and text[1].isascii()
+        and text[1].isalpha()
+        and (len(text) == 2 or text[2] == "/")
+    ):
+        return text[1].upper() + ":/" + text[3:]
+    return text
+
+
 def _lexical_absolute(value: pathlib.Path) -> pathlib.Path:
-    return pathlib.Path(os.path.abspath(str(value)))
+    return pathlib.Path(os.path.abspath(host_path_text(str(value))))
 
 
 def _assert_no_alias_components(
@@ -292,6 +331,24 @@ def _set_private_directory(path: pathlib.Path) -> None:
         except atomic_publish_directory.DirectoryPublishError as error:
             fail(str(error))
         _require_private_windows_path(path, "private signing authority directory")
+
+
+def prepare_result_parent(value: pathlib.Path) -> None:
+    """Protect the driver's existing control directory before durable results.
+
+    Git Bash umask/chmod does not establish a private Windows DACL. Keep this
+    explicit preparation separate from key admission, which never repairs an
+    operator's key permissions as a side effect of opening the key.
+    """
+    path = _assert_no_alias_components(value, "release control result parent")
+    before = os.lstat(path)
+    _check_directory(before, "release control result parent", private=False)
+    _set_private_directory(path)
+    after = os.lstat(path)
+    _check_directory(after, "release control result parent", private=True)
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        fail("release control result parent changed during preparation")
+    _require_private_windows_path(path, "release control result parent")
 
 
 def _write_exclusive(path: pathlib.Path, raw: bytes) -> None:
@@ -1329,6 +1386,8 @@ def _print_scalar(value: object) -> None:
 def parser() -> argparse.ArgumentParser:
     top = argparse.ArgumentParser(description=__doc__)
     commands = top.add_subparsers(dest="command", required=True)
+    prepare = commands.add_parser("prepare-result-parent")
+    prepare.add_argument("path")
     create = commands.add_parser("create")
     create.add_argument("--stage-parent", required=True)
     create.add_argument("--invocation-stage", required=True)
@@ -1346,10 +1405,29 @@ def parser() -> argparse.ArgumentParser:
     return top
 
 
+def normalize_host_path_args(args: argparse.Namespace) -> argparse.Namespace:
+    for field in (
+        "path",
+        "stage_parent",
+        "invocation_stage",
+        "private_key",
+        "public_key",
+        "result_output",
+        "stage",
+        "capability",
+    ):
+        value = getattr(args, field, None)
+        if isinstance(value, str):
+            setattr(args, field, host_path_text(value))
+    return args
+
+
 def main() -> int:
     try:
-        args = parser().parse_args()
-        if args.command == "create":
+        args = normalize_host_path_args(parser().parse_args())
+        if args.command == "prepare-result-parent":
+            prepare_result_parent(pathlib.Path(args.path))
+        elif args.command == "create":
             created = create_authority(
                 pathlib.Path(args.stage_parent),
                 pathlib.Path(args.invocation_stage),

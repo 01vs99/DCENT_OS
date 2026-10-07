@@ -1,3 +1,4 @@
+import { fundContributeUrl } from '../../utils/links';
 // KitTopBar — structural recreation of the design-kit's
 // `ui_kits/dashboard/TopBar.jsx`, fed by REAL health/store data and with
 // every production topbar capability preserved.
@@ -177,7 +178,7 @@ export function KitTopBar(props: KitTopBarProps) {
         </a>
         <a
           className="topbar-link"
-          href="https://d-central.tech/fund/go?source=dcent_os&placement=topbar"
+          href={fundContributeUrl('topbar')}
           target="_blank"
           rel="noopener noreferrer"
           data-tip="Keep this open firmware alive — Bitcoin or card."

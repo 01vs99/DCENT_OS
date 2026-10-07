@@ -8,7 +8,7 @@
 # Amlogic uImage flash mechanism as S21, using scripts/lib/am3_geometry.sh. The
 # difference (BM1366 + BHB56902 + APW121215f fw=0x76) is hashboard-side
 # and doesn't change the flash primitives. Per
-# .
+# s19k pro live probe 78 2026 04 29 rule.
 #
 # The exact held evidence-bound stock route is the encrypted three-member
 # AML factory-SD package admitted by s19k_aml_stock_recovery_plan.py. This
@@ -401,7 +401,7 @@ if [ "$WROTE_HEX" != "$UIMAGE_MAGIC_HEX" ]; then
 fi
 
 echo "Step 4: Revert commit plan (refusing firstboot-only)..."
-# : .78 bootcmd never reads firstboot. Corpus stock-return is
+# : lab-unit bootcmd never reads firstboot. Corpus stock-return is
 # recover_to_stock = recover_env (nandrecovery_env @ 0x0B000000 → RAM
 # 0x01060000, env import 0x10000) + nand erase.part nvdata, armed by
 # flag 0x02 via s19k_write_recovery_flag.sh. This uImage nandwrite is

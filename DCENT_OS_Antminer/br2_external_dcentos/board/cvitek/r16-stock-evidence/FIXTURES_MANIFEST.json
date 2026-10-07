@@ -1,0 +1,197 @@
+{
+ "boot_fit_inner_sha256": {
+  "cv-s19jxp-stock-sd2nand-components": "acbb48f6d52fe1c89ba6b1cf0cf51aab3c1e73cf27a9948e8edd3b454f730415",
+  "cv-s19kpro-stock-sd2nand-components": "b7ab478050adb95d35523734013a971fe7617f7f6ee54eec7d5792d9612e7182",
+  "cv-s19pro-stock-sd2nand-components": "52cfddee030dad1a569c12c3829535de7b5094402474b2b6af0b7b35d8c63eda",
+  "cv-s19xp-stock-sd2nand-components": "646d38da0732be3577c1469cd274a7f70d99fe7f05c8fde24fa88a5d1278b435",
+  "cv-t21-held-unlock-components": "f7fe4e450301dc7bda26447f3336f4e55bfd2be26cb7e83786e2150aa0e9cd9f"
+ },
+ "fixtures": {
+  "configfs.ko": {
+   "bytes": 63288,
+   "sha256": "101ac45a4d152beeae297345d74a053a414fdff01731759845ab8d270011648a"
+  },
+  "cv183x_base.ko": {
+   "bytes": 43728,
+   "sha256": "be9bec653d3c9f6b29717d766ef82a32e346ef8d992b288fee4ece38cd1cb8ef"
+  },
+  "cv183x_pwm.ko": {
+   "bytes": 14840,
+   "sha256": "d3bc15991b53e8646cb667c26c7736e3bd785b3f6059b0eafc2e5cfb343f7136"
+  },
+  "cv183x_wdt.ko": {
+   "bytes": 17120,
+   "sha256": "f1394e57673302eec847e398deb6d2d978656cda16bf7ca27503b75624877bc9"
+  },
+  "cvidaemon.bin": {
+   "bytes": 9664,
+   "sha256": "8638900ff1e94c7e506d559c833cce02b0954103b072de8557c8cde6424a0f48"
+  },
+  "fdt_cv1835_miner_emmc.dtb": {
+   "bytes": 17895,
+   "sha256": "5b62a37db90b81a6d6cfac00d9ae515e5024b54d82330cb5b264b54f020659d2"
+  },
+  "s37_bitmainer_setup_variant_5ef8441d.sh": {
+   "bytes": 7426,
+   "sha256": "5ef8441d4b6fbce8ff363ad3528502fc96d69956779d44deb9b06649db3132ed"
+  },
+  "s37_bitmainer_setup_variant_b09fcd17.sh": {
+   "bytes": 7565,
+   "sha256": "b09fcd17349a61fbd4c1b575f02e2f4db57664235a2e53cff47b67bceb13683d"
+  },
+  "s70_cgminer_variant_617dbd58.sh": {
+   "bytes": 3033,
+   "sha256": "617dbd58060ef2486df1b42f22eb2b94266f4c7f80f77b95224c9cd112e166c0"
+  },
+  "subtype_cvbhb42xxx.txt": {
+   "bytes": 16,
+   "sha256": "5b8d906a19c13791f6ffe68a68add1ed3ee99b0afa1632cbde42289b0b8da369"
+  },
+  "subtype_cvbhb56xxx.txt": {
+   "bytes": 16,
+   "sha256": "3ef605ca9570da2df269d68cd17adbacf5b5a6ef676090bb2609eb3cca1e74ea"
+  },
+  "subtype_cvbhb6870x.txt": {
+   "bytes": 16,
+   "sha256": "5a90581d9c5ef008c21eb9ca16a168dd3de8e9cf76212e2c4a5e2425be13b197"
+  },
+  "uart_trans.ko": {
+   "bytes": 19640,
+   "sha256": "48ebbbc35089182576b66b1638ae608e6fee6e625b7e604d4597c398adfe387b"
+  },
+  "updateporc.sh": {
+   "bytes": 3920,
+   "sha256": "7d71a77812fec585674b874078a0d79a7c34948c3bdabc27e6f75f93b6e895c1"
+  }
+ },
+ "held_bundle_set": {
+  "cv-s19jxp-stock-sd2nand-components": {
+   "archive_path": "",
+   "archive_sha256": "f4191c9e01a60f24708bbd1d233b000a7a4facc53c9d095546ee633a7977bd71",
+   "members": {
+    "boot.emmc": "6f59ce159c024cced8e73627333d0644afe471ba29af17a96224cba907c60f13",
+    "fip.bin": "149b7fdb13c8a57ec17a558b8c45f0bda488b6fd2c5b780ebd78ba92c7a159c4",
+    "gpt.img": "3fb864a5f726e97234e7b99c93ba167d1160788ae470d7a5af65c159841eebb8",
+    "minerfs.gz": "8bc96b2417056abbecfd6b89868354df5e31cf27fa18494e68cdbebd631994b0",
+    "partition_emmc_miner.xml": "1e06d0a31039333a30d22f8bccdaca6dd2baf3c56c977847f41274501e4c4522",
+    "ramboot.itb": "e84d5f8077c5d230363473b212a4475b7e24b0549a0dc878193747094a49d2d5",
+    "sig.bin": "9eb356af0686f36957a2c9b6567ee6beeccf51f22b0c2504445a8f821f3b3d4a"
+   }
+  },
+  "cv-s19kpro-stock-sd2nand-components": {
+   "archive_path": "",
+   "archive_sha256": "f9e73a4af90af9faacb4ce468cf85de6ea5a580005750a32eb0cc2ea0ac3b22d",
+   "members": {
+    "boot.emmc": "4ac26ee077ef33826e26e15b5a6de6767d0760da2d88a135e9bbea51391df927",
+    "fip.bin": "7071db8f26940ce3f24dbd6afe445ca72bce84ca4f1a4e214e8393fbd062b96b",
+    "gpt.img": "9efd801d8749e120448ad29f6244f5d8e7ad640500e32f7b1cafb1d160c7cd55",
+    "minerfs.gz": "4fb54ab21833633c1e5c9070cd0773ca3f311555589e823f7307f7a6d8ee29f5",
+    "partition_emmc_miner.xml": "1e06d0a31039333a30d22f8bccdaca6dd2baf3c56c977847f41274501e4c4522",
+    "ramboot.itb": "931307d04c2c99e8215c502b6b8a19355fc4f7372a34c9e6164a2ccc9f2cfbf7",
+    "sig.bin": "7e9193ac37296057085578641f427cc5c87bea4e34566b5540bd9b47ba052e92"
+   }
+  },
+  "cv-s19pro-stock-sd2nand-components": {
+   "archive_path": "",
+   "archive_sha256": "8984cd9ea858a5ad19f1389740b7c5060fcea344d7bb8bd7178991133f9d46bb",
+   "members": {
+    "boot.emmc": "5f78a65ee0c9343ed10e1c18150a702aa9985d9e1286609a9d2436dbde350551",
+    "fip.bin": "cc2894e19c8b0d5756bd0e2d8714b8dd9d56855a9e38c4e19ffb340b47a0c53b",
+    "gpt.img": "6a6da9817224cc946e92b6e02bbc6d878955d370c248381e8435ff2371d02de1",
+    "minerfs.gz": "ab5a710287dd8c984aa5192f49dafb53359018bc7c524203cf763e826a1a7147",
+    "partition_emmc_miner.xml": "1e06d0a31039333a30d22f8bccdaca6dd2baf3c56c977847f41274501e4c4522",
+    "ramboot.itb": "6a5c37ac2715b2c999bc9cc834f8481134dcf91f5025c09998a0f9732e7a2a2d",
+    "sig.bin": "1163ae6cea5c2515845a1b4128d9b0c4d3878d776382d3ff2d7fa8b5b65d2604"
+   }
+  },
+  "cv-s19xp-stock-sd2nand-components": {
+   "archive_path": "",
+   "archive_sha256": "2972504e134ac704266ee015a1d12a378e6a6917e9e4452823a17b8773b8aebc",
+   "members": {
+    "boot.emmc": "5d9a3f7f59abf38c43bb15af6666076f6e2fc7569879ec089d221ffe1c128456",
+    "fip.bin": "e335909efcdf7e2385fbd61b559513313d845cfe7c4ad4d9c96a7e9ae891f235",
+    "gpt.img": "0dcef9c9a69b5f9e25618649da2117914260a26b94928606b9a0b1743695961e",
+    "minerfs.gz": "fd66b377184177ab4710cf9737023d0d49d318d4d344f1440929b6ca73e6bacd",
+    "partition_emmc_miner.xml": "1e06d0a31039333a30d22f8bccdaca6dd2baf3c56c977847f41274501e4c4522",
+    "ramboot.itb": "1af2ebdc4cd8823a9406b4dd31df34b72009d0afe2162880d2f62042e7690df4",
+    "sig.bin": "7190c7d39e5932ec68d1ac3880d26bd027ccf81dee4bf0166e4e0f05d53dcc4b"
+   }
+  },
+  "cv-t21-held-unlock-components": {
+   "archive_path": "",
+   "archive_sha256": "41af2e15ba3f8269691a61bf1585050a2dc8e721f66a9b902366e79aa5c0701d",
+   "members": {
+    "boot.emmc": "bed8811cd965c04cc4b4af58c9af2ab9543eb393e30fdf4be58c30797d617542",
+    "fip.bin": "cc2894e19c8b0d5756bd0e2d8714b8dd9d56855a9e38c4e19ffb340b47a0c53b",
+    "gpt.img": "9efd801d8749e120448ad29f6244f5d8e7ad640500e32f7b1cafb1d160c7cd55",
+    "minerfs.gz": "b6a6e63af46169a6a665279b4ab3ee6ab71e1c9d8f104d6d7ad7769bac24fb7e",
+    "partition_emmc_miner.xml": "1e06d0a31039333a30d22f8bccdaca6dd2baf3c56c977847f41274501e4c4522",
+    "ramboot.itb": "931307d04c2c99e8215c502b6b8a19355fc4f7372a34c9e6164a2ccc9f2cfbf7",
+    "sig.bin": "c63ee9fc1f73980f37370c4473cc243757198f91fee29c0e19fb0dce0138e892"
+   }
+  }
+ },
+ "held_kernel_modules": {
+  "configfs.ko": {
+   "alias": "fs-configfs",
+   "author": "Oracle",
+   "bytes": 63288,
+   "depends": "",
+   "description": "Simple RAM filesystem for user driven kernel subsystem configuration.",
+   "license": "GPL",
+   "sha256": "101ac45a4d152beeae297345d74a053a414fdff01731759845ab8d270011648a",
+   "vermagic": "4.9.38-tag- SMP preempt mod_unload aarch64"
+  },
+  "cv183x_base.ko": {
+   "bytes": 43728,
+   "depends": "",
+   "description": "Cvitek base driver",
+   "license": "GPL",
+   "sha256": "be9bec653d3c9f6b29717d766ef82a32e346ef8d992b288fee4ece38cd1cb8ef",
+   "vermagic": "4.9.38-g214084e SMP preempt mod_unload aarch64"
+  },
+  "cv183x_pwm.ko": {
+   "alias": "of:N*T*Ccvitek,cvi-pwmC*",
+   "author": "Mark.Hsieh<mark.hsieh@cvitek.com>",
+   "bytes": 14840,
+   "depends": "",
+   "description": "Cvitek PWM driver",
+   "license": "GPL",
+   "sha256": "d3bc15991b53e8646cb667c26c7736e3bd785b3f6059b0eafc2e5cfb343f7136",
+   "vermagic": "4.9.38-00269-g8355fd4db SMP preempt mod_unload aarch64"
+  },
+  "cv183x_wdt.ko": {
+   "alias": "of:N*T*Csnps,dw-wdtC*",
+   "author": "Jamie Iles",
+   "bytes": 17120,
+   "depends": "",
+   "description": "Synopsys DesignWare Watchdog Driver",
+   "license": "GPL",
+   "parm": "nowayout:Watchdog cannot be stopped once started (default=0)",
+   "sha256": "f1394e57673302eec847e398deb6d2d978656cda16bf7ca27503b75624877bc9",
+   "vermagic": "4.9.38-tag- SMP preempt mod_unload aarch64"
+  },
+  "uart_trans.ko": {
+   "bytes": 19640,
+   "depends": "",
+   "license": "Dual BSD/GPL",
+   "sha256": "48ebbbc35089182576b66b1638ae608e6fee6e625b7e604d4597c398adfe387b",
+   "vermagic": "4.9.38 SMP preempt mod_unload aarch64"
+  }
+ },
+ "s37_variant_files": {
+  "5ef8441d": "s37_bitmainer_setup_variant_5ef8441d.sh",
+  "b09fcd17": "s37_bitmainer_setup_variant_b09fcd17.sh"
+ },
+ "s70_variant_files": {
+  "617dbd58": "s70_cgminer_variant_617dbd58.sh"
+ },
+ "schema": "dcentos.r16-cv-stock-fixtures/v1",
+ "subtype_matrix": {
+  "cv-s19jxp-stock-sd2nand-components": "CVCtrl_BHB56XXX",
+  "cv-s19kpro-stock-sd2nand-components": "CVCtrl_BHB56XXX",
+  "cv-s19pro-stock-sd2nand-components": "CVCtrl_BHB42XXX",
+  "cv-s19xp-stock-sd2nand-components": "CVCtrl_BHB56XXX",
+  "cv-t21-held-unlock-components": "CVCtrl_BHB6870X"
+ }
+}

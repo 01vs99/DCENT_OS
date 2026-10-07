@@ -335,64 +335,6 @@ fn normalize_model_token(model: &str) -> String {
         .collect()
 }
 
-/// TD-003 expanded Antminer platforms must stay management-only until their
-/// promotion gates are complete. Their model tiers must not claim a callable
-/// Experimental runtime while this gate remains active.
-pub fn td003_management_only_model(model: &str) -> Option<&'static str> {
-    match normalize_model_token(model).as_str() {
-        "s9se" | "antminers9se" => Some("Antminer S9 SE"),
-        "s15" | "antminers15" => Some("Antminer S15"),
-        "t15" | "antminert15" => Some("Antminer T15"),
-        "s17" | "s17pro" | "antminers17" | "antminers17pro" => Some("Antminer S17 / S17 Pro"),
-        "s17+" | "s17plus" | "antminers17+" | "antminers17plus" => Some("Antminer S17+"),
-        "t17" | "antminert17" => Some("Antminer T17"),
-        "t17+" | "t17plus" | "antminert17+" | "antminert17plus" => Some("Antminer T17+"),
-        "s17e" | "antminers17e" => Some("Antminer S17e"),
-        "t17e" | "antminert17e" => Some("Antminer T17e"),
-        "t19" | "antminert19" => Some("Antminer T19"),
-        "s19+" | "s19plus" | "antminers19+" | "antminers19plus" => Some("Antminer S19+"),
-        "s19xp" | "antminers19xp" => Some("Antminer S19 XP"),
-        "s19jxp" | "antminers19jxp" => Some("Antminer S19j XP"),
-        "s19jpro+" | "s19jproplus" | "antminers19jpro+" | "antminers19jproplus" => {
-            Some("Antminer S19j Pro+")
-        }
-        "s21+" | "s21plus" | "antminers21+" | "antminers21plus" => Some("Antminer S21+"),
-        "s21xp" | "antminers21xp" => Some("Antminer S21 XP"),
-        "s21xpimm" | "s21xpimmersion" | "antminers21xpimm" | "antminers21xpimmersion" => {
-            Some("Antminer S21 XP Immersion")
-        }
-        _ => None,
-    }
-}
-
-/// Same TD-003 gate as [`td003_management_only_model`], but keyed by the
-/// baked `/etc/dcentos/board_target` marker. This is a runtime defense-in-depth
-/// layer: a stale or missing `[mining].model` must not let an in-development
-/// board stamp reach voltage, PIC/PMBus, ASIC init, or hash dispatch paths.
-pub fn td003_management_only_board_target(board_target: &str) -> Option<&'static str> {
-    match normalize_model_token(board_target).as_str() {
-        "am1s9se" => Some("Antminer S9 SE"),
-        "am1s15" => Some("Antminer S15"),
-        "am1t15" => Some("Antminer T15"),
-        "am2s17plus" => Some("Antminer S17+"),
-        "am2s17" | "am2s17p" | "am2s17pro" | "am1s17" => Some("Antminer S17 / S17 Pro"),
-        "x17s17edspicplanned" => Some("Antminer S17e"),
-        "x17t17" | "am2t17" => Some("Antminer T17"),
-        "am2t17plus" => Some("Antminer T17+"),
-        "x17t17epic16planned" => Some("Antminer T17e"),
-        "am2t19" | "x19t19" | "cv183xt19" | "cv1835t19" | "am3t19" => Some("Antminer T19"),
-        "am2s19plus" => Some("Antminer S19+"),
-        "am2s19xp" | "am3s19xp" | "amlogicxps19" | "cv1835s19xp" | "cv183xs19xp" => {
-            Some("Antminer S19 XP")
-        }
-        "am3s19jxp" | "amlogics19jxp" | "cv1835s19jxp" | "cv183xs19jxp" => Some("Antminer S19j XP"),
-        "am3s19jproplus" | "amlogics19jproplus" => Some("Antminer S19j Pro+"),
-        "amlogics21plus" => Some("Antminer S21+"),
-        "am3s21xp" => Some("Antminer S21 XP"),
-        _ => None,
-    }
-}
-
 pub fn lookup_model(model: &str) -> Option<ModelSpec> {
     let normalized = normalize_model_token(model);
 
@@ -437,6 +379,23 @@ pub fn lookup_model(model: &str) -> Option<ModelSpec> {
             pic_addrs_hint: None,
             support_tier: SupportTier::Validated,
         },
+        // The identical 2019-07-31 S9i/S9j production images actively call
+        // the bare PIC enable/heartbeat and exact S9 DAC law. These are
+        // exact 3x63 BM1387 beta compositions, distinct from T9+'s framed PIC.
+        "s9i" | "antminers9i" | "s9j" | "antminers9j" => ModelSpec {
+            model_key: if normalized.ends_with("s9i") {
+                "s9i"
+            } else {
+                "s9j"
+            },
+            family_key: "bm1387",
+            chip_label: "BM1387",
+            chip_id: Some(0x1387),
+            chips_per_chain_hint: Some(63),
+            pic_type_hint: Some(ModelPicTypeHint::Pic16),
+            pic_addrs_hint: Some(&[0x55, 0x56, 0x57]),
+            support_tier: SupportTier::Experimental,
+        },
         // Antminer S9++ (BM1387, 54 chips/board). Identity-only.
         //
         // Evidence: the unstripped AMTC `single-board-test` binary exports
@@ -458,14 +417,8 @@ pub fn lookup_model(model: &str) -> Option<ModelSpec> {
             pic_addrs_hint: None,
             support_tier: SupportTier::EvidenceOnly,
         },
-        // Antminer S9 SE (BM1393, Ctrl_C43 / XC7Z007S). Planned only.
-        //
-        // The official OM-20190918 release, Hive wrapper, held S9k miner, and
-        // live DCENT_OS#2 evidence agree on BM1393, 60 chips/chain, CRC5 VIL,
-        // and the stock-FPGA carrier family. BoardDesc::am1_s9se remains
-        // CaptureFirst with no chain transport, voltage-controller selection,
-        // install lane, or mining authority, so this model must not claim a
-        // callable runtime merely because its identity and geometry are exact.
+        // Exact C43/BM1393 native compositions use the retained FPGA/PIC owner.
+        // Generic PIC hints stay absent because its framed ABI is specialised.
         "s9se" => ModelSpec {
             model_key: "s9se",
             family_key: "bm1393",
@@ -474,22 +427,8 @@ pub fn lookup_model(model: &str) -> Option<ModelSpec> {
             chips_per_chain_hint: Some(60),
             pic_type_hint: None,
             pic_addrs_hint: None,
-            support_tier: SupportTier::Planned,
+            support_tier: SupportTier::Experimental,
         },
-        // Antminer S9k (BM1393, ~13.5 TH/s SHA-256, 7nm). Identity-only.
-        //
-        // Evidence: the held S9k jig `bitmain-antminer-binaries/S9k/cgminer` —
-        // chip family from its `open_core_bm1393` / `enable_core_clock_BM1393`
-        // paths (`chip_id` 0x1393), and **60 chips/chain** triple-byte-stated by
-        // its own `soc_config.asic_num = 60` (`bitmain_soc_prepare`) plus two
-        // `== 60` validators (`check_asic_num`, `check_asic_num_without_power_off`).
-        // 2026-08-06, hardware-enablement Round 25.
-        //
-        // No `SUPPORT_MATRIX.md` row / S9k-specific `board_target`: the held
-        // S9k dual-arch board (Zynq control + a BM1880 vision SoC) still lacks
-        // its own control-board bring-up. The `am1-s9se` row must not be reused
-        // as S9k carrier authority. Paired with
-        // `model-rs-key-without-matrix-row:s9k` in the drift gate.
         "s9k" => ModelSpec {
             model_key: "s9k",
             family_key: "bm1393",
@@ -498,7 +437,7 @@ pub fn lookup_model(model: &str) -> Option<ModelSpec> {
             chips_per_chain_hint: Some(60),
             pic_type_hint: None,
             pic_addrs_hint: None,
-            support_tier: SupportTier::EvidenceOnly,
+            support_tier: SupportTier::Experimental,
         },
         "s9+" | "s9plus" => ModelSpec {
             model_key: "s9+",
@@ -530,15 +469,21 @@ pub fn lookup_model(model: &str) -> Option<ModelSpec> {
             pic_addrs_hint: None,
             support_tier: SupportTier::EvidenceOnly,
         },
-        "s15" | "t15" => ModelSpec {
-            model_key: "s15",
+        "s15" | "antminers15" | "t15" | "antminert15" => ModelSpec {
+            model_key: if normalized.ends_with("t15") {
+                "t15"
+            } else {
+                "s15"
+            },
             family_key: "bm1391",
             chip_label: "BM1391",
-            chip_id: None,
-            chips_per_chain_hint: None,
+            chip_id: Some(0x1391),
+            chips_per_chain_hint: Some(if normalized.ends_with("t15") { 60 } else { 72 }),
+            // The native runtime owns the exact application protocol; this
+            // model hint does not select or identify the PIC microcontroller.
             pic_type_hint: None,
             pic_addrs_hint: None,
-            support_tier: SupportTier::Planned,
+            support_tier: SupportTier::Experimental,
         },
         "s17" | "s17pro" => ModelSpec {
             model_key: "s17",
@@ -600,39 +545,42 @@ pub fn lookup_model(model: &str) -> Option<ModelSpec> {
             model_key: "s17e",
             family_key: "bm1396",
             chip_label: "BM1396",
-            chip_id: None,
-            chips_per_chain_hint: None,
-            pic_type_hint: Some(ModelPicTypeHint::DsPic),
+            chip_id: Some(0x1396),
+            chips_per_chain_hint: Some(135),
+            pic_type_hint: None,
             pic_addrs_hint: None,
-            support_tier: SupportTier::Planned,
+            support_tier: SupportTier::Experimental,
         },
+        // Exact native framed application custody; no generic PIC adapter hint.
         "t17e" => ModelSpec {
             model_key: "t17e",
             family_key: "bm1396",
             chip_label: "BM1396",
-            chip_id: None,
-            chips_per_chain_hint: None,
-            pic_type_hint: Some(ModelPicTypeHint::Pic16),
-            pic_addrs_hint: Some(X17_PIC_ADDRS),
-            support_tier: SupportTier::Planned,
+            chip_id: Some(0x1396),
+            chips_per_chain_hint: Some(78),
+            pic_type_hint: None,
+            pic_addrs_hint: None,
+            support_tier: SupportTier::Experimental,
         },
         "s19" => ModelSpec {
             model_key: "s19",
             family_key: "bm1398",
             chip_label: "BM1398",
             chip_id: Some(0x1398),
-            // NOMINAL, not RE-confirmed. The plain S19 (e.g. 95T) is a different
-            // sub-variant than the S19 Pro (110T = 3x114) and its per-chain count is
-            // not repo-confirmed; skus.conf lists 3x114 but flags it as borrowed
-            // ("rides proven am2-s19pro image") and "binning enumerated at runtime".
-            // So this hint only seeds the expected-count display and is superseded
-            // the moment the chain enumerates — the two sources deliberately differ
-            // until a live S19 confirms one. The current BoardDesc runtime is
-            // management-only, so the model support tier remains Planned.
+            // SETTLED first-party (Gauntlet B6, 2026-09-02): the stock S19
+            // topol.conf names hashboard NBS1902 = BM1398P with 76 ASICs/chain
+            // (8x10 grid, 38 domains x 2, addr interval 3) — Phase A §3.7 row 7,
+            // .
+            // The old "76-hint vs 114" divergence is board-dependent, not a bug:
+            // stock itself ships TWO S19-class boards (NBS1902-76 and the S19
+            // Pro's NBP1901-114). This hint still only seeds the expected-count
+            // display — runtime enumeration stays authoritative, and the BoardDesc
+            // runtime remains management-only (tier Planned). Geometry pinned as
+            // `bm1398_protocol::S19_NBS1902_BOARD_GEOMETRY`.
             chips_per_chain_hint: Some(76),
             pic_type_hint: None,
             pic_addrs_hint: None,
-            support_tier: SupportTier::Planned,
+            support_tier: SupportTier::Experimental,
         },
         "s19pro" => ModelSpec {
             model_key: "s19pro",
@@ -642,9 +590,22 @@ pub fn lookup_model(model: &str) -> Option<ModelSpec> {
             chips_per_chain_hint: Some(114),
             pic_type_hint: None,
             pic_addrs_hint: None,
-            support_tier: SupportTier::Planned,
+            // Exact am2-s19pro/NBP1901 native composition now consumes its
+            // ExperimentalOptIn BoardDesc before generic serial hardware.
+            // The controller is bound by that owner, not a model-level hint.
+            support_tier: SupportTier::Experimental,
         },
-        // Antminer S19+ (BM1398, 80 chips/board). Identity and geometry only.
+        "s19a" => ModelSpec {
+            model_key: "s19a",
+            family_key: "bm1398",
+            chip_label: "BM1398",
+            chip_id: Some(0x1398),
+            chips_per_chain_hint: Some(72),
+            pic_type_hint: None,
+            pic_addrs_hint: None,
+            support_tier: SupportTier::Experimental,
+        },
+        // Antminer S19+ (BM1398, 80 chips/board), exact BHB28701 runtime profile.
         //
         // Exact held evidence:
         // - Bosminer model-list, 16,854 B, SHA-256
@@ -660,12 +621,12 @@ pub fn lookup_model(model: &str) -> Option<ModelSpec> {
         //   its held `/etc/fw-info` spells model `s19plus`, platform `xil`,
         //   install type `nand`.
         //
-        // Bosminer's raw fields report 40 domains x2, while the guide/VNish
-        // report 10 voltage domains x8. With no held consumer proving the
-        // relationship, this model exposes only their common 80-chip board
-        // geometry. The held package is third-party
-        // implementation evidence, not authority for a DCENT board target,
-        // PIC/PSU route, voltage path, install, or mining.
+        // The exact package's hwscan joins model constructor 0x7ed14 to
+        // defaults constructor 0x7ebd8: BHB28701, 80 chips, ten domains of
+        // eight, 645 MHz / 14.00 V. Its cgminer parses this model-info and
+        // selects ASIC 0x1398 and Xilinx power callbacks. Native startup
+        // still requires exact physical identity, PIC89/PSU71, controller
+        // and fabric checks. The Bosminer 40x2 layout is not our authority.
         "s19+" | "s19plus" | "antminers19+" | "antminers19plus" => ModelSpec {
             model_key: "s19plus",
             family_key: "bm1398",
@@ -674,24 +635,50 @@ pub fn lookup_model(model: &str) -> Option<ModelSpec> {
             chips_per_chain_hint: Some(80),
             pic_type_hint: None,
             pic_addrs_hint: None,
-            support_tier: SupportTier::EvidenceOnly,
+            support_tier: SupportTier::Experimental,
         },
         "t19" => ModelSpec {
             model_key: "t19",
             family_key: "bm1398",
             chip_label: "BM1398",
             chip_id: Some(0x1398),
-            chips_per_chain_hint: None,
+            // SETTLED desk-side first-party (Gauntlet B6, 2026-09-02): the stock
+            // T19 topol.conf names hashboard NBT1903 = BM1398P with 76 ASICs/chain
+            // (8x10 grid, 38 domains x 2, addr interval 3) — Phase A §3.7 row 9,
+            // ,
+            // pinned as `bm1398_protocol::T19_NBT1903_BOARD_GEOMETRY`. The
+            // chain-population count (VNish says 3x76) remains a live-capture
+            // question; the per-chain count here is stock-authoritative.
+            chips_per_chain_hint: Some(76),
             pic_type_hint: None,
             pic_addrs_hint: None,
-            support_tier: SupportTier::Planned,
+            support_tier: SupportTier::Experimental,
         },
+        // Antminer S19j classic (non-Pro, hashboard BHB42701). Identity
+        // CORRECTED 2026-09-02 (Gauntlet lane B5b): the prior "BM1398
+        // identity-only" attribution is REFUTED by Bitmain's own stock
+        // topology DB — the S19j merge image's 15-machine `config[]` DB
+        // states BHB42701 = BM1362 (`asic_addr "0x1362"`), 108 ASICs/chain
+        // (12x9 placement grid exactly populated), 36 voltage domains x 3,
+        // address interval 2, 65 big + 514 small cores, chain MCU labeled
+        // PIC1704 @ 0x20, PSU APW12 @ 0x10 gpio 907. Exact source:
+        //
+        // 02_Antminer_S19j_zynq7007/components/minerfs.image.gz.tree/etc/
+        // topol.conf` (sha256 61a6404b..., entry BHB42701; byte-identical in
+        // both zynq7007 records). Transcription + pins:
+        // `dcentrald-silicon-profiles::s19_family_stock_topol`;
+        // adjudication: PHASE_A_EVIDENCE_REPORT.md §3.6 (SETTLED).
+        // Registered BoardDesc row: `am2-s19j-classic` — distinct from the
+        // S19j Pro's `am2-s19j` key (different hashboard; Denied,
+        // capture-first, no runtime sharing). Evidence-only tier unchanged:
+        // no unit ever contacted, no callable runtime, no live PIC/PSU
+        // contract.
         "s19j" => ModelSpec {
             model_key: "s19j",
-            family_key: "bm1398",
-            chip_label: "BM1398",
-            chip_id: Some(0x1398),
-            chips_per_chain_hint: None,
+            family_key: "bm1362",
+            chip_label: "BM1362",
+            chip_id: Some(0x1362),
+            chips_per_chain_hint: Some(108),
             pic_type_hint: None,
             pic_addrs_hint: None,
             support_tier: SupportTier::EvidenceOnly,
@@ -730,11 +717,11 @@ pub fn lookup_model(model: &str) -> Option<ModelSpec> {
             chip_label: "BM1366",
             chip_id: Some(0x1366),
             chips_per_chain_hint: Some(110),
-            // Exact production route evidence does not identify the deployed
-            // hashboard or settle PIC-versus-NoPic/PSU selection.
-            pic_type_hint: None,
-            pic_addrs_hint: None,
-            support_tier: SupportTier::EvidenceOnly,
+            // R12 exact production factory selects the retained AML PSU owner.
+            // NoPic describes software custody; populated factory PICs are untouched.
+            pic_type_hint: Some(ModelPicTypeHint::NoPic),
+            pic_addrs_hint: Some(&[]),
+            support_tier: SupportTier::Experimental,
         },
         "s19jxp" => ModelSpec {
             model_key: "s19jxp",
@@ -742,11 +729,23 @@ pub fn lookup_model(model: &str) -> Option<ModelSpec> {
             chip_label: "BM1366",
             chip_id: Some(0x1366),
             chips_per_chain_hint: Some(110),
-            // BHB56804 is a software-profile association, not a same-unit
-            // deployed-board or voltage-controller witness.
-            pic_type_hint: None,
-            pic_addrs_hint: None,
-            support_tier: SupportTier::EvidenceOnly,
+            // R12 exact production factory selects the retained AML PSU owner.
+            // NoPic describes software custody; populated factory PICs are untouched.
+            pic_type_hint: Some(ModelPicTypeHint::NoPic),
+            pic_addrs_hint: Some(&[]),
+            support_tier: SupportTier::Experimental,
+        },
+        // Exact A126 and Plus120 factory profiles select PSU software custody.
+        // Classic BHB42601/21/41 keeps its separate PIC-controlled route.
+        "s19jproa" | "antminers19jproa" => ModelSpec {
+            model_key: "s19jproa",
+            family_key: "bm1362",
+            chip_label: "BM1362",
+            chip_id: Some(0x1362),
+            chips_per_chain_hint: Some(126),
+            pic_type_hint: Some(ModelPicTypeHint::NoPic),
+            pic_addrs_hint: Some(&[]),
+            support_tier: SupportTier::Experimental,
         },
         "s19jpro+" | "s19jproplus" => ModelSpec {
             model_key: "s19jproplus",
@@ -756,7 +755,7 @@ pub fn lookup_model(model: &str) -> Option<ModelSpec> {
             chips_per_chain_hint: Some(120),
             pic_type_hint: Some(ModelPicTypeHint::NoPic),
             pic_addrs_hint: Some(&[]),
-            support_tier: SupportTier::Planned,
+            support_tier: SupportTier::Experimental,
         },
         "s19k" | "s19kpro" => ModelSpec {
             model_key: "s19k",
@@ -779,7 +778,23 @@ pub fn lookup_model(model: &str) -> Option<ModelSpec> {
             family_key: "bm1368",
             chip_label: "BM1368",
             chip_id: Some(0x1368),
+            // FIRST-PARTY factory confirmation (Gauntlet B10, 2026-09-02):
+            // Bitmain's own S21 test jig Config.ini (amtc-s21-jig, sha256
+            // fab1a64d...) pins Board_Name BHB68603 = BM1368, Asic_Num 108,
+            // 12 voltage domains x 9 — agreeing with the Lane I live/enum
+            // resolution (3x108=324 full SKU; the .135 unit populates slot
+            // 2). Transcribed in s21_family_stock_topol.
             chips_per_chain_hint: Some(108),
+            // NoPic here is the live-proven Amlogic CONTROL-BOARD software
+            // posture (TAS5782M kernel-DTB + PSU PMBus/GPIO; ftrace shows
+            // zero PIC I2C traffic), NOT a silicon statement: the B10
+            // factory evidence proves the BHB68603 hashboard POPULATES a
+            // PIC1704 (the jig flashes it; the shipped bench config sets
+            // Read_Temperature_From_Pic: false). The stock air AML record
+            // is sealed — whether any AML build ever addresses the PIC at
+            // runtime is unknown. Keep NoPic (it is the correct runtime
+            // contract for the only held platform); a zynq-class board on
+            // the same hashboards would face live PIC1704 silicon.
             pic_type_hint: Some(ModelPicTypeHint::NoPic),
             pic_addrs_hint: Some(&[]),
             support_tier: SupportTier::Experimental,
@@ -789,13 +804,32 @@ pub fn lookup_model(model: &str) -> Option<ModelSpec> {
             family_key: "bm1368",
             chip_label: "BM1368",
             chip_id: Some(0x1368),
-            // Desk registries agree on 3x108, but exact controller/runtime
-            // geometry remains non-authorizing until raw or live proof exists.
-            chips_per_chain_hint: None,
+            // SETTLED desk-side first-party (Gauntlet B9, 2026-09-02): the
+            // stock t21-merge-20240926 topol (machines BHB68701/03/05,
+            // byte-identical except name fields) states BM1368 with 108
+            // ASICs per chain (12 domains x 9, interval 2, 12x9 placement
+            // grid exactly populated), chain_num 3 — Phase A §3.9, pinned
+            // as `t21_stock_topol::T21_CHIPS_PER_CHAIN`. Catalog datum
+            // only: the native-serial resolver still REFUSES t21 (BM1368
+            // is a definitive-NoPic-family chip id while the T21 stock
+            // record labels per-chain PIC1704 MCUs — a controller
+            // contradiction flagged for DCENT_EE), so pic_type_hint stays
+            // None and dispatch stays fail-closed.
+            chips_per_chain_hint: Some(108),
             pic_type_hint: None,
             pic_addrs_hint: None,
             support_tier: SupportTier::Planned,
         },
+        // Geometry (Lane J, 2026-09-01): chips_per_chain_hint=65 is per-board;
+        // the full SKU is 3 chains x 65 = 195. Two independent held sources agree:
+        // bosminer `model-list.json` (A3HB70601/70602 -> BM1370, num_domains 13,
+        // num_per_hb 65, num_per_domain 5; SHA-256 c79f56e2...) and the ePIC jig
+        // hashboard DB (A3HB706xx chain_num=3, chain_asic_num=65). Daemon SSOT
+        // `dcentrald-silicon-profiles/src/bm1370.rs` pins 3x65=195.
+        //
+        // Exact Pro/XP production models independently select the retained
+        // AML PSU voltage-controller backend (R14, 2026-09-07). Factory
+        // PIC presence remains distinct from this NoPic software ownership.
         "s21pro" => ModelSpec {
             model_key: "s21pro",
             family_key: "bm1370",
@@ -814,9 +848,9 @@ pub fn lookup_model(model: &str) -> Option<ModelSpec> {
         //   c79f56e2d2a3f1e593b21d8a79a5364b2997e76f09b2ee9167fac64d1bf7dfe0)
         //   records S21+ / A3HB70701 as BM1370, 11 domains x 5 = 55 chips,
         //   while S21 Pro / A3HB70601,A3HB70602 is 13 x 5 = 65 chips.
-        // This row is identity/geometry only. There is no S21+ DCENT board
-        // target or validated carrier contract, so the TD-003 model gate above
-        // keeps it management-only and the tier must not claim runtime support.
+        // This row is identity/geometry only. Its exact amlogic-s21plus
+        // BoardDesc has no executable carrier contract, so dispatch refuses
+        // it and the tier must not claim runtime support.
         "s21+" | "s21plus" | "antminers21+" | "antminers21plus" => ModelSpec {
             model_key: "s21plus",
             family_key: "bm1370",
@@ -842,12 +876,12 @@ pub fn lookup_model(model: &str) -> Option<ModelSpec> {
             // matrix scaffold and is refuted by both this roster and the
             // in-tree hashboard catalog.
             chips_per_chain_hint: Some(91),
-            // Exact production software does not prove PIC selection, while
-            // an independent A3HB70501 topology artifact declares PIC1704.
-            // Refuse the previous shared-S21 NoPic inheritance.
-            pic_type_hint: None,
-            pic_addrs_hint: None,
-            support_tier: SupportTier::EvidenceOnly,
+            // The exact production model selects PsuAsVoltageController on
+            // the AML key3 backend (R14, 2026-09-07). NoPic denotes this
+            // software owner; physical factory PIC silicon remains recorded.
+            pic_type_hint: Some(ModelPicTypeHint::NoPic),
+            pic_addrs_hint: Some(&[]),
+            support_tier: SupportTier::Experimental,
         },
         // S21 XP Immersion is a distinct product identity even though it uses
         // the same BM1370 13x7 hashboard geometry as S21 XP air. Exact held
@@ -925,20 +959,23 @@ pub fn board_target_chip_label(board_target: &str) -> Option<&'static str> {
     let marker = normalize_model_token(board_target);
     let label = match marker.as_str() {
         // am1 — Zynq S9 (BM1387).
-        "am1s9" => "BM1387",
-        // am1 — Zynq S9 SE (BM1393). Identity only; runtime stays TD-003
-        // management-only and ChipRegistry has no BM1393 executor.
-        "am1s9se" => "BM1393",
-        // am1 — Zynq S15 (BM1391, 7nm). Scaffold-tier target (see skus.conf
+        "am1s9" | "am1s9i" | "am1s9j" => "BM1387",
+        // The registered Hydro row proves BM1387 lineage only. It has no
+        // complete-miner ModelSpec and remains management-only.
+        "am1s9hydro" => "BM1387",
+        // am1 — Zynq S9 SE / S9k (BM1393), whose native C43 owner admits the
+        // exact carrier and independently observed ASIC identity.
+        "am1s9se" | "am1s9k" => "BM1393",
+        // am1 — Zynq S15 (BM1391, 7nm). Exact native target (see skus.conf
         // `am1-s15`, chip_id 0x1391); the chip LABEL resolves here for
         // detection/identity so an S15 board_target is not mislabeled
-        // "Auto-detect", while the mining path stays scaffold-gated. Mirrors
+        // "Auto-detect"; the native owner binds the exact carrier. Mirrors
         // lookup_model("s15") = BM1391 (the other resolution path).
         "am1s15" | "am1t15" | "s15" | "t15" => "BM1391",
         // am2 — Zynq X17/X19 control boards. The bare "am2" family is shared
         // by BM1398 (S19/S19 Pro) and BM1362 (S19j Pro), so only the
         // model-suffixed board_target pins the chip.
-        "am2s19pro" | "am2s19" | "am2t19" | "x19t19" => "BM1398",
+        "am2s19pro" | "am2s19" | "am2s19a" | "am2s19plus" | "am2t19" | "x19t19" => "BM1398",
         "am2s19j" | "am2s19jpro" | "am2s19jprozynq" | "am2s19jproxil25" | "am2xil25" => "BM1362",
         "am2s19xp" => "BM1366",
         "am2s17" | "am2s17p" | "am2s17pro" | "am2t17" => "BM1397",
@@ -946,15 +983,18 @@ pub fn board_target_chip_label(board_target: &str) -> Option<&'static str> {
         // the '+' variants are BM1397; only the 'e' variants are BM1396. These two
         // rows were reversed, and `skus.conf` was corrected without them, which is
         // what `live_skus_conf_agrees_with_board_target_chip_label_for_every_target`
-        // caught. This is the IDENTITY label only; ModelSpec keeps `chip_id=None`
-        // so the unregistered BM1396 runtime remains fail-closed.
+        // caught. These are identity labels; exact S17e/T17e native admission
+        // remains separate from generic serial-chip registration.
         "am2s17plus" | "am2t17plus" => "BM1397",
         "am2s17e" | "am2t17e" | "x17s17edspicplanned" | "x17t17epic16planned" => "BM1396",
         // am3-aml — Amlogic A113D. Disambiguated by the model suffix.
         "am3s21" | "am3t21" => "BM1368",
         "am3s21pro" | "am3s21xp" => "BM1370",
+        // Exact evidence-only registry identity; no Pro/XP carrier alias or
+        // callable runtime is implied by this display label.
+        "amlogics21plus" => "BM1370",
         "am3s19k" | "am3s19kpro" | "am3s19xp" | "am3s19jxp" => "BM1366",
-        "am3s19jproplus" => "BM1362",
+        "am3s19jproplus" | "am3s19jproa" => "BM1362",
         "am3s19jproaml" => "BM1362",
         // am3-bb — BeagleBone S19j Pro (BM1362).
         "am3bbs19jpro" => "BM1362",
@@ -1011,14 +1051,102 @@ mod tests {
         board_target_chip_label, detect_model_from_platform, lookup_extended_spec, lookup_model,
         model_chip_count_hint, model_chip_id, model_chip_label, model_family_key, model_key,
         model_pic_addrs_hint, model_pic_type_hint, model_runtime_profile,
-        td003_management_only_board_target, td003_management_only_model, Model, ModelPicTypeHint,
+        Model, ModelPicTypeHint,
         RuntimeProfile, SupportTier,
     };
 
     #[test]
+    fn s9i_s9j_use_exact_bm1387_pic16_beta_profiles() {
+        for (model, target, label) in [
+            ("s9i", "am1-s9i", "Antminer S9i"),
+            ("s9j", "am1-s9j", "Antminer S9j"),
+        ] {
+            for alias in [model, label] {
+                let spec = lookup_model(alias).unwrap();
+                assert_eq!(spec.model_key, model);
+                assert_eq!(spec.chip_id, Some(0x1387));
+                assert_eq!(spec.chips_per_chain_hint, Some(63));
+                assert_eq!(spec.pic_type_hint, Some(ModelPicTypeHint::Pic16));
+                assert_eq!(spec.pic_addrs_hint, Some(&[0x55, 0x56, 0x57][..]));
+                assert_eq!(spec.support_tier, SupportTier::Experimental);
+
+            }
+            assert_eq!(board_target_chip_label(target), Some("BM1387"));
+
+        }
+        assert_eq!(
+            lookup_model("s9").unwrap().support_tier,
+            SupportTier::Validated
+        );
+
+        assert_eq!(model_chip_id("s9se"), Some(0x1393));
+        assert_eq!(model_chip_id("s9k"), Some(0x1393));
+    }
+
+    #[test]
+    fn s9i_s9j_baked_beta_configs_validate_after_pool_and_start() {
+        for source in [
+            include_str!("../../configs/beta/am1-s9i-baked-default.toml"),
+            include_str!("../../configs/beta/am1-s9j-baked-default.toml"),
+            include_str!("../../configs/beta/am1-s9se-baked-default.toml"),
+            include_str!("../../configs/beta/am1-s9k-baked-default.toml"),
+        ] {
+            let mut config: crate::config::DcentraldConfig = toml::from_str(source).unwrap();
+            assert!(!config.mining.enabled);
+            assert!(!config.has_configured_pool());
+            config.validate().expect("initial idle image");
+            config.pool.url = "stratum+tcp://127.0.0.1:3333".into();
+            config.pool.worker = "beta-test".into();
+            config.mining.enabled = true;
+            config.validate().expect("pool and Start require no acknowledgment file");
+            assert!(config.mining_start_enabled());
+        }
+    }
+
+    #[test]
+    fn bm1366_xp_baked_configs_reach_pool_start_with_exact_native_model() {
+        for (target, model, source) in [
+            ("am3-s19xp", "s19xp", include_str!("../../../br2_external_dcentos/board/amlogic/am3-s19xp/rootfs-overlay/etc/dcentrald.toml")),
+            ("am3-s19jxp", "s19jxp", include_str!("../../../br2_external_dcentos/board/amlogic/am3-s19jxp/rootfs-overlay/etc/dcentrald.toml")),
+        ] {
+            let mut config: crate::config::DcentraldConfig = toml::from_str(source).unwrap();
+            assert!(!config.mining.enabled);
+            assert!(!config.has_configured_pool());
+            config.validate().expect("initial idle XP image");
+            assert_eq!(config.mining.serial_chip_count, Some(110));
+            assert!(!config.mining.passthrough);
+            assert!(config.watchdog.enabled);
+            assert_eq!(config.thermal.fan_max_pwm, 30);
+
+            let spec = lookup_model(model).unwrap();
+            assert_eq!(spec.support_tier, SupportTier::Experimental);
+            assert_eq!(spec.pic_type_hint, Some(ModelPicTypeHint::NoPic));
+            assert_eq!(spec.pic_addrs_hint, Some(&[][..]));
+            config.pool.url = "stratum+tcp://127.0.0.1:3333".into();
+            config.pool.worker = "beta-test".into();
+            config.mining.enabled = true;
+            config.validate().expect("ordinary XP pool + Start");
+            assert!(config.mining_start_enabled());
+        }
+        for target in ["am2-s19xp", "cv1835-s19xp", "cv1835-s19jxp"] {
+
+        }
+    }
+
+    /// S19j classic vs S19j Pro (corrected 2026-09-02, Gauntlet B5b): both
+    /// are BM1362 — Bitmain's own stock topology DB pins the classic's
+    /// BHB42701 at `asic_addr "0x1362"` (refuting the old 0x1398
+    /// identity-only claim). The two SKUs stay distinguished by per-chain
+    /// geometry (classic 108 vs Pro 126), never by chip id.
+    #[test]
     fn distinguishes_s19j_from_s19j_pro() {
-        assert_eq!(model_chip_id("s19j"), Some(0x1398));
+        assert_eq!(model_chip_id("s19j"), Some(0x1362));
         assert_eq!(model_chip_id("s19jpro"), Some(0x1362));
+        assert_eq!(model_chip_count_hint("s19j"), Some(108));
+        assert_eq!(model_chip_count_hint("s19jpro"), Some(126));
+        // The refuted attribution must not silently return.
+        assert_ne!(model_chip_id("s19j"), Some(0x1398));
+        assert_eq!(model_family_key("s19j"), Some("bm1362"));
     }
 
     /// P1-1 (D-12): the S9 `.100` audit found `chip_type` surfacing as
@@ -1218,22 +1346,21 @@ mod tests {
         // Cross-source pin: the daemon's ModelSpec chip_id (which drives
         // registry.detect() -> driver dispatch) MUST match skus.conf (the
         // acceptance-harness source of truth) for every confirmed target, or a
-        // board would dispatch to the wrong driver at first-light. S15 is the ONE
-        // intentional exception: chip_id stays None (SupportTier::Planned
-        // scaffold-gate — dispatch gated until confirmed) while its label is BM1391.
+        // board would dispatch to the wrong driver at first-light. Both exact
+        // BM1396 native rows retain their independent live carrier admission.
         let id = |key: &str| lookup_model(key).expect("model spec").chip_id;
         assert_eq!(id("s9"), Some(0x1387)); // skus.conf am1-s9
-        assert_eq!(id("t15"), None); // skus.conf am1-t15 scaffold
+        assert_eq!(id("t15"), Some(0x1391)); // exact retained T15 native route
         assert_eq!(id("s17"), Some(0x1397)); // am2-s17p
         assert_eq!(id("s17pro"), Some(0x1397)); // am2-s17p
                                                 // RECONCILED 2026-08-03 by operator decision: skus.conf,
                                                 // `board_target_chip_label`, `asic_protocol` and this `chip_id` all now
                                                 // say S17+/T17+ = BM1397. There is no remaining carve-out on this axis.
-        assert_eq!(id("s17+"), Some(0x1397)); // am2-s17plus, Planned
+        assert_eq!(id("s17+"), Some(0x1397)); // am2-s17plus
         assert_eq!(id("t17"), Some(0x1397)); // am2-t17
-        assert_eq!(id("t17+"), Some(0x1397)); // am2-t17plus, Planned
-        assert_eq!(id("s17e"), None); // planned BM1396 scaffold
-        assert_eq!(id("t17e"), None); // planned BM1396 scaffold
+        assert_eq!(id("t17+"), Some(0x1397)); // am2-t17plus
+        assert_eq!(id("s17e"), Some(0x1396)); // exact native S17e factory identity
+        assert_eq!(id("t17e"), Some(0x1396)); // exact native T17e identity
         assert_eq!(id("s19"), Some(0x1398)); // am2-s19
         assert_eq!(id("s19pro"), Some(0x1398)); // am2-s19pro
         assert_eq!(id("s19jpro"), Some(0x1362)); // am2-s19jpro-zynq
@@ -1246,8 +1373,7 @@ mod tests {
         assert_eq!(id("t21"), Some(0x1368)); // am3-t21
         assert_eq!(id("s21pro"), Some(0x1370)); // am3-s21pro
         assert_eq!(id("s21xp"), Some(0x1370)); // am3-s21xp dedicated BM1370 geometry
-                                               // S15: intentional scaffold-gate - chip_id None (dispatch gated), label known.
-        assert_eq!(id("s15"), None);
+        assert_eq!(id("s15"), Some(0x1391));
         assert_eq!(lookup_model("s15").expect("s15 spec").chip_label, "BM1391");
         assert_eq!(lookup_model("t15").expect("t15 spec").chip_label, "BM1391");
         assert_eq!(
@@ -1312,7 +1438,7 @@ mod tests {
     #[test]
     fn live_skus_conf_agrees_with_board_target_chip_label_for_every_target() {
         // Authoritative cross-source gate: read the LIVE skus.conf (the
-        // acceptance-harness 25-SKU source of truth) and verify the daemon's
+        // acceptance-harness source of truth) and verify the daemon's
         // board_target_chip_label resolves each board_target to the SAME chip.
         // Unlike the hardcoded pins above, this catches a divergence introduced on
         // EITHER side (a skus.conf edit OR a model.rs edit) — the exact class of the
@@ -1337,8 +1463,8 @@ mod tests {
             checked += 1;
         }
         assert_eq!(
-            checked, 25,
-            "skus.conf must list exactly the 25 target SKUs; cross-checked {checked}"
+            checked, 30,
+            "skus.conf must list exactly the 30 target SKUs; cross-checked {checked}"
         );
     }
 
@@ -1348,17 +1474,6 @@ mod tests {
     #[test]
     fn model_support_tiers_match_acceptance_callable_runtime_claims() {
         let skus = include_str!("../../../scripts/hw-acceptance/skus.conf");
-        // 2026-08-26 s19j-pro-complete-enablement cross-campaign state (pinned
-        // by C1 convergence 2026-08-27): that campaign made S19jProPlus a
-        // FIRST-CLASS SKU row (skus.conf EXPERIMENTAL = package/identity
-        // claim) while this ModelSpec deliberately stays non-callable and the
-        // TD-003 refuse-list keeps intercepting it until the unit-gated
-        // promotion evidence closes
-        // (
-        // S19JPROPLUS_TD003_PROMOTION_DRAFT.md` items 1-3). The arm below pins
-        // BOTH halves so it fails closed on either side; remove it in the
-        // promotion change-set that flips this tier to Experimental (item 4).
-        const S19JPROPLUS_FIRST_CLASS_PENDING_TD003: &str = "S19jProPlus";
         let mut checked = 0;
         let mut without_model_spec = Vec::new();
         for line in skus.lines() {
@@ -1369,6 +1484,12 @@ mod tests {
             let cols: Vec<&str> = line.split('|').collect();
             assert_eq!(cols.len(), 11, "malformed skus.conf line: {line}");
             let Some(spec) = lookup_model(cols[0]) else {
+                if cols[0] == "S9Hydro" {
+                    assert_eq!((cols[4], cols[5], cols[8]), ("0", "0", "NOT-IMPLEMENTED"));
+                    let board = dcentrald_common::BoardDesc::lookup(cols[1]).unwrap();
+                    assert_eq!(board.release_channel, dcentrald_common::ReleaseChannel::Unsupported);
+                    assert_eq!(board.work_engine, dcentrald_common::WorkEngineKind::ManagementOnly);
+                }
                 without_model_spec.push(cols[0]);
                 continue;
             };
@@ -1378,27 +1499,6 @@ mod tests {
                 cols[0], spec.chip_label, cols[3]
             );
             let release_claims_callable = matches!(cols[8], "PRODUCTION" | "EXPERIMENTAL");
-            if cols[0] == S19JPROPLUS_FIRST_CLASS_PENDING_TD003 {
-                assert_eq!(
-                    cols[8], "EXPERIMENTAL",
-                    "S19jProPlus must stay a first-class EXPERIMENTAL SKU row; \
-                     NOT-IMPLEMENTED would contradict SUPPORT_MATRIX.md"
-                );
-                assert!(
-                    !spec.support_tier.claims_callable_runtime(),
-                    "S19jProPlus tier {:?} must stay non-callable until the TD-003 \
-                     promotion change-set lands unit-gated evidence",
-                    spec.support_tier
-                );
-                assert_eq!(
-                    td003_management_only_model("s19jproplus"),
-                    Some("Antminer S19j Pro+"),
-                    "S19jProPlus first-class/S19jProPlus TD-003 intercept must stay \
-                     present until the promotion change-set removes both pins together"
-                );
-                checked += 1;
-                continue;
-            }
             assert_eq!(
                 spec.support_tier.claims_callable_runtime(),
                 release_claims_callable,
@@ -1409,48 +1509,60 @@ mod tests {
             );
             checked += 1;
         }
+        // S9Hydro has identity lineage only and no callable miner model.
         // S19jProBB has no complete-miner ModelSpec (board lane only);
         // S19jProAML (2026-08-26 campaign) carries exact identity in
         // `board_target_chip_label` but no complete-miner ModelSpec yet.
-        assert_eq!(without_model_spec, vec!["S19jProBB", "S19jProAML"]);
-        assert_eq!(checked, 23, "model/acceptance support roster changed");
+        assert_eq!(without_model_spec, vec!["S9Hydro", "S19jProBB", "S19jProAML"]);
+        assert_eq!(checked, 27, "model/acceptance support roster changed");
     }
 
     #[test]
-    fn keeps_planned_families_non_runnable() {
-        let s9se = lookup_model("s9se").expect("s9se spec");
-        assert_eq!(s9se.chip_label, "BM1393");
-        assert_eq!(s9se.chip_id, Some(0x1393));
-        assert_eq!(s9se.chips_per_chain_hint, Some(60));
-        assert_eq!(s9se.pic_type_hint, None);
-        assert_eq!(s9se.support_tier, SupportTier::Planned);
-        assert_eq!(
-            td003_management_only_model("Antminer S9 SE"),
-            Some("Antminer S9 SE")
-        );
-        assert_eq!(
-            td003_management_only_board_target("am1-s9se"),
-            Some("Antminer S9 SE")
-        );
+    fn native_and_planned_families_keep_distinct_support_tiers() {
+        for target in ["s9se", "s9k"] {
+            let c43 = lookup_model(target).unwrap();
+            assert_eq!(c43.chip_id, Some(0x1393));
+            assert_eq!(c43.chips_per_chain_hint, Some(60));
+            assert_eq!(c43.support_tier, SupportTier::Experimental);
+            assert_eq!(
+                board_target_chip_label(&format!("am1-{target}")),
+                Some("BM1393")
+            );
+        }
+
+
 
         let s15 = lookup_model("s15").expect("s15 spec");
         assert_eq!(s15.chip_label, "BM1391");
-        assert_eq!(s15.chip_id, None);
-        assert_eq!(s15.chips_per_chain_hint, None);
+        assert_eq!(s15.chip_id, Some(0x1391));
+        assert_eq!(s15.chips_per_chain_hint, Some(72));
         assert_eq!(s15.pic_type_hint, None);
-        assert_eq!(s15.support_tier, SupportTier::Planned);
+        assert_eq!(s15.support_tier, SupportTier::Experimental);
+        let t15 = lookup_model("t15").expect("t15 spec");
+        assert_eq!(t15.model_key, "t15");
+        assert_eq!(t15.chips_per_chain_hint, Some(60));
 
         let t17e = lookup_model("t17e").expect("t17e spec");
         assert_eq!(t17e.model_key, "t17e");
         assert_eq!(t17e.chip_label, "BM1396");
-        assert_eq!(t17e.chip_id, None);
-        assert_eq!(t17e.chips_per_chain_hint, None);
-        assert_eq!(t17e.pic_type_hint, Some(ModelPicTypeHint::Pic16));
-        assert_eq!(t17e.support_tier, SupportTier::Planned);
+        assert_eq!(t17e.chip_id, Some(0x1396));
+        assert_eq!(t17e.chips_per_chain_hint, Some(78));
+        assert_eq!(t17e.pic_type_hint, None);
+        assert_eq!(t17e.pic_addrs_hint, None);
+        assert_eq!(t17e.support_tier, SupportTier::Experimental);
+
+        let s17e = lookup_model("s17e").unwrap();
+        assert_eq!(s17e.support_tier, SupportTier::Experimental);
+        assert_eq!(s17e.chips_per_chain_hint, Some(135));
+        assert_eq!(s17e.pic_type_hint, None);
+        assert_eq!(s17e.pic_addrs_hint, None);
 
         let t21 = lookup_model("t21").expect("t21 spec");
         assert_eq!(t21.chip_label, "BM1368");
-        assert_eq!(t21.chips_per_chain_hint, None);
+        // Stock-settled per-chain geometry (B9): t21-merge topol BHB68701 =
+        // 108/chain. The hint is a catalog datum; pic hints stay None (the
+        // controller contradiction is flagged, not adjudicated).
+        assert_eq!(t21.chips_per_chain_hint, Some(108));
         assert_eq!(t21.pic_type_hint, None);
         assert_eq!(t21.pic_addrs_hint, None);
         assert_eq!(model_pic_type_hint("t21"), None);
@@ -1475,10 +1587,42 @@ mod tests {
     }
 
     #[test]
-    fn s19plus_is_distinct_evidence_only_bm1398_geometry() {
+    fn bm1362_aml_a_and_plus_baked_configs_reach_pool_start_with_exact_geometry() {
+        for (target, model, count, source) in [
+            ("am3-s19jproa", "s19jproa", 126, include_str!("../../../br2_external_dcentos/board/amlogic/am3-s19jproa/rootfs-overlay/etc/dcentrald.toml")),
+            ("am3-s19jproplus", "s19jproplus", 120, include_str!("../../../br2_external_dcentos/board/amlogic/am3-s19jproplus/rootfs-overlay/etc/dcentrald.toml")),
+        ] {
+            let mut config: crate::config::DcentraldConfig = toml::from_str(source).unwrap();
+            config.validate().expect("initial idle BM1362 AML image");
+            assert!(!config.mining_start_enabled());
+            assert!(!config.has_configured_pool());
+            assert_eq!(config.mining.serial_chip_count, Some(count));
+            assert_eq!(config.thermal.fan_max_pwm, 30);
+            assert!(config.watchdog.enabled);
+
+
+            let spec = lookup_model(model).unwrap();
+            assert_eq!(spec.chips_per_chain_hint, Some(count as u8));
+            assert_eq!(spec.pic_type_hint, Some(ModelPicTypeHint::NoPic));
+            assert_eq!(spec.support_tier, SupportTier::Experimental);
+            config.pool.url = "stratum+tcp://127.0.0.1:3333".into();
+            config.pool.worker = "beta-test".into();
+            config.mining.enabled = true;
+            config.validate().expect("ordinary BM1362 AML pool + Start");
+            assert!(config.mining_start_enabled());
+        }
+        assert_eq!(lookup_model("s19jpro").unwrap().pic_type_hint, None);
+    }
+
+    #[test]
+    fn s19plus_is_an_exact_native_bm1398_profile_without_sibling_geometry() {
         let s19 = lookup_model("s19").expect("S19 spec");
         let pro = lookup_model("s19pro").expect("S19 Pro spec");
         let plus = lookup_model("s19plus").expect("S19+ spec");
+
+        assert_eq!(s19.support_tier, SupportTier::Experimental);
+        assert_eq!(pro.support_tier, SupportTier::Experimental);
+        assert!(dcentrald_common::BoardDesc::am2_s19pro().release_channel.is_publishable());
 
         assert_eq!(plus.model_key, "s19plus");
         assert_eq!(plus.family_key, "bm1398");
@@ -1487,73 +1631,25 @@ mod tests {
         assert_eq!(plus.chips_per_chain_hint, Some(80));
         assert_eq!(plus.pic_type_hint, None);
         assert_eq!(plus.pic_addrs_hint, None);
-        assert_eq!(plus.support_tier, SupportTier::EvidenceOnly);
-        assert!(!plus.support_tier.claims_callable_runtime());
+        assert_eq!(plus.support_tier, SupportTier::Experimental);
+        assert!(plus.support_tier.claims_callable_runtime());
 
         // The S19+ must never inherit the plain S19's 76-chip observation or
         // the S19 Pro's 114-chip geometry merely because all use BM1398.
         assert_ne!(plus.chips_per_chain_hint, s19.chips_per_chain_hint);
         assert_ne!(plus.chips_per_chain_hint, pro.chips_per_chain_hint);
-        assert_eq!(board_target_chip_label("am2-s19plus"), None);
+        assert_eq!(board_target_chip_label("am2-s19plus"), Some("BM1398"));
+        let row = dcentrald_common::BoardDesc::lookup("am2-s19plus").unwrap();
+        assert_eq!(row.work_engine, dcentrald_common::WorkEngineKind::FpgaWorkFifo);
+        assert!(!row.first_install_supported);
+        assert!(!row.mining_default_enabled);
 
         for alias in ["s19+", "s19_plus", "s19plus", "Antminer S19+"] {
             assert_eq!(lookup_model(alias), Some(plus), "alias {alias}");
-            assert_eq!(
-                td003_management_only_model(alias),
-                Some("Antminer S19+"),
-                "alias {alias} must remain management-only"
-            );
+
         }
     }
 
-    #[test]
-    fn td003_management_only_gate_is_exact_to_expanded_matrix() {
-        for model in [
-            "s15",
-            "Antminer S15",
-            "t15",
-            "Antminer T15",
-            "s17",
-            "S17 Pro",
-            "Antminer S17",
-            "s17+",
-            "Antminer S17+",
-            "t17",
-            "Antminer T17",
-            "t17+",
-            "Antminer T17+",
-            "s17e",
-            "Antminer S17e",
-            "t17e",
-            "Antminer T17e",
-            "t19",
-            "Antminer T19",
-            "s19xp",
-            "Antminer S19 XP",
-            "s19jxp",
-            "Antminer S19j XP",
-            "s19jproplus",
-            "Antminer S19j Pro+",
-            "s21+",
-            "s21plus",
-            "Antminer S21+",
-            "s21xpimm",
-            "Antminer S21 XP Imm.",
-        ] {
-            assert!(
-                td003_management_only_model(model).is_some(),
-                "{model} must stay management-only until platform promotion"
-            );
-        }
-
-        for model in ["s9", "s19jproam2", "s19jpro", "s19pro", "s21", "s19k"] {
-            assert_eq!(
-                td003_management_only_model(model),
-                None,
-                "{model} must not be caught by the TD-003 exact gate"
-            );
-        }
-    }
 
     #[test]
     fn s21plus_is_not_s21pro_and_stays_management_only() {
@@ -1572,15 +1668,27 @@ mod tests {
         assert_eq!(plus.pic_addrs_hint, None);
         assert_eq!(plus.support_tier, SupportTier::EvidenceOnly);
         assert!(!plus.support_tier.claims_callable_runtime());
+        assert_eq!(board_target_chip_label("amlogic-s21plus"), Some("BM1370"));
         assert_eq!(board_target_chip_label("am3-s21plus"), None);
+        let board = dcentrald_common::BoardDesc::lookup("amlogic-s21plus").unwrap();
+        assert_eq!(
+            board.asic_protocol,
+            dcentrald_common::AsicProtocolIdentity::Bm1370
+        );
+        assert_eq!(
+            board.release_channel,
+            dcentrald_common::ReleaseChannel::Unsupported
+        );
+        assert_eq!(
+            board.work_engine,
+            dcentrald_common::WorkEngineKind::ManagementOnly
+        );
+        assert!(!board.runtime_status.permits_mining_lane());
+        assert!(dcentrald_common::BoardDesc::lookup("am3-s21plus").is_none());
 
         for alias in ["s21+", "s21_plus", "s21plus", "Antminer S21+"] {
             assert_eq!(lookup_model(alias), Some(plus), "alias {alias}");
-            assert_eq!(
-                td003_management_only_model(alias),
-                Some("Antminer S21+"),
-                "alias {alias} must not authorize an S21 Pro runtime"
-            );
+
         }
     }
 
@@ -1591,14 +1699,11 @@ mod tests {
         assert_eq!(air.family_key, "bm1370");
         assert_eq!(air.chip_id, Some(0x1370));
         assert_eq!(air.chips_per_chain_hint, Some(91));
-        assert_eq!(air.pic_type_hint, None);
-        assert_eq!(air.pic_addrs_hint, None);
-        assert_eq!(air.support_tier, SupportTier::EvidenceOnly);
-        assert!(!air.support_tier.claims_callable_runtime());
-        assert_eq!(
-            td003_management_only_model("s21xp"),
-            Some("Antminer S21 XP")
-        );
+        assert_eq!(air.pic_type_hint, Some(ModelPicTypeHint::NoPic));
+        assert_eq!(air.pic_addrs_hint, Some(&[][..]));
+        assert_eq!(air.support_tier, SupportTier::Experimental);
+        assert!(air.support_tier.claims_callable_runtime());
+
 
         let immersion = lookup_model("s21xpimm").expect("S21 XP Immersion spec");
         assert_eq!(immersion.model_key, "s21xpimm");
@@ -1618,63 +1723,16 @@ mod tests {
             "Antminer S21 XP Immersion",
         ] {
             assert_eq!(lookup_model(alias), Some(immersion), "alias {alias}");
-            assert_eq!(
-                td003_management_only_model(alias),
-                Some("Antminer S21 XP Immersion"),
-                "alias {alias} must not authorize the S21 XP air runtime"
-            );
+
         }
     }
-
     #[test]
-    fn td003_board_target_gate_covers_in_development_markers() {
-        for (marker, label) in [
-            ("am1-s15", "Antminer S15"),
-            ("am1-t15", "Antminer T15"),
-            ("am2-s17p", "Antminer S17 / S17 Pro"),
-            ("am2-s17pro", "Antminer S17 / S17 Pro"),
-            ("am2-s17plus", "Antminer S17+"),
-            ("am2-s17", "Antminer S17 / S17 Pro"),
-            ("am1-s17", "Antminer S17 / S17 Pro"),
-            ("x17-s17e-dspic-planned", "Antminer S17e"),
-            ("x17-t17", "Antminer T17"),
-            ("am2-t17", "Antminer T17"),
-            ("am2-t17plus", "Antminer T17+"),
-            ("x17-t17e-pic16-planned", "Antminer T17e"),
-            ("am2-t19", "Antminer T19"),
-            ("cv183x-t19", "Antminer T19"),
-            ("cv1835-t19", "Antminer T19"),
-            ("am3-t19", "Antminer T19"),
-            ("am2-s19plus", "Antminer S19+"),
-            ("am2-s19xp", "Antminer S19 XP"),
-            ("am3-s19xp", "Antminer S19 XP"),
-            ("am3-s19jxp", "Antminer S19j XP"),
-            ("am3-s19jproplus", "Antminer S19j Pro+"),
-            ("cv1835-s19xp", "Antminer S19 XP"),
-            ("amlogic-s21plus", "Antminer S21+"),
-            ("am3-s21xp", "Antminer S21 XP"),
-        ] {
-            assert_eq!(
-                td003_management_only_board_target(marker),
-                Some(label),
-                "{marker} must stay management-only until platform promotion"
-            );
-        }
-    }
-
-    /// BoardDesc public-beta targets must never be TD-003 management-only blocked.
-    #[test]
-    fn board_desc_public_beta_targets_are_not_td003_blocked() {
+    fn public_first_install_support_remains_separate_from_channel() {
         for desc in dcentrald_common::BoardDesc::all_registered() {
-            if !desc.public_beta_install {
+            if !desc.public_beta_install() {
                 continue;
             }
-            assert_eq!(
-                td003_management_only_board_target(desc.board_target),
-                None,
-                "BoardDesc public_beta_install target {} must not be TD-003 blocked",
-                desc.board_target
-            );
+
             assert!(
                 dcentrald_common::BoardDesc::is_public_beta_install_target(desc.board_target),
                 "{}",
@@ -1685,35 +1743,15 @@ mod tests {
         // authorization is scoped to self-update on an existing DCENT_OS image.
         let beta: Vec<_> = dcentrald_common::BoardDesc::all_registered()
             .iter()
-            .filter(|d| d.public_beta_install)
+            .filter(|d| d.public_beta_install())
             .map(|d| d.board_target)
             .collect();
         assert_eq!(beta, vec!["am1-s9"]);
     }
+    /// BM1387/BM1393 S9 siblings, exact BM1391 S15/T15, four BM1397
+    /// S17-family rows and NBP1901 S19 Pro.
+    /// BM1398 admission before constructing each native hardware owner.
 
-    #[test]
-    fn td003_board_target_gate_does_not_block_promoted_or_other_known_markers() {
-        for marker in [
-            "",
-            "am1-s9",
-            "am2-s19j",
-            "am2-s19jpro",
-            "am2-s19pro",
-            "am3-bb-s19jpro",
-            "am3-s19k",
-            "am3-s21",
-            "am3-s21pro",
-            "am3-t21",
-            "cv1835-s19jpro",
-            "bcb100-s19jpro-lab",
-        ] {
-            assert_eq!(
-                td003_management_only_board_target(marker),
-                None,
-                "{marker:?} must not be caught by the TD-003 board-target gate"
-            );
-        }
-    }
 
     #[test]
     fn exposes_future_family_as_blind() {

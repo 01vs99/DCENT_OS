@@ -3,7 +3,7 @@ import { useMinerStore } from '../../store/miner';
 import type { HistoryPoint } from '../../api/types';
 
 /**
- * HeaterRoomTempGraph — recreation of the Claude-Design Heater kit
+ * HeaterRoomTempGraph — recreation of the D-Central design-system Heater kit
  * `RoomTempGraph` card LOOK (HeaterMode.jsx:311 `.nest-graph`), but fed by
  * the REAL miner history the parent (HistoryView) already fetches via
  * `api.getHeaterHistory()`.

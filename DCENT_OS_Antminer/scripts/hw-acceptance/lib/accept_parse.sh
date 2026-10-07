@@ -188,7 +188,7 @@ accept_am3_bb_identity_verdict() {
         echo IDENTITY_FAIL:process
         return 1
     }
-    _aireceipt="AM3_BB_ROUTE_ADMISSION_RECEIPT schema=v2 run_pid=$_aipid board_target=am3-bb-s19jpro soc=am335x carrier=S19J_IO_BOARD_V2_0 asic=BM1362 asic_evidence=declared_runtime_composition topology_profile=s19j_io_board_v2_0_exact_v1 gpio_profile=enable59-rst49_60_27_22-plug51_48_47_46-fantach7_20_110_112-led23_45 uart_profile=ttyS1_48022000-ttyS2_48024000-ttyS4_481a8000-3000000 i2c_profile=eeprom0_50_51_52-deny-psu1_10 cold_boot_profile=15000_13800-reset10_1100_retry1x2_200_100-fan10_30 identity_evidence=exact_device_tree"
+    _aireceipt="AM3_BB_ROUTE_ADMISSION_RECEIPT schema=v3 run_pid=$_aipid board_target=am3-bb-s19jpro soc=am335x carrier=S19J_IO_BOARD_V2_0 asic=BM1362 asic_evidence=declared_runtime_composition topology_profile=s19j_io_board_v2_0_exact_v1 gpio_profile=legacy59_metadata-psu65_high-rst49_60_27_22-plug51_48_47_46-fantach7_20_110_112-led23_45 uart_profile=ttyS1_48022000-ttyS2_48024000-ttyS4_481a8000-3000000 i2c_profile=eeprom0_50_51_52-deny-psu1_10 cold_boot_profile=fixed_apw15120_runtime_owner_required-reset10_1100_retry1x2_200_100-fan10_30 identity_evidence=exact_device_tree"
     [ "$(printf '%s\n' "$_aidata" | grep -F -x -c "$_aireceipt")" -eq 1 ] || {
         echo IDENTITY_FAIL:runtime_receipt
         return 1

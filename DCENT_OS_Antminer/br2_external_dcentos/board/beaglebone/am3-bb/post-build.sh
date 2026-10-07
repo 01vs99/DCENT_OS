@@ -30,13 +30,10 @@ chmod 0755 "${TARGET_DIR}"/usr/sbin/dcent-enable-ssh 2>/dev/null || true
 
 dcent_ensure_armv7_busybox_init "$TARGET_DIR" "DCENTos post-build (am3-bb)"
 
-# W5.1 (2026-05-07): install the dashboard SPA at the canonical location
-# served by server.py on the other platforms. The am3-bb image is currently
-# bring-up-only and does not yet ship server.py, but staging the artifact
-# at /usr/share/dcentos-dashboard keeps parity so any future server.py /
-# /usr/local/bin/dcentrald-served-dashboard route finds the same file.
-# See DCENT_OS_Antminer/br2_external_dcentos/board/zynq/post-build.sh for
-# the full rationale (W5.1 decoupling from `include_str!`).
+# Install the same per-device HTTPS frontend as the Amlogic images, then
+# the canonical dashboard artifact. Keys are generated on the miner only.
+. "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/dashboard_https.sh"
+dcent_stage_bb_dashboard_https "$TARGET_DIR"
 DASHBOARD_SRC="${BR2_EXTERNAL_DCENTOS_PATH}/../dashboard/dist/index.html"
 DASHBOARD_GZ_SRC="${DASHBOARD_SRC}.gz"
 DASHBOARD_SHA_SRC="${DASHBOARD_SRC}.sha256"
@@ -192,6 +189,9 @@ else
 fi
 
 # Production-readiness matrix §7 #1 (public-image trust boundary): release-image
-# marker + first-boot SSH posture when DCENT_RELEASE_IMAGE=1. NO-OP on DEV/LAB.
+# marker + first-boot SSH posture on the RELEASE posture — the DEFAULT since
+# WS-A4 (2026-09-01; canonical resolution scripts/lib/release_posture.sh).
+# NO-OP on an explicit DEV/LAB opt-out (DCENT_DEV_IMAGE=1).
 . "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/release_image_provision.sh"
+python3 "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/provision_runtime_policy.py" "$TARGET_DIR"
 dcent_provision_release_image "$TARGET_DIR" "am3-bb"

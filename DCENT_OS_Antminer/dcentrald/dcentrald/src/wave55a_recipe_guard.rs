@@ -372,7 +372,7 @@ where
 ///
 /// `env_lookup` is a callback so the test can pass an in-memory map
 /// without poisoning the real process env. In production the caller
-/// passes a closure that wraps `std::env::var(name).ok()`.
+/// uses `runtime_guard_environment` to separate refusal reads from lab bypasses.
 pub fn evaluate_guard<F>(
     platform: &str,
     board_target: &str,
@@ -521,6 +521,20 @@ where
     }
 }
 
+fn runtime_guard_environment(name: &str) -> Option<String> {
+    if WAVE54_FORBIDDEN_ENV_VARS.contains(&name)
+        || APW121215A_FW71_FORBIDDEN_ENV_VARS.contains(&name)
+        || XIL_25_FORBIDDEN_SAFETY_OVERRIDE_ENV_VARS.contains(&name)
+        // This only enlarges the refusal scope; it cannot grant hardware use.
+        || name == XIL_25_FINGERPRINT_OVERRIDE_ENV
+    {
+        std::env::var(name).ok()
+    } else {
+        // Bypass and standalone carve-outs remain explicit lab capabilities.
+        dcentrald_common::lab_env::var(name).ok()
+    }
+}
+
 /// Read `/etc/dcentos/*` fingerprint files + the live process env and
 /// run [`evaluate_guard`]. Returns `Ok(())` for `Pass` / `Bypass`
 /// (after logging in the `Bypass` case), or `Err(anyhow::Error)` with
@@ -550,7 +564,7 @@ pub fn enforce() -> std::result::Result<(), GuardRefusal> {
         platform.trim(),
         board_target.trim(),
         psu_hardware_variant.as_deref().map(str::trim),
-        |name| std::env::var(name).ok(),
+        runtime_guard_environment,
     );
 
     match decision {
@@ -643,6 +657,40 @@ mod inline_tests {
     //! (no HAL deps in this module).
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn runtime_guard_lab_capability_cannot_hide_release_refusals() {
+        const CHILD: &str = "DCENT_WAVE55A_LAB_ENV_TEST_CHILD";
+        if std::env::var(CHILD).as_deref() != Ok("1") {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("runtime_guard_lab_capability_cannot_hide_release_refusals")
+                .env(CHILD, "1")
+                .env("DCENT_AM2_PIC_RESET_AND_START_APP", "1")
+                .env("DCENT_AM2_PSU_LOKI_REGISTER_POINTER", "1")
+                .env(STANDALONE_RE_FIX_ENV_VAR, "1")
+                .env(BYPASS_ENV_VAR, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let decision = evaluate_guard(
+            ZYNQ_BM3_AM2_PLATFORM, "am2-xil", Some("loki"),
+            runtime_guard_environment,
+        );
+        if dcentrald_common::lab_env::compiled() {
+            let GuardDecision::Bypass { offenders, .. } = decision else {
+                panic!("lab capability must preserve the explicit bypass: {decision:?}");
+            };
+            assert!(!offenders.iter().any(|name| name == "DCENT_AM2_PIC_RESET_AND_START_APP"));
+        } else {
+            let GuardDecision::Refuse { offenders, .. } = decision else {
+                panic!("release must refuse both forbidden requests: {decision:?}");
+            };
+            assert!(offenders.iter().any(|name| name == "DCENT_AM2_PIC_RESET_AND_START_APP"));
+            assert!(offenders.iter().any(|name| name == "DCENT_AM2_PSU_LOKI_REGISTER_POINTER"));
+        }
+    }
 
     fn env_from(map: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let owned: HashMap<String, String> = map

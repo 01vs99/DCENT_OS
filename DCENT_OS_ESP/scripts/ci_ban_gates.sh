@@ -28,6 +28,24 @@ gate() {
     fi
 }
 
+# require_pattern <label> <min-count> <fixed-pattern> <file...>
+# The mirror image of a ban gate: it fires when something REQUIRED has been
+# DELETED, rather than when something forbidden was re-introduced.
+require_pattern() {
+    local label=$1
+    local min=$2
+    local pat=$3
+    shift 3
+    local n
+    n=$(grep -F -o -- "$pat" "$@" 2>/dev/null | wc -l | tr -d ' ')
+    n=${n:-0}
+    if [ "$n" -ge "$min" ]; then
+        gate "$label (found $n, need >= $min)" 0
+    else
+        gate "$label (found $n, need >= $min)" 1
+    fi
+}
+
 # [1] BM1370 job-id extraction mask regression. The correct mask is
 # `(id & 0xf0) >> 1`; the old broken mask `id & 0x70` dropped bit 7
 # and lost most nonces.
@@ -150,6 +168,36 @@ if [ -f dcentaxe/src/lora_task.rs ]; then
 else
     gate "lora_task duty-gate (n/a — lora feature not wired here)" 0
 fi
+
+# [12] FUND / DONATION link. Root  (2026-07-10) makes a visible
+# Fund/Donate/Support affordance pointing at https://d-central.tech/fund/ a HARD
+# RULE for every DCENT_ open-source project; a missing one is a public-release
+# gate FAILURE and must never be stripped by a claims/scrub pass. TWO instances
+# are required: the sidebar footer is display:none in the collapsed-sidebar
+# state and off-canvas with the mobile drawer closed, so a single instance is
+# only conditionally visible. Mirrored by dcentaxe-core `fund_link_guards`.
+require_pattern "Fund link survives in dashboard.rs (HARD RULE, >=2 anchors)" \
+    2 'href="https://d-central.tech/fund/' dcentaxe/src/dashboard.rs
+# [13]/[14] Each placement tag distinctly: a copy-paste of ONE anchor twice satisfied [12] while the
+# dcentaxe-core guard caught it (blind critic P1-G1, probe A). Requiring both tags closes that gap.
+require_pattern "Fund link: sidebar-footer placement survives" \
+    1 'source=dcent_axe&placement=dashboard"' dcentaxe/src/dashboard.rs
+require_pattern "Fund link: System-page placement survives (reachable with the sidebar collapsed)" \
+    1 'source=dcent_axe&placement=sys"' dcentaxe/src/dashboard.rs
+# [15] Landing-page placement (lane P1-G1b). The sidebar footer is hidden in
+# body.col and off-canvas with the drawer closed, and the System instance is on
+# a page that is display:none while the Dashboard is active — so the Dashboard
+# (id="p0") had NO visible Fund instance in 8 of 10 width x nav-state cells.
+# Without its own tag here, deleting exactly the p0 anchor leaves the count at 2
+# and [12]-[14] all stay green. Mirrored by dcentaxe-core
+# `fund_link_landing_page_guards`.
+require_pattern "Fund link: landing-page (Dashboard) placement survives" \
+    1 'source=dcent_axe&placement=p0"' dcentaxe/src/dashboard.rs
+# [16] The bare-anchor colour rule: without it the sidebar Fund link rendered browser-default blue at
+# 2.06:1 for months. Mirrors `fund_link_landing_page_guards::bare_anchors_paint_from_the_accent_token…`
+# (blind critic P1-G1b: the guard existed, the gate did not).
+require_pattern "Fund link: bare <a> colour rule survives (contrast)" \
+    1 'a,.text-accent{color:var(--accent)}' dcentaxe/src/dashboard.rs
 
 echo "----"
 if [ "$fail" -ne 0 ]; then

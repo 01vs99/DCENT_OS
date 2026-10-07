@@ -1,55 +1,11 @@
-//! S19j Pro campaign (2026-08-26) — XIL full-roster chain enumeration contract.
-//!
-//! Campaign `s19j-pro-complete-enablement-20260826`, phase
-//! `xil-full-chain-init` (pinned marker: `S19JPRO_FULL_CHAIN_126`).
-//!
-//! History this pins: `a lab unit` XIL bring-up (2026-05-15) enumerated only 28
-//! unique chips of the 126-per-chain roster through init, and each XIL attempt
-//! needed a fresh AC cycle. The 2026-06-14 standalone fix (board-control
-//! `0x42810000 +0x04` bit 8, `DCENT_AM2_BOARD_CONTROL_BIT8`) reached
-//! 126-of-126 chips with accepted shares on `a lab unit` — see
-//!
-//! and memory rule .
-//!
-//! ## What this test pins
-//!
-//! 1. The roster metadata is 126 chips/chain for the S19j Pro am2 identity
-//!    (`model.rs` `s19jproam2` hint) and 120 for S19j Pro+ — the planner's
-//!    source of truth for "full chain".
-//! 2. The silicon profile constant agrees (`CHIPS_PER_CHAIN: u8 = 126`,
-//!    live-pinned on `a lab unit` / `a lab unit`).
-//! 3. The hybrid mining path actually consumes the board-control bit8 gate
-//!    (`DCENT_AM2_BOARD_CONTROL_BIT8`) that solved standalone enumeration.
-//! 4. The proven standalone launcher exists, exports the bit8 gate, and does
-//!    NOT set any of the four must-not-set env vars that re-break the
-//!    `a lab unit`-class mining path ( startup-guard list).
-//! 5. The standalone journey record exists and carries the 126/126 evidence
-//!    pointer.
-//!
-//! ## Scope honesty
-//!
-//! This is the source/metadata contract. LIVE full-roster enumeration on an
-//! arbitrary XIL unit (126 unique chip ids per chain at init, no AC-cycle
-//! retry) is proven by the campaign's `xil-bounded-work` transcript receipt,
-//! not by this test. The O-1 open item (skus.conf `S19jPro` total 252 vs
-//! 3x126) is adjudicated by the live roster evidence, not here.
-//!
-//! DO NOT weaken this test: if the launcher, journey doc, or roster metadata
-//! change, this forces the change to keep the full-chain contract explicit.
-//!
-//! Same source-parse rationale as `wave48_dspic_25_bare_path.rs` and
-//! `wave54_proven_mining_recipe.rs`: the full contract needs live `a lab unit`-class
-//! hardware + operator AC-cycle coordination; source parse is the
-//! authoritative regression guard on CI.
+//! Current-source S19j Pro full-roster and launcher contracts.
+//! Physical chip census is covered separately by the native simulation spine
+//! and later bench validation; no archived journey record is a build input.
 
 const MODEL_RS: &str = include_str!("../src/model.rs");
 const HYBRID_RS: &str = include_str!("../src/s19j_hybrid_mining.rs");
 const BM1362_RS: &str = include_str!("../../dcentrald-silicon-profiles/src/bm1362.rs");
 const LAUNCHER: &str = include_str!("../../../scripts/run_wave56_25_STANDALONE_MINING.sh");
-const JOURNEY: &str = include_str!(
-    "../../../../../"
-);
-
 /// The four env vars that MUST NOT be set on `a lab unit`-class hybrid mining
 /// ( `dcentrald` startup guard refuses to start if any is set).
 const FORBIDDEN_ENV_VARS: &[&str] = &[
@@ -121,16 +77,9 @@ fn s19jpro_full_chain_126_standalone_launcher_contract() {
 }
 
 #[test]
-fn s19jpro_full_chain_126_journey_record_exists() {
-    // 5. The definitive journey record exists and carries the 126 evidence.
-    assert!(
-        JOURNEY.contains("126"),
-        "STANDALONE_MINING_JOURNEY.md must carry the 126/126 chip evidence"
-    );
-    assert!(
-        JOURNEY.contains("BOARD_CONTROL_BIT8")
-            || JOURNEY.contains("bit8")
-            || JOURNEY.contains("bit 8"),
-        "STANDALONE_MINING_JOURNEY.md must reference the board-control bit8 enum fix"
+fn s19jpro_full_chain_126_compiled_profile_agrees_with_roster() {
+    assert_eq!(
+        dcentrald_silicon_profiles::bm1362::chip::CHIPS_PER_CHAIN,
+        126
     );
 }

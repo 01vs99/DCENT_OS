@@ -6,9 +6,11 @@ description = "Shared no-HAL contract utilities for dcentrald (wallet masking, l
 license = "GPL-3.0"
 
 [features]
+# Hardware environment overrides; excluded from signed Beta/Stable builds.
+lab = []
 default = []
 # Destructive PIC command symbols must not link into normal firmware.
-recovery-tool = []
+recovery-tool = ["lab"]
 
 # This crate is intentionally HAL-free, network-free, subprocess-free, and
 # async-runtime-free, in the same spirit as `dcentrald-api-types`. Four audited
@@ -20,6 +22,7 @@ recovery-tool = []
 # Cross-firmware, host-safe hardware enablement contract. This is a local
 # schema dependency (no HAL, OS, async runtime, or hardware I/O).
 dcent-schema = { path = "../../../shared/dcent-schema" }
+sha2 = { workspace = true }
 
 # No regex dependency. Wallet-mask scanners stay hand-rolled to avoid pulling
 # in ~500KB of compiled regex machinery for ~7 character-class checks.

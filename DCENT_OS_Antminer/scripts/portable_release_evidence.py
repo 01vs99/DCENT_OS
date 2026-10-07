@@ -333,7 +333,14 @@ def create_live_with_key(
         public_key, closure, closure_signature, "source closure"
     )
 
-    source_value = read_canonical(Path(args.source_snapshot), "live source descriptor")
+    # The live source descriptor scales with the workspace file count
+    # (40k files -> ~29 MiB); the canonical-index default bound would
+    # reject it. Use the source-snapshot authority's own descriptor bound.
+    source_value = read_canonical(
+        Path(args.source_snapshot),
+        "live source descriptor",
+        source_snapshot.MAX_DESCRIPTOR_BYTES,
+    )
     if digest(canonical_bytes(source_value)) != source_verified["descriptor_sha256"]:
         fail("live source descriptor digest changed after Git verification")
     write_exclusive(directory / SOURCE_NAME, canonical_bytes(source_value))

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e2455488596d3b475f44e29751b1e5716699d19c209f31f3f42b0fb5fe67c9d9 # shrinks to current_json = Object {}, update_json = Object {"api": Bool(false)}

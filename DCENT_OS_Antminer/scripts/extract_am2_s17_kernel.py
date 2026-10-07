@@ -829,6 +829,115 @@ def extract(donor: Path, kernel_path: Path, dtb_path: Path, receipt_path: Path) 
     return receipt
 
 
+def _canonical_ubi_fit(kernel: bytes, dtb: bytes) -> bytes:
+    """Encode only the existing, exact-pinned S17 FIT; never repair host output.
+
+    The property-string order and 384 zero trailer bytes are part of the
+    historical OUTPUT_FIT_SHA256 contract. Keeping those bytes avoids changing
+    the admitted U-Boot tuple when host mkimage fails to finalize this layout.
+    """
+    _validate_kernel(kernel)
+    _validate_dtb(dtb)
+    names = (
+        "description", "#address-cells", "data", "type", "arch", "os",
+        "compression", "load", "entry", "algo", "default", "kernel", "fdt",
+        "timestamp", "value",
+    )
+    strings = bytearray()
+    offsets = {}
+    for name in names:
+        offsets[name] = len(strings)
+        strings.extend(name.encode("ascii") + b"\0")
+    structure = bytearray()
+
+    def word(value: int) -> None:
+        structure.extend(struct.pack(">I", value))
+
+    def aligned(value: bytes) -> None:
+        structure.extend(value)
+        structure.extend(bytes(-len(value) % 4))
+
+    def begin(name: str) -> None:
+        word(1)
+        aligned(name.encode("ascii") + b"\0")
+
+    def prop(name: str, value: bytes) -> None:
+        word(3)
+        word(len(value))
+        word(offsets[name])
+        aligned(value)
+
+    def text(name: str, value: str) -> None:
+        prop(name, value.encode("ascii") + b"\0")
+
+    def hashes(payload: bytes) -> None:
+        for name, algorithm, value in (
+            ("hash@1", "crc32", struct.pack(">I", zlib.crc32(payload) & 0xFFFFFFFF)),
+            ("hash@2", "sha1", hashlib.sha1(payload).digest()),
+        ):
+            begin(name)
+            prop("value", value)
+            text("algo", algorithm)
+            word(2)
+
+    begin("")
+    prop("timestamp", struct.pack(">I", SOURCE_FIT_TIMESTAMP))
+    text("description", OUTPUT_FIT_DESCRIPTION)
+    prop("#address-cells", struct.pack(">I", 1))
+    begin("images")
+    begin("kernel@1")
+    text("description", OUTPUT_KERNEL_DESCRIPTION)
+    prop("data", kernel)
+    text("type", "kernel")
+    text("arch", "arm")
+    text("os", "linux")
+    text("compression", "none")
+    prop("load", struct.pack(">I", 0x8000))
+    prop("entry", struct.pack(">I", 0x8000))
+    hashes(kernel)
+    word(2)
+    begin("fdt@1")
+    text("description", OUTPUT_DTB_DESCRIPTION)
+    prop("data", dtb)
+    text("type", "flat_dt")
+    text("arch", "arm")
+    text("compression", "none")
+    hashes(dtb)
+    word(2)
+    word(2)
+    begin("configurations")
+    text("default", "config@1")
+    begin("config@1")
+    text("description", OUTPUT_CONFIG_DESCRIPTION)
+    text("kernel", "kernel@1")
+    text("fdt", "fdt@1")
+    word(2)
+    word(2)
+    word(2)
+    word(9)
+    start = 56
+    header = struct.pack(
+        ">10I", 0xD00DFEED, start + len(structure) + len(strings) + 384,
+        start, start + len(structure), 40, 17, 16, 0,
+        len(strings), len(structure),
+    )
+    result = header + bytes(16) + structure + strings + bytes(384)
+    if len(result) != OUTPUT_FIT_SIZE or sha256_bytes(result) != OUTPUT_FIT_SHA256:
+        fail("canonical S17 FIT builder did not reproduce the existing output pin")
+    return result
+
+
+def build_ubi_fit(kernel_path: Path, dtb_path: Path, output: Path) -> dict:
+    """Build from exact-admitted regular payloads and recheck the actual output."""
+    if output.exists() or output.is_symlink():
+        fail("S17 FIT output must be absent")
+    kernel = _read_regular(kernel_path, KERNEL_SIZE, "S17 kernel")
+    dtb = _read_regular(dtb_path, DTB_SIZE, "S17 DTB")
+    value = _canonical_ubi_fit(kernel, dtb)
+    _write_exclusive(output, value)
+    return verify_ubi_fit(output)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -839,6 +948,10 @@ def build_parser() -> argparse.ArgumentParser:
     extract_parser.add_argument("--kernel-output", type=Path, required=True)
     extract_parser.add_argument("--dtb-output", type=Path, required=True)
     extract_parser.add_argument("--receipt", type=Path, required=True)
+    build = commands.add_parser("build-fit", help="build the exact canonical S17 FIT")
+    build.add_argument("--kernel", type=Path, required=True)
+    build.add_argument("--dtb", type=Path, required=True)
+    build.add_argument("--output", type=Path, required=True)
     fit_parser = commands.add_parser(
         "verify-fit", help="verify the rebuilt UBI boot FIT"
     )
@@ -853,6 +966,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             result = extract(
                 args.donor, args.kernel_output, args.dtb_output, args.receipt
             )
+        elif args.command == "build-fit":
+            result = build_ubi_fit(args.kernel, args.dtb, args.output)
         else:
             result = verify_ubi_fit(args.fit)
     except AdmissionError as error:

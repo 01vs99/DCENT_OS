@@ -115,7 +115,7 @@ DCENTRALD_BIN=${DCENTOS_DCENTRALD_BIN:-/usr/local/bin/dcentrald}
 DCENTOS_CONFIG_DIR=${DCENTOS_CONFIG_DIR:-/etc/dcentos}
 DROPBEAR_DEFAULTS=${DCENTOS_DROPBEAR_DEFAULTS:-/etc/default/dropbear}
 ROOT_AUTHORIZED_KEYS=${DCENTOS_ROOT_AUTHORIZED_KEYS:-/root/.ssh/authorized_keys}
-DATA_AUTHORIZED_KEYS=${DCENTOS_DATA_AUTHORIZED_KEYS:-/data/keys/dropbear/authorized_keys}
+DATA_AUTHORIZED_KEYS=${DCENTOS_DATA_AUTHORIZED_KEYS:-/data/dcent/authorized_keys}
 
 wait_for_http() {
     LABEL="$1"
@@ -355,6 +355,22 @@ check_health() {
     echo "  [OK] dcentrald survived the ${MIN_HEALTHY_UPTIME_S}s boot-success window as PID $START_PID"
 }
 
+# Read-only journal observation consumes the exact CRC-valid snapshot already
+# admitted by this script. It never retries a store or changes commit decisions.
+observe_update_jobs() {
+    _dcent_observer=/usr/libexec/dcentos/dcentos-update-observer.py
+    [ -r "$_dcent_observer" ] || return 0
+    case "$1" in *dcent_native_transaction=*) ;; *) return 0 ;; esac
+    _dcent_observer_env=$(mktemp /run/dcentos-boot-observation.XXXXXX) || return 0
+    chmod 600 "$_dcent_observer_env" || { rm -f "$_dcent_observer_env"; return 0; }
+    if printf '%s\n' "$1" > "$_dcent_observer_env"; then
+        python3 "$_dcent_observer" --environment "$_dcent_observer_env" ||
+            echo "  Update journal observation is unavailable; boot commit result is retained."
+    fi
+    rm -f "$_dcent_observer_env"
+    return 0
+}
+
 case "$1" in
     start)
         # Check if upgrade_stage needs clearing.
@@ -403,6 +419,7 @@ case "$1" in
         case "$STAGE_COUNT" in
             0)
                 # CRC-valid exact absence is the only normal-boot shortcut.
+                observe_update_jobs "$STAGE_SNAPSHOT"
                 exit 0
                 ;;
             1)
@@ -597,6 +614,7 @@ case "$1" in
 
         if [ "$COMMIT_OK" -eq 1 ]; then
             echo "committed" > "$UPGRADE_COMMIT_MARKER" 2>/dev/null || true
+            observe_update_jobs "$VERIFY"
         elif [ "$COMMIT_MANUAL" -eq 1 ]; then
             echo "  *** Slot commit is blocked pending manual U-Boot environment resolution. ***"
             echo "blocked" > "$UPGRADE_COMMIT_MARKER" 2>/dev/null || true

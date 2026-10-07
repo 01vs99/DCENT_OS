@@ -271,22 +271,17 @@ mod tests {
     }
 
     #[test]
-    fn registered_s17_and_t17plus_compositions_promote_to_hybrid_lane() {
-        // REBASED 2026-08-27 (`2026-08-27-antminer17-unlock-armada`, agent B1):
-        // the AMTC factory-evidence rows for am2-s17p / am2-t17plus (and their
-        // siblings) are promoted from `ManagementOnly` to the S17 hybrid
-        // SerialWork lane. The factory evidence above still mints no authority
-        // (see `factory_evidence_never_mints_action_or_production_authority`);
-        // the promotion rests on the stock-RE controller/ABI adjudication in
-        // `board_desc.rs`, not on the factory jig tables.
+    fn registered_s17_and_t17plus_compositions_use_owned_stock_fabric() {
+        // Factory evidence still grants no authority. The current exact
+        // S17 lifecycle owns stock FPGA work framing and controller custody.
         for target in ["am2-s17p", "am2-t17plus"] {
             let board = BoardDesc::lookup(target).expect("registered X17 board");
             assert_eq!(board.family, BoardFamily::Zynq);
-            assert_eq!(board.chain_transport, ChainTransportKind::ZynqHybrid);
-            assert_eq!(board.work_engine, WorkEngineKind::SerialWork);
+            assert_eq!(board.chain_transport, ChainTransportKind::StockFpga);
+            assert_eq!(board.work_engine, WorkEngineKind::FpgaWorkFifo);
             assert_eq!(board.asic_protocol, AsicProtocolIdentity::Bm1397);
             assert!(board.runtime_status.permits_mining_lane());
-            assert!(!board.public_beta_install);
+            assert!(!board.public_beta_install());
             assert!(!board.mining_default_enabled);
         }
     }

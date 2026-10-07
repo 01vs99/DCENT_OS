@@ -19,9 +19,9 @@
 #
 # Source for the destructive primitives:
 #   - mkimage / nandwrite / fw_setenv layout per Amlogic A113D port
-#     work ( "Amlogic A113D Platform Port" section).
+#     work (project notes "Amlogic A113D Platform Port" section).
 #   - U-Boot env partition is /dev/nand_env (per
-#     ).
+#     am3 aml uboot env format rule).
 #
 # Usage:
 #   ./revert_to_stock_am3_aml_s21.sh <firmware_image.tar.gz>
@@ -150,7 +150,7 @@ fi
 
 # Find the rootfs uImage; reject if `find` returns nothing.
 # Amlogic stock tarballs typically ship `rootfs_uImage.bin` (per
-#  "Boot Chain"); fall back to any *.bin or *uImage* match.
+# project notes "Boot Chain"); fall back to any *.bin or *uImage* match.
 UIMAGE=$(find "$EXTRACT_DIR" -type f \( -name 'rootfs_uImage*' -o -name '*uImage*' -o -name 'rootfs*.bin' \) | head -1)
 if [ -z "$UIMAGE" ]; then
     echo "ERROR: No rootfs uImage found in firmware archive"
@@ -202,7 +202,7 @@ fi
 
 echo "Step 4: Updating U-Boot environment..."
 # Amlogic stock uses dcent_boot_slot + firstboot per
-# . firstboot=1 tells stock to
+# am3 aml uboot env format rule. firstboot=1 tells stock to
 # run its first-boot init; cleared to 0 after stock takes over.
 fw_setenv firstboot 1
 # We don't toggle dcent_boot_slot itself: am3-aml uses a single rootfs

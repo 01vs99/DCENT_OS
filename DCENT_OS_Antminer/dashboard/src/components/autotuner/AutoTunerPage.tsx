@@ -200,6 +200,46 @@ export function AutoTunerPage() {
           <div className="autotuner-hero-substat">
             {status?.message || 'Targets shown below.'}
           </div>
+          {/* C3a (2026-09): variant-guard evidence — the honest
+              refuse-not-tune-blind state. The NotTunable reason and the
+              first-boot safe-stock park reason are surfaced verbatim, and
+              the convergence rung counts (incl. Refused + reasons) name
+              the envelope version they were produced under. The
+              convergence efficiency figure is a model ESTIMATE and is
+              never rendered as a measured value. */}
+          {(status?.not_tunable_reason || status?.start_gate_park_reason || (status?.convergence && (status.convergence.rung_counts.refused > 0 || status.convergence.rung_counts.not_tunable > 0))) && (
+            <div
+              data-testid="autotuner-page-convergence"
+              style={{
+                marginTop: 8,
+                padding: '8px 10px',
+                borderRadius: 8,
+                border: '1px solid var(--border)',
+                fontSize: '0.72rem',
+                color: 'var(--text-dim)',
+              }}
+            >
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>
+                Variant guard (envelope {status?.convergence?.envelope_version ?? '—'})
+              </div>
+              {status?.not_tunable_reason && (
+                <div data-testid="autotuner-page-not-tunable" style={{ color: 'var(--red)' }}>
+                  NOT TUNABLE — {status.not_tunable_reason}
+                </div>
+              )}
+              {status?.start_gate_park_reason && (
+                <div data-testid="autotuner-page-start-gate-park">
+                  Parked in Idle — {status.start_gate_park_reason}
+                </div>
+              )}
+              {status?.convergence && status.convergence.rung_counts.refused > 0 && (
+                <div data-testid="autotuner-page-refused">
+                  Refused {status.convergence.rung_counts.refused} step(s)
+                  {status.convergence.refusal_reasons?.length ? `: ${status.convergence.refusal_reasons.join('; ')}` : ''}
+                </div>
+              )}
+            </div>
+          )}
           <div className="autotuner-hero-row" style={{ marginTop: 8 }}>
             <div>
               <div className="ahr-label">Freq</div>

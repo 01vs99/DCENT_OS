@@ -156,6 +156,7 @@ pub fn amlogic_tty_candidate_order(chain: &ChainConfig) -> Vec<String> {
     };
 
     match chain.chain_id {
+        2 if declared == "/dev/ttyS1" => vec![declared.to_string()],
         2 => {
             let prefs: &[&str] = if declared == "/dev/ttyS3" {
                 &S19K_AMLOGIC_CHAIN2_TTY_CANDIDATES
@@ -240,6 +241,9 @@ fn default_voltage_controller() -> VoltageControllerKind {
 /// PIC microcontroller type.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PicType {
+    /// Source-bound classic AML application protocol; this names a dialect,
+    /// not an inferred MCU part or permission to use a generic PIC driver.
+    ClassicAmlFw89,
     /// Microchip PIC16F1704 (S9, S17+, S19).
     Pic16F1704,
     /// Microchip dsPIC33EP16GS202 (S17, S17e only).
@@ -261,6 +265,9 @@ pub enum PicType {
 /// service construction consumes an opaque discovery-bound endpoint.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum VoltageControllerKind {
+    /// Exact retained classic AML fw89 application and APW12 composition.
+    /// Generic subtype discovery and legacy mutating services cannot mint it.
+    ClassicAmlFw89,
     /// PIC1704-class voltage controller at I²C 0x20. Used by the
     /// BHB42XXX hashboard family across CV1835, AM335x BB, and Amlogic
     /// (S19j Pro variants). See `dcentrald-asic::pic1704`.
@@ -280,6 +287,7 @@ impl VoltageControllerKind {
     /// Short descriptor for tracing logs.
     pub fn as_str(&self) -> &'static str {
         match self {
+            VoltageControllerKind::ClassicAmlFw89 => "classic-aml-fw89",
             VoltageControllerKind::Pic1704 => "pic1704",
             VoltageControllerKind::Dspic33Ep => "dspic33ep",
             VoltageControllerKind::Pic16f1704 => "pic16f1704",
@@ -872,7 +880,7 @@ impl PlatformConfig {
                 ChainConfig {
                     chain_id: 0,
                     transport: ChainTransport::Serial {
-                        device: "/dev/ttyS1".to_string(),
+                        device: "/dev/ttyS3".to_string(),
                         baud: 115200,
                     },
                     pic_address: None, // NoPic!
@@ -891,13 +899,13 @@ impl PlatformConfig {
                     plug_detect_gpio: Some(440),
                     enable_gpio: Some(455),
                 },
-                // S21 Amlogic chain-2 device: verified AXG order is ttyS4
+                // Exact held production physical1/2/3 -> ttyS3/ttyS2/ttyS1.
                 // first, ttyS3 as a legacy fallback. The candidate order is
                 // pinned by `amlogic_tty_candidate_order()` host tests.
                 ChainConfig {
                     chain_id: 2,
                     transport: ChainTransport::Serial {
-                        device: "/dev/ttyS4".to_string(),
+                        device: "/dev/ttyS1".to_string(),
                         baud: 115200,
                     },
                     pic_address: None,
@@ -918,9 +926,71 @@ impl PlatformConfig {
             voltage_control: VoltageControl::FrequencyOnly,
             has_xadc: false,
             arch: Architecture::Aarch64,
-            // S21 NoPic Amlogic: voltage = TAS5782M kernel-managed DAC.
+            // Native runtime voltage is programmed by its retained GPIO APW owner.
             voltage_controller: VoltageControllerKind::NoPic,
         }
+    }
+
+    /// Exact production AML backend used by the S21 Pro BM1370 profile.
+    /// Physical slots0/1/2 route to ttyS3/2/1, independently of chip count.
+    pub fn s21pro_amlogic() -> Self {
+        let mut config = Self::s21_amlogic();
+        config.name = "Antminer S21 Pro (Amlogic)".to_string();
+        config
+    }
+
+    pub fn s21xp_amlogic() -> Self {
+        let mut config = Self::s21_amlogic();
+        config.name = "Antminer S21 XP (Amlogic)".to_string();
+        config
+    }
+
+    /// Exact modern AM3 production registry0x767090/0x86452c.
+    /// NoPic denotes the runtime voltage owner; optional board PICs are unused.
+    pub fn s19xp_amlogic() -> Self {
+        let mut config = Self::s21_amlogic();
+        config.name = "Antminer S19 XP (Amlogic)".to_string();
+        config
+    }
+
+    pub fn s19jxp_amlogic() -> Self {
+        let mut config = Self::s21_amlogic();
+        config.name = "Antminer S19j XP (Amlogic)".to_string();
+        config
+    }
+
+    /// Independently traced BM1362 AM3 registry: three UART/reset routes,
+    /// GPIO437 active-low PSU owner, direct LM75 sensor translation. Classic
+    /// PIC-controlled BHB42601/21/41 must not resolve through these profiles.
+    pub fn s19jproa_amlogic() -> Self {
+        let mut config = Self::s21_amlogic();
+        config.name = "Antminer S19j Pro A (Amlogic)".to_string();
+        config
+    }
+
+    /// R10 exact AM3 registry key3, UART86452c, PIC bus0/address physical+1f,
+    /// protected factory bus1 and independent GPIO437 raw1-off. Construction
+    /// is metadata only; ClassicAmlPowerOwner admits current physical custody.
+    pub fn s19jpro_classic_amlogic() -> Self {
+        let mut config = Self::s21_amlogic();
+        config.name = "Antminer S19j Pro classic (Amlogic fw89 PIC)".into();
+        config.has_pic = true;
+        config.pic_type = PicType::ClassicAmlFw89;
+        config.voltage_controller = VoltageControllerKind::ClassicAmlFw89;
+        // Generic frequency/voltage adapters do not own the exact APW12/PIC
+        // composition. Only the native runtime may alter its shared rail.
+        config.voltage_control = VoltageControl::FrequencyOnly;
+        for chain in &mut config.chains {
+            chain.pic_address = Some(0x20 + chain.chain_id);
+            chain.i2c_bus = 0;
+        }
+        config
+    }
+
+    pub fn s19jproplus_amlogic() -> Self {
+        let mut config = Self::s21_amlogic();
+        config.name = "Antminer S19j Pro+ (Amlogic)".to_string();
+        config
     }
 
     /// Antminer S19j Pro on BeagleBone AM335x (BHB42601 hashboards, BM1362).
@@ -1111,6 +1181,32 @@ impl PlatformConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classic_aml_profile_retains_exact_pic_routes_without_inheriting_nopic_or_pic1704() {
+        let config = PlatformConfig::s19jpro_classic_amlogic();
+        assert_eq!(
+            config.voltage_controller,
+            VoltageControllerKind::ClassicAmlFw89
+        );
+        assert_eq!(config.pic_type, PicType::ClassicAmlFw89);
+        assert!(config.has_pic);
+        assert_eq!(config.chains.len(), 3);
+        for (slot, (chain, uart)) in config
+            .chains
+            .iter()
+            .zip(["/dev/ttyS3", "/dev/ttyS2", "/dev/ttyS1"])
+            .enumerate()
+        {
+            assert_eq!(chain.chain_id, slot as u8);
+            assert_eq!(chain.pic_address, Some(0x20 + slot as u8));
+            assert_eq!(chain.i2c_bus, 0);
+            assert!(
+                matches!(&chain.transport, ChainTransport::Serial { device, baud }
+                if device == uart && *baud == 115200)
+            );
+        }
+    }
 
     #[test]
     fn missing_serialized_controller_identity_defaults_to_nopic() {
@@ -1329,10 +1425,10 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(devices, vec!["/dev/ttyS1", "/dev/ttyS2", "/dev/ttyS4"]);
+        assert_eq!(devices, vec!["/dev/ttyS3", "/dev/ttyS2", "/dev/ttyS1"]);
         assert!(
-            !devices.contains(&"/dev/ttyS3"),
-            "ttyS3 must not be the static S21 chain UART"
+            !devices.contains(&"/dev/ttyS4"),
+            "the held exact S21 route is ttyS3/ttyS2/ttyS1 and has no ttyS4"
         );
     }
 
@@ -1358,10 +1454,7 @@ mod tests {
             .into_iter()
             .find(|chain| chain.chain_id == 2)
             .expect("s21 chain 2");
-        assert_eq!(
-            amlogic_tty_candidate_order(&s21_chain2),
-            vec!["/dev/ttyS4", "/dev/ttyS3"]
-        );
+        assert_eq!(amlogic_tty_candidate_order(&s21_chain2), vec!["/dev/ttyS1"]);
     }
 
     #[test]

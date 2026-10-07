@@ -288,7 +288,7 @@ const BM1368_PLL_RAMP_MAX_X100: u32 = dcentrald_common::BM1368_PLL_RAMP_MAX_X100
 /// Default unclamped policy (table-first + EspMinerFull fallback). Env jig
 /// clamp is honored for off-table steps only.
 pub fn pll_ramp_sequence(target_mhz: u16) -> Vec<(u32, u32)> {
-    let clamp_vco = std::env::var(JIG_VCO_CLAMP_ENV).as_deref() == Ok("1");
+    let clamp_vco = dcentrald_common::lab_env::var(JIG_VCO_CLAMP_ENV).as_deref() == Ok("1");
     let policy = if clamp_vco {
         dcentrald_common::Bm1368VcoPolicy::BitmainJigClamp
     } else {
@@ -299,7 +299,7 @@ pub fn pll_ramp_sequence(target_mhz: u16) -> Vec<(u32, u32)> {
 
 /// G30: pure table-first + EspMinerFull fallback (`resolve_bm1368_pll_mhz`).
 fn bm1368_pll_search(target_mhz: f64) -> (u8, u8, u8, u8, f64) {
-    let clamp_vco = std::env::var(JIG_VCO_CLAMP_ENV).as_deref() == Ok("1");
+    let clamp_vco = dcentrald_common::lab_env::var(JIG_VCO_CLAMP_ENV).as_deref() == Ok("1");
     let policy = if clamp_vco {
         dcentrald_common::Bm1368VcoPolicy::BitmainJigClamp
     } else {
@@ -641,7 +641,7 @@ impl ChipDriver for Bm1368Driver {
         // NOTE: lifting the ASIC to 3 Mbaud also requires the host/FPGA UART
         // divider (Step 8 below) to be re-paced to match — flagged followup.
         let fast_uart_value =
-            resolve_fast_uart_value(std::env::var(FAST_UART_VALUE_ENV).ok().as_deref());
+            resolve_fast_uart_value(dcentrald_common::lab_env::var(FAST_UART_VALUE_ENV).ok().as_deref());
         Self::write_reg_broadcast(chain, regs::FAST_UART, fast_uart_value);
         tracing::info!(
             chain_id = chain.chain_id,

@@ -19,8 +19,8 @@
 //!    silicon-profiles SSOT.
 //! 4. Source contracts over the new engine module: EEPROM 0x50–0x57
 //!    write-deny reference at the wire boundary, no BIP320 reconstruction,
-//!    no PSU-watchdog (0x84) executor, the `DCENT_AM2_S17_*` env family, and
-//!    the pre-bench energize gate adjudicated BEFORE the watchdog is armed.
+//!    no PSU-watchdog (0x84) executor, unconditional native degraded-firmware
+//!    refusal, and energize admission BEFORE the watchdog is armed.
 //! 5. Launcher honesty with the am2-s17pro init script: exact-token S17
 //!    selector (B2 landed 2026-08-27), `--s17-hybrid` appended only, and no
 //!    image ever exports a `DCENT_AM2_S17_*` knob (contract below).
@@ -52,6 +52,8 @@ use dcentrald_silicon_profiles::bm1397::{
 };
 
 const S17_MINING_RS: &str = include_str!("../src/s17_hybrid_mining.rs");
+const S17_WIRE_RS: &str = include_str!("../src/s17_wire.rs");
+const S17_NATIVE_RS: &str = include_str!("../src/s17_native_runtime.rs");
 const S17_ADMISSION_RS: &str = include_str!("../src/s17_hybrid_admission.rs");
 const MAIN_RS: &str = include_str!("../src/main.rs");
 const S17_LAUNCHER: &str = include_str!(
@@ -64,6 +66,15 @@ fn snapshot(target: &str) -> BoardDesc {
         .clone()
 }
 
+fn production_source(source: &str) -> &str {
+    // A cfg(test) import precedes the engine body. Only the actual test
+    // module ends production; this delimiter also accepts CRLF checkouts.
+    source
+        .split_once("\nmod tests {")
+        .expect("production source must precede its test module")
+        .0
+}
+
 #[test]
 fn s17_board_desc_snapshot_pins_the_promoted_facet_tuples() {
     for (target, controller) in [
@@ -74,12 +85,8 @@ fn s17_board_desc_snapshot_pins_the_promoted_facet_tuples() {
     ] {
         let d = snapshot(target);
         assert_eq!(d.family, BoardFamily::Zynq, "{target}");
-        assert_eq!(
-            d.chain_transport,
-            ChainTransportKind::ZynqHybrid,
-            "{target}"
-        );
-        assert_eq!(d.work_engine, WorkEngineKind::SerialWork, "{target}");
+        assert_eq!(d.chain_transport, ChainTransportKind::StockFpga, "{target}");
+        assert_eq!(d.work_engine, WorkEngineKind::FpgaWorkFifo, "{target}");
         assert_eq!(d.asic_protocol, AsicProtocolIdentity::Bm1397, "{target}");
         assert_eq!(d.voltage_controller, controller, "{target}");
         assert_eq!(d.slot_policy, SlotPolicy::ZynqAbFwSetenv, "{target}");
@@ -88,7 +95,7 @@ fn s17_board_desc_snapshot_pins_the_promoted_facet_tuples() {
             "{target}: the promotion must name an executable lane"
         );
         // Promotion is a runtime lane, never an install affordance.
-        assert!(!d.public_beta_install, "{target}");
+        assert!(!d.public_beta_install(), "{target}");
         assert!(!d.mining_default_enabled, "{target}");
         let authorization = format!("{:?}", d.enablement.install_authorization);
         assert!(
@@ -104,7 +111,7 @@ fn s17_geometry_and_strides_match_the_stock_re() {
     use dcentrald_silicon_profiles::bm1397::{
         BM1397_CHIPS_PER_CHAIN_S17_PLUS, BM1397_CHIPS_PER_CHAIN_S17_PRO,
     };
-    let production = S17_MINING_RS.split("#[cfg(test)]").next().unwrap();
+    let production = production_source(S17_MINING_RS);
 
     // Held constants: S17 Pro 48 and S17+ 65 from silicon-profiles; T17 30 and
     // T17+ 44 from the stock pattern files (A1 §V1/§V2).
@@ -120,7 +127,9 @@ fn s17_geometry_and_strides_match_the_stock_re() {
         ("am2-t17plus", 44, 5, "BHB07702"),
     ];
     for (target, chips, stride, hashboard) in expected {
-        // The engine module's SSOT must name the same geometry + hashboard.
+        // Owner-module unit tests call these private geometry functions.
+        // This integration pin keeps their exact target composition linked
+        // to the common stride API and held silicon constants.
         assert!(
             production.contains(&format!("{target:?} => Some({chips})")),
             "{target}: engine geometry pin drifted"
@@ -150,7 +159,7 @@ fn s17_uart_constants_agree_with_silicon_profiles() {
 fn s17_engine_source_contract_safety_invariants() {
     // Production prefix only — the module's own inline tests reference the
     // same identifiers when pinning their absence.
-    let production = S17_MINING_RS.split("#[cfg(test)]").next().unwrap();
+    let production = production_source(S17_MINING_RS);
     // EEPROM write-deny reference stays at the wire boundary (rule #28).
     assert!(production.contains("S17_EEPROM_WRITE_DENYLIST"));
     // 4-midstate AsicBoost, never BIP320 reconstruction (G.3 #7).
@@ -158,28 +167,36 @@ fn s17_engine_source_contract_safety_invariants() {
     assert!(!production.contains("BIP320_VERSION_ROLLING_MASK"));
     // No PSU-watchdog executor for the APW9 generation (A1 §V3).
     assert!(!production.contains("apw9_watchdog"));
-    assert!(production.contains("S17_PSU_WATCHDOG_CMD_ABSENT: u8 = 0x84"));
+    // R05: the constant definitions live in the wire leaf (src/s17_wire.rs).
+    assert!(S17_WIRE_RS.contains("S17_PSU_WATCHDOG_CMD_ABSENT: u8 = 0x84"));
     // Destructive PIC ops stay out of the runtime binary (rule #29).
     assert!(!production.contains("jump_to_app"));
     assert!(!production.contains("pic_reset"));
     // 5-stable-heartbeat voltage deferral (rule #24).
-    assert!(production.contains("S17_STABLE_HEARTBEATS_BEFORE_VOLTAGE: u32 = 5"));
-    // dsPIC fw=0x86 refusal (rule #30).
-    assert!(production.contains("S17_DEGRADED_DSPIC_FW: u8 = 0x86"));
-    assert!(production.contains("DCENT_AM2_S17_TRUST_DEGRADED_FW"));
-    // Env family is S17-scoped (/55 BM1362 flags untouched).
-    for env_name in [
-        "DCENT_AM2_S17_FAST_UART_PLL3",
-        "DCENT_AM2_S17_SERIAL_WORK_DISPATCH",
-        "DCENT_AM2_S17_SKIP_PER_CHIP_INIT",
-        "DCENT_AM2_S17_TRUST_DEGRADED_FW",
-        "DCENT_AM2_S17_ALLOW_ENERGIZE",
-    ] {
-        assert!(
-            production.contains(env_name),
-            "{env_name} must stay defined"
-        );
-    }
+    assert!(S17_WIRE_RS.contains("S17_STABLE_HEARTBEATS_BEFORE_VOLTAGE: u32 = 5"));
+    // dsPIC fw=0x86 refusal (rule #30) belongs to the native profile and
+    // observed application boundaries; no environment opt-in can waive it.
+    assert!(S17_WIRE_RS.contains("S17_DEGRADED_DSPIC_FW: u8 = 0x86"));
+    let native = production_source(S17_NATIVE_RS);
+    assert!(native.contains("!matches!(chain.pic_application, Some(0 | 0x86 | 0xCC | 0xFF))"));
+    let initialize = native
+        .split_once("async fn initialize(&mut self, shutdown: &CancellationToken)")
+        .expect("native S17 initialization boundary")
+        .1;
+    let energize = initialize
+        .find("I2cMutationLabel::Energize")
+        .expect("first native rail energize transaction");
+    let before_energize = &initialize[..energize];
+    let live_read = before_energize
+        .find("let application = framed_reply(&version, 0x17)?;")
+        .expect("observed PIC application before voltage");
+    let refusal = before_energize
+        .find("application.len() == 1 && !matches!(application[0], 0 | 0x86 | 0xcc | 0xff)")
+        .expect("unconditional invalid/degraded application refusal before voltage");
+    assert!(live_read < refusal);
+    assert!(!before_energize.contains("trust_degraded_fw"));
+    assert!(!before_energize.contains("DCENT_AM2_S17_TRUST_DEGRADED_FW"));
+    assert!(production.contains("dcentrald_common::lab_env::var(name)"));
     // The BM1362 env family must NOT appear in the S17 engine.
     for bm1362_env in ["DCENT_AM2_SERIAL_WORK_DISPATCH", "DCENT_AM2_SKIP_FAST_UART"] {
         assert!(
@@ -213,7 +230,7 @@ fn s17_main_construction_orders_gate_watchdog_then_engine() {
     // The pre-bench energize gate is adjudicated BEFORE the safety admission
     // arms the watchdog (no armed-watchdog reboot loop on refusal).
     let gate_pos = run_body
-        .find("adjudicate_s17_energize_gate()")
+        .find("adjudicate_s17_energize_gate(")
         .expect("energize gate call");
     let admission_pos = run_body
         .find("S17HybridSafetyAdmission::start(")

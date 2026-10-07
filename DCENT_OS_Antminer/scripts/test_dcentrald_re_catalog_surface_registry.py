@@ -64,8 +64,12 @@ EXPECTED_MODELS = [
     ("s19pro", "0x1398", "Exact"),
     ("s19a", "0x1398", "Exact"),
     ("s19apro", "0x1398", "Exact"),
-    ("s19i", "0x1398", "Exact"),
-    ("s19j", "0x1398", "Structural"),
+    # Gauntlet B5b (2026-09-02): stock topol NBS2003 = BM1360 (refutes 0x1398);
+    # identity/geometry stock-exact but no held protocol detail -> Structural.
+    ("s19i", "0x1360", "Structural"),
+    # Gauntlet B5b (2026-09-02): corrected from Bitmain's own S19j-merge
+    # stock topol (BHB42701 = BM1362, 108/chain; refutes the old 0x1398).
+    ("s19j", "0x1362", "Exact"),
     ("s19jpro", "0x1362", "Exact"),
     ("s19jplus", "0x1362", "Exact"),
     ("s19xp", "0x1366", "Exact"),
@@ -170,6 +174,8 @@ class DcentraldReCatalogSurfaceRegistryTests(unittest.TestCase):
         )
         self.assertEqual(
             Counter(strength for _, _, strength in models),
+            # Gauntlet B5b: s19j moved Structural -> Exact and s19i Exact ->
+            # Structural (both stock-topol corrections) — the moves cancel.
             {"Exact": 19, "Structural": 7, "Scaffold": 3},
         )
         pll_ids = re.findall(r"PllExpectation \{ chip_id: (0x[0-9a-f]+),", self.pll_rs)

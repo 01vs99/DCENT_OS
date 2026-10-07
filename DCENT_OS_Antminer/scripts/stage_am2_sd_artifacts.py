@@ -70,6 +70,32 @@ def stable_file_state(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def stable_pinned_file_state(metadata: os.stat_result) -> tuple[int, ...]:
+    """Cross-route pinned-source state: handle `fstat` vs path `lstat`.
+
+    R08 desk repair (2026-09-11): on Windows the path-stat and handle-stat
+    routes legitimately disagree on `st_ctime_ns` (creation metadata reported
+    through different APIs at different granularities) even for an untouched
+    file, so requiring cross-route ctime equality false-failed the pin check
+    and kept `test_stage_am2_sd_artifacts_static.sh` (and therefore
+    `ci_offline_gates.sh`) red on Windows desk hosts with zero mutation.
+    Mutation detection is not weakened: a real writer mutation is still caught
+    by the same-route comparisons, which keep the full
+    [`stable_file_state`] tuple including exact `st_ctime_ns` (initial lstat
+    vs verification lstat, after fstat vs verification fstat), plus the
+    double-read SHA-256/MD5/size agreement. On Linux both stat routes agree on
+    ctime, so behaviour there is unchanged.
+    """
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        getattr(metadata, "st_nlink", 1),
+        metadata.st_size,
+        metadata.st_mtime_ns,
+    )
+
+
 def stable_directory_state(metadata: os.stat_result) -> tuple[int, ...]:
     return (
         metadata.st_dev,
@@ -163,7 +189,9 @@ def snapshot_regular_file(source: Path, destination: Path) -> Snapshot:
             not stat.S_ISREG(opened.st_mode)
             or is_reparse(opened)
             or getattr(opened, "st_nlink", 1) != 1
-            or stable_file_state(opened) != stable_file_state(initial)
+            # Cross-route (handle fstat vs path lstat): ctime may differ
+            # between stat routes on Windows without any mutation.
+            or stable_pinned_file_state(opened) != stable_pinned_file_state(initial)
         ):
             fail(f"artifact changed before it could be pinned: {source}")
 
@@ -184,7 +212,10 @@ def snapshot_regular_file(source: Path, destination: Path) -> Snapshot:
         except FileNotFoundError:
             fail(f"artifact pathname disappeared during snapshot: {source}")
         if (
-            stable_file_state(initial) != stable_file_state(after)
+            # Cross-route (path lstat vs handle fstat): ctime may differ
+            # between stat routes on Windows without any mutation.
+            stable_pinned_file_state(initial) != stable_pinned_file_state(after)
+            # Same-route (lstat vs lstat): full state including ctime.
             or stable_file_state(initial) != stable_file_state(current)
             or observed != initial.st_size
         ):

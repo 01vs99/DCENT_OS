@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# Offline DCENT_OS CI gates. These checks are intentionally static: they do not
+# Offline DCENT_OS CI gates. Checks use source and local fixtures; they do not
 # contact miners, open SSH, upload packages, flash devices, or reboot hardware.
 
 set -eu
@@ -12,8 +12,16 @@ cd "$PROJECT_DIR"
 
 STATIC_ONLY=0
 FAIL_FAST=0
+TIER=full
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --blocking|--nightly)
+            if [ "$TIER" != full ]; then
+                printf 'ERROR: choose only one gate tier.\n' >&2
+                exit 2
+            fi
+            TIER=${1#--}
+            ;;
         --static-only)
             STATIC_ONLY=1
             ;;
@@ -21,8 +29,10 @@ while [ "$#" -gt 0 ]; do
             FAIL_FAST=1
             ;;
         -h|--help)
-            printf 'Usage: %s [--static-only] [--fail-fast]\n' "$0"
-            printf '  --static-only  Run source/text gates only; no cargo, Docker, or hardware actions.\n'
+            printf 'Usage: %s [--blocking|--nightly|--static-only] [--fail-fast]\n' "$0"
+            printf '  --blocking     Run local behavior, signing and storage safety tests.\n'
+            printf '  --nightly      Run blocking tests, then all comprehensive gates.\n'
+            printf '  --static-only  Keep legacy comprehensive checks without optional Cargo/cross probes.\n'
             printf '  --fail-fast    Exit immediately after the first failed gate.\n'
             exit 0
             ;;
@@ -33,6 +43,21 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+
+if [ "$STATIC_ONLY" -eq 1 ] && [ "$TIER" != full ]; then
+    printf 'ERROR: --static-only cannot be combined with a gate tier.\n' >&2
+    exit 2
+fi
+
+# Keep the comprehensive path below intact. Literal shell delegation also lets
+# the shell and Python ownership checkers follow every blocking test.
+if [ "$TIER" = blocking ]; then
+    exec sh scripts/test_blocking_gates.sh "$FAIL_FAST"
+fi
+if [ "$TIER" = nightly ]; then
+    sh scripts/test_blocking_gates.sh "$FAIL_FAST"
+    sh scripts/test_nightly_gates.sh "$FAIL_FAST"
+fi
 
 failures=0
 
@@ -107,6 +132,22 @@ reject_pattern() {
     fi
 }
 
+am2_sysupgrade_environment_delegate_ok() {
+    _am2_caller=$1
+    _am2_helper=br2_external_dcentos/board/zynq/rootfs-overlay/usr/libexec/dcentos/am2-native-ota.sh
+    [ -f "$_am2_caller" ] && [ -f "$_am2_helper" ] || return 1
+    grep -Fxq 'AM2_OTA_HELPER="/usr/libexec/dcentos/am2-native-ota.sh"' "$_am2_caller" || return 1
+    grep -Fxq '. "$AM2_OTA_HELPER"' "$_am2_caller" || return 1
+    grep -Eq '^am2_ota_commit_script \|\| preflip_fail ' "$_am2_caller" || return 1
+    grep -Fxq 'if ! am2_ota_apply_environment; then' "$_am2_caller" || return 1
+    _am2_apply=$(sed -n '/^am2_ota_apply_environment()/,/^}/p' "$_am2_helper")
+    printf '%s\n' "$_am2_apply" | grep -Fxq '    fw_setenv -c "$FW_ENV_CONFIG" --script "$FW_SETENV_SCRIPT" || AM2_OTA_ENV_WRITE_RC=$?' || return 1
+    printf '%s\n' "$_am2_apply" | grep -Fxq '    fw_printenv -c "$FW_ENV_CONFIG" > "$_am2_readback" 2> "$_am2_errors" || return 1' || return 1
+    printf '%s\n' "$_am2_apply" | grep -Fxq '    [ ! -s "$_am2_errors" ] || return 1' || return 1
+    printf '%s\n' "$_am2_apply" | grep -Fxq '    if am2_ota_verify_snapshot after "$_am2_readback" 2> "$AM2_OTA_DIR/env.verify-after.errors"; then' || return 1
+    printf '%s\n' "$_am2_apply" | grep -Fxq '    if am2_ota_verify_snapshot before "$_am2_readback" 2> "$AM2_OTA_DIR/env.verify-before.errors"; then'
+}
+
 sysupgrade_am2_variant_parity_check() {
     for file in \
         br2_external_dcentos/board/zynq/am2-s19jpro/rootfs-overlay/usr/sbin/sysupgrade \
@@ -137,11 +178,17 @@ payload_fits_ubi_volume
 EXPECTED_KERNEL_LEBS=23
 EXPECTED_ROOTFS_LEBS=179
 EXPECTED_ROOTFS_DATA_LEBS=210
-fw_setenv -c "$FW_ENV_CONFIG" --script "$FW_SETENV_SCRIPT"
+. "$AM2_OTA_HELPER"
+am2_ota_commit_script || preflip_fail
+if ! am2_ota_apply_environment; then
 upgrade_stage=0
 REFUSING to fall back to raw dd/flash_erase/nandwrite
 EOF
 
+        if ! am2_sysupgrade_environment_delegate_ok "$file"; then
+            fail "AM2 sysupgrade variant parity: $file lost the active complete-environment helper/writer/readback join"
+            missing=$((missing + 1))
+        fi
         if [ "$missing" -eq 0 ]; then
             pass "AM2 sysupgrade variant parity: $file keeps signing, hash, geometry, and env guards"
         fi
@@ -159,7 +206,7 @@ make_release_verify_gate_check() {
         /^release:/ { in_release = 1; next }
         in_release && /^[A-Za-z0-9_.-]+:/ { in_release = 0 }
         in_release && /\$\(MAKE\) verify/ { verify_line = NR }
-        in_release && /scripts\/build_s9_release_capsule\.sh/ { capsule_line = NR }
+        in_release && /scripts\/build_release_capsule\.sh/ { capsule_line = NR }
         in_release && /DCENT_SKIP_VERIFY/ { skip_line = NR }
         END {
             ok = verify_line > 0 && capsule_line > 0 && verify_line < capsule_line && skip_line == 0
@@ -168,7 +215,7 @@ make_release_verify_gate_check() {
     ' Makefile; then
         pass "make release runs make verify before building release artifacts"
     else
-        fail "make release must run make verify before the S9 capsule driver and must not honor DCENT_SKIP_VERIFY"
+        fail "make release must run make verify before the exact producer capsule driver and must not honor DCENT_SKIP_VERIFY"
     fi
 }
 
@@ -323,6 +370,11 @@ pre_flash_package_only_selftest() {
         kernel_kind=$3
         root_kind=$4
         status=${5:-lab_unsigned}
+        # AM1-A Drop-1 route-scoping fixtures: optional typed toolbox route
+        # contract (empty = legacy manifest with no toolbox block) and an
+        # optional truncated rootfs size (0 = tiny fitting root).
+        route_install_mode=${6:-}
+        route_root_size=${7:-0}
 
         if [ "$status" = "lab_unsigned" ]; then
             manifest_profile=dcentos.sysupgrade-unsigned-lab/v1
@@ -334,6 +386,12 @@ pre_flash_package_only_selftest() {
 
         case "$kernel_kind" in
             uimage) printf '\047\005\031\126kernel\n' > "$pkgdir/kernel" || return 1 ;;
+            # Donor Amlogic kernel shape: 56 header bytes then the arm64
+            # Image magic "ARM\x64" at 0x38 (what pre_flash_validate admits).
+            arm64)
+                dd if=/dev/zero of="$pkgdir/kernel" bs=1 count=56 2>/dev/null || return 1
+                printf '\101\122\115\144kernel\n' >> "$pkgdir/kernel" || return 1
+                ;;
             raw) printf 'raw-kernel\n' > "$pkgdir/kernel" || return 1 ;;
             *) return 1 ;;
         esac
@@ -343,6 +401,13 @@ pre_flash_package_only_selftest() {
             raw) printf 'raw-root\n' > "$pkgdir/root" || return 1 ;;
             *) return 1 ;;
         esac
+        if [ "$route_root_size" -gt 4 ]; then
+            if command -v truncate >/dev/null 2>&1; then
+                truncate -s "$route_root_size" "$pkgdir/root" || return 1
+            else
+                dd if=/dev/zero of="$pkgdir/root" bs=1 count=1 seek=$((route_root_size - 1)) conv=notrunc >/dev/null 2>&1 || return 1
+            fi
+        fi
         printf 'board=%s\n' "$board" > "$pkgdir/METADATA" || return 1
 
         kernel_size=$(wc -c < "$pkgdir/kernel" | tr -d ' ') || return 1
@@ -351,6 +416,26 @@ pre_flash_package_only_selftest() {
         kernel_sha=$(sha256sum "$pkgdir/kernel" | awk '{ print $1 }') || return 1
         root_sha=$(sha256sum "$pkgdir/root" | awk '{ print $1 }') || return 1
         metadata_sha=$(sha256sum "$pkgdir/METADATA" | awk '{ print $1 }') || return 1
+
+        if [ "$route_install_mode" = "first_install_only" ]; then
+            route_update_json=null
+        elif [ -n "$route_install_mode" ]; then
+            route_update_json='"dcent install <ip> -f dcentos-sysupgrade-118.tar"'
+            route_install_mode=target_sysupgrade
+        fi
+        if [ -n "${route_install_mode:-}" ]; then
+            toolbox_block=",
+  \"toolbox\": {
+    \"install_command\": \"dcent install <ip> -f dcentos-sysupgrade-118.tar\",
+    \"update_command\": ${route_update_json:-null},
+    \"upload_endpoint\": null,
+    \"board_target_header\": null,
+    \"requires_inactive_slot\": false,
+    \"install_mode\": \"$route_install_mode\"
+  }"
+        else
+            toolbox_block=""
+        fi
 
         cat > "$pkgdir/MANIFEST.json" <<EOF || return 1
 {
@@ -368,14 +453,14 @@ pre_flash_package_only_selftest() {
     "kernel": { "path": "sysupgrade-$board/kernel", "size": $kernel_size, "sha256": "$kernel_sha" },
     "rootfs": { "path": "sysupgrade-$board/root", "size": $root_size, "sha256": "$root_sha" },
     "metadata": { "path": "sysupgrade-$board/METADATA", "size": $metadata_size, "sha256": "$metadata_sha" }
-  }
+  }$toolbox_block
 }
 EOF
         (cd "$pkgdir" && sha256sum kernel root METADATA > SHA256SUMS) || return 1
     }
 
     pkgdir="$tmpdir/sysupgrade-am3-s19k"
-    write_test_sysupgrade_package "$pkgdir" am3-s19k uimage uimage || return 1
+    write_test_sysupgrade_package "$pkgdir" am3-s19k arm64 uimage || return 1
     (cd "$tmpdir" && tar cf valid.tar sysupgrade-am3-s19k) || return 1
 
     if ! DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh --package-only "$tmpdir/valid.tar" am3-s19k >/dev/null 2>&1; then
@@ -396,10 +481,44 @@ EOF
         rm -rf "$tmpdir"
         return 1
     fi
-    write_test_sysupgrade_package "$pkgdir" am3-s19k uimage uimage || return 1
+    write_test_sysupgrade_package "$pkgdir" am3-s19k arm64 uimage || return 1
 
     (cd "$tmpdir" && tar cf valid-s9.tar sysupgrade-am1-s9) || return 1
     if ! DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh --package-only "$tmpdir/valid-s9.tar" am1-s9 >/dev/null 2>&1; then
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # AM1-A Drop-1 route scoping (owner adjudication
+    # AM1_S9_ROOTFS_WINDOW_ADJUDICATION Option A, 2026-09-15): an over-window
+    # am1-s9 rootfs PASSES only with the typed first-install-only contract
+    # (self-update explicitly denied); the same size CLAIMING the self-update
+    # route fails closed at the geometry window.
+    oversized_s9_root=$((134 * 124 * 1024 + 729088))
+    write_test_sysupgrade_package "$tmpdir/sysupgrade-am1-s9" am1-s9 uimage squashfs \
+        lab_unsigned first_install_only "$oversized_s9_root" || return 1
+    (cd "$tmpdir" && tar cf fio-s9.tar sysupgrade-am1-s9) || return 1
+    if ! DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh --package-only "$tmpdir/fio-s9.tar" am1-s9 >/dev/null 2>&1; then
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    write_test_sysupgrade_package "$tmpdir/sysupgrade-am1-s9" am1-s9 uimage squashfs \
+        lab_unsigned target_sysupgrade "$oversized_s9_root" || return 1
+    (cd "$tmpdir" && tar cf tsu-s9.tar sysupgrade-am1-s9) || return 1
+    if DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh --package-only "$tmpdir/tsu-s9.tar" am1-s9 >/dev/null 2>&1; then
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # First-install capacity bound (merge-critic follow-up): the waiver is
+    # bounded by the stock two-reboot transaction's HARD phase-2 volumes
+    # (kernel -s 8MiB / rootfs -s 20MiB, stage1_builder.py:640/:642). A
+    # first-install-only package past the 20 MiB rootfs volume must FAIL —
+    # it has no installable route (mid-phase-2 abort otherwise).
+    write_test_sysupgrade_package "$tmpdir/sysupgrade-am1-s9" am1-s9 uimage squashfs \
+        lab_unsigned first_install_only $((20 * 1024 * 1024 + 1)) || return 1
+    (cd "$tmpdir" && tar cf fio-cap-s9.tar sysupgrade-am1-s9) || return 1
+    if DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh --package-only "$tmpdir/fio-cap-s9.tar" am1-s9 >/dev/null 2>&1; then
         rm -rf "$tmpdir"
         return 1
     fi
@@ -456,7 +575,7 @@ PY
         return 1
     fi
 
-    write_test_sysupgrade_package "$tmpdir/sysupgrade-am3-s19k-badroot" am3-s19k uimage squashfs || return 1
+    write_test_sysupgrade_package "$tmpdir/sysupgrade-am3-s19k-badroot" am3-s19k arm64 squashfs || return 1
     rm -rf "$tmpdir/sysupgrade-am3-s19k" || return 1
     mv "$tmpdir/sysupgrade-am3-s19k-badroot" "$tmpdir/sysupgrade-am3-s19k" || return 1
     (cd "$tmpdir" && tar cf am3-squashfs-root.tar sysupgrade-am3-s19k) || return 1
@@ -466,14 +585,14 @@ PY
         return 1
     fi
 
-    write_test_sysupgrade_package "$tmpdir/sysupgrade-am3-s21" am3-s21 uimage uimage || return 1
+    write_test_sysupgrade_package "$tmpdir/sysupgrade-am3-s21" am3-s21 arm64 uimage || return 1
     (cd "$tmpdir" && tar cf wrong-prefix.tar sysupgrade-am3-s21) || return 1
     if DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 sh scripts/pre_flash_validate.sh --package-only "$tmpdir/wrong-prefix.tar" am3-s19k >/dev/null 2>&1; then
         rm -rf "$tmpdir"
         return 1
     fi
 
-    write_test_sysupgrade_package "$tmpdir/sysupgrade-am3-s19k" am3-s19k uimage uimage || return 1
+    write_test_sysupgrade_package "$tmpdir/sysupgrade-am3-s19k" am3-s19k arm64 uimage || return 1
     root_size=$(wc -c < "$tmpdir/sysupgrade-am3-s19k/root" | tr -d ' ') || return 1
     sed 's/"size": '"$root_size"'/"size": 999999/' \
         "$tmpdir/sysupgrade-am3-s19k/MANIFEST.json" > "$tmpdir/sysupgrade-am3-s19k/MANIFEST.json.tmp" || return 1
@@ -487,7 +606,7 @@ PY
     if command -v openssl >/dev/null 2>&1; then
         openssl genpkey -algorithm Ed25519 -out "$tmpdir/release.key" >/dev/null 2>&1 || return 1
         openssl pkey -in "$tmpdir/release.key" -pubout -out "$tmpdir/release.pub" >/dev/null 2>&1 || return 1
-        write_test_sysupgrade_package "$tmpdir/sysupgrade-am3-s19k" am3-s19k uimage uimage || return 1
+        write_test_sysupgrade_package "$tmpdir/sysupgrade-am3-s19k" am3-s19k arm64 uimage || return 1
         kernel_size=$(wc -c < "$tmpdir/sysupgrade-am3-s19k/kernel" | tr -d ' ') || return 1
         root_size=$(wc -c < "$tmpdir/sysupgrade-am3-s19k/root" | tr -d ' ') || return 1
         metadata_size=$(wc -c < "$tmpdir/sysupgrade-am3-s19k/METADATA" | tr -d ' ') || return 1
@@ -825,7 +944,7 @@ watchdog_shipped_config_gate_check
 
 require_pattern 'scripts/package_sysupgrade.sh' 'Refusing live upload of an unsigned package' 'package_sysupgrade refuses unsigned live upload'
 reject_pattern 'scripts/package_sysupgrade.sh' 'DCENT_FORCE_AM2_UPLOAD' 'S9 package_sysupgrade exposes no AM2 live-upload override'
-require_pattern 'scripts/package_sysupgrade.sh' '"requires_inactive_slot": true' 'package manifest declares inactive-slot requirement'
+require_pattern 'scripts/package_sysupgrade.sh' 'S9_REQUIRES_INACTIVE_SLOT=true' 'dual-route package manifest declares the inactive-slot requirement (first-install-only scope sets it false)'
 require_file 'scripts/lib/sd_image_signing_gate.sh'
 require_file 'scripts/test_sd_signing_gate_static.sh'
 if sh scripts/test_sd_signing_gate_static.sh >/dev/null 2>&1; then
@@ -1002,11 +1121,31 @@ require_pattern 'scripts/pre_flash_validate.sh' 'tar entry types are regular fil
 require_pattern 'scripts/pre_flash_validate.sh' 'MANIFEST.json board_target' 'pre-flash package-only mode validates manifest board_target'
 require_pattern 'scripts/pre_flash_validate.sh' 'SHA256SUMS verifies kernel/root/METADATA' 'pre-flash package-only mode validates package hashes'
 require_pattern 'scripts/pre_flash_validate.sh' 'MANIFEST.json payload paths/sizes/hashes match actual files' 'pre-flash package-only mode cross-checks manifest payloads'
-require_pattern 'scripts/pre_flash_validate.sh' 'AM3 kernel/root uImage magic valid' 'pre-flash package-only mode validates AM3 uImage magic'
+require_pattern 'scripts/pre_flash_validate.sh' 'AM3 root uImage + kernel arm64 Image magic valid' 'pre-flash package-only mode validates AM3 root uImage and donor arm64 kernel header'
 require_pattern 'scripts/pre_flash_validate.sh' 'squashfs-style root payload magic valid' 'pre-flash package-only mode validates squashfs-style root payloads'
 require_pattern 'scripts/pre_flash_validate.sh' 'root payload fits am3 rootfs window' 'pre-flash package-only mode bounds am3 rootfs payload'
 require_pattern 'scripts/pre_flash_validate.sh' 'assert_payload_fits_window "$board root" "$root_size" "$ZYNQ_ROOTFS_MAX_BYTES" "zynq rootfs window"' 'pre-flash package-only mode bounds zynq rootfs payloads'
 require_pattern 'scripts/pre_flash_validate.sh' 'assert_payload_fits_window "$board kernel" "$kernel_size" "$ZYNQ_KERNEL_MAX_BYTES" "zynq kernel window"' 'pre-flash package-only mode bounds zynq kernel payloads'
+# AM1-A Drop-1 route scoping (owner adjudication
+# AM1_S9_ROOTFS_WINDOW_ADJUDICATION Option A, ratified 2026-09-15): the
+# am1-s9 self-update window stays enforced for every self-update-claiming
+# shape; only the typed first-install-only denial admits an over-window
+# package (first-install route).
+require_pattern 'scripts/pre_flash_validate.sh' 'query-install-mode' 'pre-flash package-only mode reads the route contract through the typed semantic helper'
+require_pattern 'scripts/pre_flash_validate.sh' 'self-update window admission waived' 'pre-flash package-only mode records the first-install-only window waiver'
+require_pattern 'scripts/package_sysupgrade.sh' 'AM1_S9_ROOTFS_WINDOW_ADJUDICATION.md' 'S9 packager cites the route-scoping owner adjudication'
+require_pattern 'scripts/package_sysupgrade.sh' 'S9_TOOLBOX_INSTALL_MODE=first_install_only' 'S9 packager emits the typed first-install-only contract for over-window payloads'
+require_pattern 'scripts/package_sysupgrade.sh' 'refusing to seal a self-update contract for an oversized package' 'S9 packager fails closed on a self-update claim with an over-window payload'
+require_pattern 'scripts/package_sysupgrade.sh' 'Refusing --upload of a first-install-only package' 'S9 packager refuses the live-upload self-update rail for a first-install-only package'
+# First-install capacity bound (merge-critic follow-up): defined once in the
+# capacity helper with the stage1_builder.py:640/:642 citation, enforced at
+# seal time and at pre-flash waiver time.
+require_pattern 'scripts/lib/am1_s9_first_install_capacity.sh' 'AM1_S9_FIRST_INSTALL_ROOTFS_MAX_BYTES=$((20 * 1024 * 1024))' 'first-install capacity helper pins the 20MiB stock rootfs volume'
+require_pattern 'scripts/package_sysupgrade.sh' 'dcent_am1_s9_require_first_install_capacity' 'S9 packager enforces the stock-transaction capacity at seal time'
+require_pattern 'scripts/pre_flash_validate.sh' 'first-install-only waiver is bounded' 'pre-flash first-install-only waiver is bounded by the stock-transaction capacity'
+require_pattern 'scripts/pre_flash_validate.sh' '[ "$board" = "am1-s9" ] && [ "$install_mode" = "first_install_only" ]' 'pre-flash waiver conjunct stays am1-s9 AND first_install_only only'
+require_pattern 'scripts/lib/sysupgrade_manifest_json.py' 'first_install_only' 'semantic manifest helper admits the first-install-only route contract'
+require_pattern 'scripts/lib/sysupgrade_package_common.sh' 'first-install-only metadata must not advertise an update command' 'shared typed-contract machinery refuses update metadata under the first-install-only denial'
 require_pattern 'br2_external_dcentos/board/zynq/rootfs-overlay/usr/sbin/sysupgrade' 'payload_fits_ubi_volume' 'S9 sysupgrade checks payload byte fit before ubiupdatevol'
 require_pattern 'br2_external_dcentos/board/zynq/am2-s19jpro/rootfs-overlay/usr/sbin/sysupgrade' 'payload_fits_ubi_volume' 'am2-s19j sysupgrade checks payload byte fit before ubiupdatevol'
 require_pattern 'br2_external_dcentos/board/zynq/am2-s19pro/rootfs-overlay/usr/sbin/sysupgrade' 'payload_fits_ubi_volume' 'am2-s19pro sysupgrade checks payload byte fit before ubiupdatevol'
@@ -1126,6 +1265,13 @@ if cmp -s \
 else
     fail 'Toolbox hardware enablement matrix drifted from the Rust-generated canonical JSON'
 fi
+# C2 pleb-install lane: the toolbox's guided-install route catalog must be a
+# faithful export of release_train.py TARGETS + the board_desc.rs rings.
+if run_python_script scripts/export_install_route_catalog.py --check; then
+    pass 'Toolbox install-route catalog matches release_train.py (C2 guided install)'
+else
+    fail 'Toolbox install-route catalog drifted from release_train.py — regenerate with export_install_route_catalog.py'
+fi
 if run_python_script scripts/check_safety_clamp_manifest.py --self-test; then
     pass "safety clamp manifest: classified thermal/voltage/frequency/PWM clamp set is pinned with negative control"
 else
@@ -1138,7 +1284,7 @@ fi
 # (Round-16 B6). Deliberately WITHOUT >/dev/null so FAIL reasons reach CI logs.
 require_file 'scripts/check_no_orphan_power_backends.py'
 if run_python_script scripts/check_no_orphan_power_backends.py; then
-    pass 'no-orphan power/PIC/thermal backend gate holds (34 pinned orphans, 0 new)'
+    pass 'no-orphan power/PIC/thermal backend gate holds (35 pinned orphans, 0 new)'
 else
     fail 'no-orphan backend gate: new orphan power/PIC/thermal backend, stale allowlist row, dead scope glob, or unreasoned allowlist entry (reasons printed above)'
 fi
@@ -1209,9 +1355,9 @@ entropy_seed_lifecycle_check() {
         fi
     fi
     if awk '
-        /- name: Provision and admit restricted inputs/ { provision = NR }
-        /- name: Exact Zynq entropy lifecycle cross-compile proof/ { proof = NR }
-        /- name: Build and atomically publish S9 release set/ { build = NR }
+        /sh scripts\/provision_build_inputs.sh --check/ { provision = NR }
+        /run: sh scripts\/test_seed_entropy_cross_compile.sh/ { proof = NR }
+        /bash scripts\/build_release_capsule.sh/ { build = NR }
         END { exit !(provision && proof && build && provision < proof && proof < build) }
     ' ../../.github/workflows/dcentos-image-smoke.yml && \
        grep -Eq '^[[:space:]]*run:[[:space:]]+sh[[:space:]]+scripts/test_seed_entropy_cross_compile\.sh[[:space:]]*$' \
@@ -1227,8 +1373,8 @@ entropy_seed_lifecycle_check
 # `build-dcentrald.sh` are capsule-internal drivers: a workflow calling either
 # one directly can no longer satisfy receipt-v4 invocation ownership. S9 CI
 # must consume the atomic public directory and verify it after private cleanup.
-# AM2 has no capsule yet, so its former package/nandsim claims stay explicit and
-# fail closed instead of falling back to the mutable inner driver.
+# Both workflows consume exact S9/AM2 producer results from the shared outer
+# capsule. A package result grants no physical boot or first-install claim.
 release_workflow_capsule_admission_check() {
     workflow_dir='../../.github/workflows'
     image_workflow="$workflow_dir/dcentos-image-smoke.yml"
@@ -1247,11 +1393,14 @@ release_workflow_capsule_admission_check() {
 
     for workflow in "$image_workflow" "$nandsim_workflow"; do
         require_pattern "$workflow" \
-            'bash scripts/build_s9_release_capsule.sh' \
-            "$workflow uses the admitted S9 outer capsule"
+            'bash scripts/build_release_capsule.sh' \
+            "$workflow uses the exact producer outer capsule"
         require_pattern "$workflow" \
-            'python3 scripts/portable_release_evidence.py verify' \
-            "$workflow verifies the exact published directory after cleanup"
+            'python3 scripts/release_producer.py verify-cohort-result' \
+            "$workflow verifies exact signed producer results after cleanup"
+        require_pattern "$workflow" \
+            'python3 scripts/release_producer_evidence.py verify-cohort' \
+            "$workflow reauthenticates retained source closure after cleanup"
         require_pattern "$workflow" \
             'vars.DCENT_RUST_BUILDER_BASE' \
             "$workflow obtains the builder digest from repository/dispatch authority"
@@ -1277,14 +1426,14 @@ release_workflow_capsule_admission_check() {
             'DCENT_BUILD_INPUTS_DIR must be outside the Actions checkout.' \
             "$workflow rejects a checkout-local pseudo-provisioning channel"
         require_pattern "$workflow" \
-            'DCENT_AM2_CAPSULE_STATUS: unavailable-fail-closed' \
-            "$workflow exposes the missing AM2 capsule as a coverage disposition"
+            '--producer s9 --producer am2-s19jpro' \
+            "$workflow explicitly selects both admitted Zynq producers"
         require_pattern "$workflow" \
-            '[ -e scripts/build_am2_release_capsule.sh ]' \
-            "$workflow forces review when an AM2 capsule becomes available"
+            '--result-json "$DCENT_CI_OUTPUT_ROOT/cohort-result.json"' \
+            "$workflow binds the exact cohort result destination"
         reject_pattern "$workflow" \
-            'bash scripts/build_am2_release_capsule.sh' \
-            "$workflow does not claim an unimplemented AM2 capsule"
+            'DCENT_AM2_CAPSULE_STATUS: unavailable-fail-closed' \
+            "$workflow does not retain the obsolete AM2 producer blocker"
         reject_pattern "$workflow" \
             '  push:' \
             "$workflow does not schedule an always-blocked hosted push build"
@@ -1301,22 +1450,29 @@ release_workflow_capsule_admission_check() {
         'image-smoke invokes the ignored real-artifact contract test explicitly'
     reject_pattern "$image_workflow" \
         'target: am2-s19jpro' \
-        'image-smoke does not claim AM2 package coverage without an admitted capsule'
+        'image-smoke uses the verified cohort rather than a mutable target matrix'
     reject_pattern "$image_workflow" \
         'target: cv1835-s19jpro' \
         'image-smoke does not advertise the unpinned CV1835 release lane'
     require_pattern "$nandsim_workflow" \
-        '--target am1-s9' \
-        'nandsim runs only the capsule-backed S9 target'
-    reject_pattern "$nandsim_workflow" \
         '--target both' \
-        'nandsim does not claim AM2 coverage without an admitted package producer'
+        'nandsim exercises both verified Zynq package producers'
+    require_pattern "$nandsim_workflow" \
+        '--s19jpro-package "$DCENT_AM2_NANDSIM_PACKAGE"' \
+        'nandsim consumes the exact verified AM2 package path'
+    reject_pattern "$nandsim_workflow" \
+        'OFFLINE_FIRST_INSTALL_PROOF_OK target=am2-s19jpro' \
+        'AM2 OTA rehearsal does not invent a first-install proof'
 }
 release_workflow_capsule_admission_check
 
 require_pattern 'scripts/build_in_docker.sh' 'dcent_prepare_git_release_provenance' 'container build validates provenance against the source worktree'
 require_pattern 'scripts/build_in_docker.sh' '-e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH"' 'container build passes the canonical epoch into image packaging'
 require_file 'scripts/release_envelope_archive.py'
+require_file 'scripts/release_stage_boot.py'
+require_file 'scripts/test_release_stage_boot.py'
+require_file 'scripts/native_zynq_sd/current_release.py'
+require_file 'scripts/test_current_bm1398_sd_profiles.py'
 require_pattern 'scripts/release_envelope_archive.py' 'atomic_publish(' 'release envelope archive uses exact no-replace durable publication'
 require_pattern 'scripts/release_envelope_archive.py' 'snapshot_without_mutation(root) != before' 'release envelope archive detects source mutation while tar reads'
 reject_pattern 'scripts/lib/release_envelope.sh' 'rm -f --' 'release envelope library has no pathname-only deletion authority'
@@ -1333,7 +1489,7 @@ else
 fi
 require_pattern 'scripts/sign_release_artifact.py' 'durable_input=True' 'release artifact signer flushes exact artifact bytes before signature commit'
 require_pattern 'scripts/build_in_docker.sh' 'sign_release_artifact.py' 'AM3 tar signing reuses the exact durable signing lifecycle'
-require_pattern 'scripts/build_s9_release_capsule.sh' 'sign_release_artifact.py" "$PORTABLE_EVIDENCE_PATH"' 'portable evidence signing reuses the exact durable signing lifecycle'
+require_pattern 'scripts/build_release_capsule.sh' 'sign_release_artifact.py" "$RELEASE_SET_STAGE/producer-result.json"' 'producer-result signing reuses the exact durable signing lifecycle'
 require_pattern 'scripts/lib/sysupgrade_package_common.sh' 'sign_release_artifact.py' 'shared sysupgrade manifest signing reuses the exact durable signing lifecycle'
 require_pattern 'scripts/package_sysupgrade.sh' 'sign_release_artifact.py' 'standalone sysupgrade manifest signing reuses the exact durable signing lifecycle'
 reject_pattern 'scripts/lib/sysupgrade_package_common.sh' 'openssl pkeyutl -sign -rawin' 'shared sysupgrade manifest signing never truncates its signature output'
@@ -1360,7 +1516,6 @@ require_pattern 'scripts/verify_sysupgrade_signature.sh' 'run_manifest_python "$
 reject_pattern 'scripts/build_in_docker.sh' 'openssl pkey -in /signkey -pubout' 'AM3 tar signing never derives its own trust root'
 require_pattern 'scripts/package_sysupgrade.sh' 'dcent_create_deterministic_tar' 'S9 sysupgrade uses the deterministic envelope archiver'
 require_pattern 'br2_external_dcentos/board/zynq/am2-s19jpro/post-image.sh' 'dcent_create_deterministic_tar' 'AM2 sysupgrade uses the deterministic envelope archiver'
-require_pattern 'br2_external_dcentos/board/cvitek/cv1835-s19jpro/post-image.sh' 'exit 78' 'CV1835 post-image hook refuses every artifact build'
 if awk '
     /dcent_write_sysupgrade_manifest/ { rewrite = NR }
     /dcent_create_deterministic_tar/ { archive = NR }
@@ -1487,15 +1642,23 @@ reject_pattern 'dcentrald/dcentrald/src/daemon.rs' 'any hash board generation' '
 reject_pattern 'dcentrald/dcentrald/src/daemon.rs' 'No competitor does this' 'daemon runtime strings do not carry competitor overclaims'
 require_pattern 'dcentrald/dcentrald/src/daemon.rs' 'hash board auto-detected by ChipID (broad Zynq-era support)' 'daemon runtime strings keep the neutral ChipID support wording'
 open_core_override_scope_check() {
+    # bm1393.rs joined the allowlist 2026-09-12 (R03 wave-1 landing,
+    # V01-confirmed): its send_open_core_work override is REFUSAL-ONLY — the
+    # trait default silently returns Ok(0), which would skip BM1393's
+    # mandatory 208-core open-core step on any future FpgaChain consumer; the
+    # real open-core sequence is owned by the C43 fabric
+    # (Bm1393Runtime::open_cores). No send path exists in the driver, so the
+    # override cannot grant unproven send authority. BM1362/BM1366/BM1368/
+    # BM1370 still inherit the default no-op.
     _hits=$(
         grep -RIn 'fn send_open_core_work' dcentrald/dcentrald-asic/src/drivers 2>/dev/null \
-            | grep -Ev 'drivers/(mod|bm1387|bm1398)\.rs:' || true
+            | grep -Ev 'drivers/(mod|bm1387|bm1398|bm1393)\.rs:' || true
     )
     if [ -n "$_hits" ]; then
         echo "$_hits"
-        fail "open-core override scope: only BM1387 and BM1398 may override send_open_core_work without a bench-backed allowlist update"
+        fail "open-core override scope: only BM1387, BM1398 and the refusal-only bm1393 may override send_open_core_work without a bench-backed allowlist update"
     else
-        pass "open-core override scope: BM1362/BM1366/BM1368/BM1370 inherit the default no-op"
+        pass "open-core override scope: BM1362/BM1366/BM1368/BM1370 inherit the default no-op; bm1393 override is refusal-only"
     fi
 }
 open_core_override_scope_check
@@ -1522,7 +1685,7 @@ require_pattern 'br2_external_dcentos/board/amlogic/am3-s19kpro/post-build.sh' '
 require_pattern 'br2_external_dcentos/board/amlogic/am3-s21/post-build.sh' 'dcent_require_dcentrald_version_match' 'am3-s21 post-build enforces dcentrald version gate'
 require_pattern 'br2_external_dcentos/board/beaglebone/am3-bb/post-build.sh' 'dcent_require_dcentrald_version_match' 'am3-bb post-build enforces dcentrald version gate'
 require_pattern 'scripts/build_in_docker.sh' 'build_in_docker Phase 5' 'build_in_docker validates staged dcentrald version before Buildroot'
-require_pattern 'scripts/build_in_docker.sh' 'am3-s19kpro|am3-s21' 'build_in_docker applies am3 validation to both am3 tarball targets'
+require_pattern 'scripts/build_in_docker.sh' 's9|am3-s19kpro|am3-s19kpro-nopic|am3-s19xp|am3-s19jxp|am3-s19jproa|am3-s19jproplus|am3-s21|am3-s21pro|am3-s21xp|am3-s19jpro-aml|am3-t21|am2-s19jpro|am2-s19pro)' 'build_in_docker applies package validation to every declared tar target'
 require_pattern 'scripts/build_in_docker.sh' 'pre_flash_validate.sh --package-only' 'build_in_docker runs am3 package-only validation'
 require_pattern 'scripts/build_amlogic_native_install.sh' 'pre_flash_validate.sh" --package-only' 'amlogic native image builder validates sysupgrade package before extraction'
 require_pattern 'scripts/build_amlogic_native_install.sh' 'DCENT_REQUIRE_INSTALLABLE_PACKAGE=1' 'amlogic native image builder refuses inspection-only packages'
@@ -1762,7 +1925,7 @@ require_pattern 'dcentrald/dcentrald/src/serial_mining.rs' 'S19k Track-1 hold' '
 require_pattern 'dcentrald/dcentrald-common/src/s19k_bm1366_share.rs' 'admit_s19k_track1_thermal_handoff_unowned' 'Track-1 thermal is HandoffUnowned not Ready'
 require_pattern 'dcentrald/dcentrald/src/serial_mining.rs' 'ThermalSafetyState::HandoffUnowned' 'Track-1 sets HandoffUnowned'
 require_pattern 'dcentrald/dcentrald/src/serial_mining.rs' 'let tx_before_rx = is_bm1362 || is_bm1366' 'BM1366 TX-before-RX'
-require_pattern 'dcentrald/dcentrald/src/serial_mining.rs' 'DCENT_S19K_NATIVE_COLD_START' 'native S19k cold-start remains strict default-off'
+require_pattern 'dcentrald/dcentrald/src/serial_mining.rs' 'DCENT_S19K_NATIVE_COLD_START' 'native S19k diagnostic request flag remains available'
 require_pattern 'dcentrald/dcentrald-common/src/s19k_braiins_chain_discover.rs' 's19k_multi_send_work_tx_required' 'Multi send_work TX is required only on ttyS1+ttyS2'
 require_pattern 'dcentrald/dcentrald-common/src/s19k_braiins_chain_discover.rs' 'refuse_s3_rx_as_fill_hunt' 'ttyS3 RX is observe-only not fill-hunt'
 require_pattern 'dcentrald/dcentrald/src/serial_mining.rs' 'admit_s19k_fill_hunt_on_tx_path' 'Track-1 fill hunt requires evidence-derived active TX path (ttyS3 only after promotion)'
@@ -1960,7 +2123,7 @@ reject_pattern 'scripts/build_rootfs_s21.sh' 'nandwrite -p -s $ROOTFS_OFFSET_HEX
 reject_pattern 'scripts/build_rootfs_s21.sh' '0x5100000' 'legacy S21 rootfs builder does not carry stale am3 rootfs offset'
 require_pattern 'br2_external_dcentos/board/amlogic/am3-s19kpro/post-build.sh' 'usr/bin/telnet' 'am3 post-build removes telnet client tooling'
 require_pattern 'br2_external_dcentos/board/amlogic/am3-s19kpro/post-build.sh' 'usr/sbin/telnetd' 'am3 post-build removes telnet daemon'
-require_pattern 'br2_external_dcentos/board/amlogic/am3-s19kpro/post-image.sh' 'Rootfs audit: access services present; telnet paths absent' 'am3 post-image runs rootfs service-surface audit'
+require_pattern 'br2_external_dcentos/board/amlogic/am3-s19kpro/post-image.sh' 'Rootfs audit: witnessed access services present; unsigned S46 and telnet paths absent' 'am3 post-image runs rootfs service-surface audit'
 require_pattern 'br2_external_dcentos/board/amlogic/am3-s19kpro/post-image.sh' 'DCENT_TOOLBOX_INSTALL_MODE=host_driven_rootfs_window_lab' 'am3-s19k package is host-driven and rootfs-window scoped'
 require_pattern 'br2_external_dcentos/board/amlogic/am3-s19kpro/post-image.sh' 'DCENT_TARGET_SIDE_SYSUPGRADE=false' 'am3-s19k manifest disables target-side sysupgrade claim'
 require_pattern 'br2_external_dcentos/board/amlogic/am3-s19kpro/post-image.sh' 'DCENT_PACKAGE_INSTALLABLE=true' 'am3-s19k package is structurally installable by the host-driven path'
@@ -1974,14 +2137,15 @@ require_pattern 'br2_external_dcentos/board/amlogic/am3-s19kpro/post-image.sh' '
 require_pattern 'br2_external_dcentos/board/amlogic/am3-s19kpro/post-image.sh' 'reject_rootfs_pattern' 'am3 rootfs audit rejects forbidden paths'
 require_pattern 'br2_external_dcentos/board/amlogic/am3-s21/post-build.sh' 'usr/bin/telnet' 'am3-s21 post-build removes telnet client tooling'
 require_pattern 'br2_external_dcentos/board/amlogic/am3-s21/post-build.sh' 'usr/sbin/telnetd' 'am3-s21 post-build removes telnet daemon'
-require_pattern 'br2_external_dcentos/board/amlogic/am3-s21/post-image.sh' 'Rootfs audit: access services present; telnet paths absent' 'am3-s21 post-image runs rootfs service-surface audit'
-require_pattern 'br2_external_dcentos/board/amlogic/am3-s21/post-image.sh' 'host_driven_rootfs_window_lab' 'am3-s21 manifest marks host-driven install mode'
-require_pattern 'br2_external_dcentos/board/amlogic/am3-s21/post-image.sh' 'DCENT_TARGET_SIDE_SYSUPGRADE=false' 'am3-s21 manifest disables target-side sysupgrade claim'
-require_pattern 'br2_external_dcentos/board/amlogic/am3-s21/post-image.sh' 'dcent_write_sysupgrade_manifest' 'am3-s21 post-image uses shared manifest helper'
-require_pattern 'br2_external_dcentos/board/amlogic/am3-s21/post-image.sh' 'require_rootfs_path "etc/init.d/S50dropbear"' 'am3-s21 rootfs audit requires Dropbear init'
-require_pattern 'br2_external_dcentos/board/amlogic/am3-s21/post-image.sh' 'require_rootfs_path "root/web/mcp_server.py"' 'am3-s21 rootfs audit requires MCP server'
-require_pattern 'br2_external_dcentos/board/amlogic/am3-s21/post-image.sh' 'require_rootfs_path "uninstall.sh"' 'am3-s21 rootfs audit requires uninstall hook'
-require_pattern 'br2_external_dcentos/board/amlogic/am3-s21/post-image.sh' 'reject_rootfs_pattern' 'am3-s21 rootfs audit rejects forbidden paths'
+require_pattern 'br2_external_dcentos/board/amlogic/am3-s21/post-image.sh' 'exec sh "$SCRIPT_DIR/../post-image-family.sh" --board-target from-target "$@"' 'am3-s21 delegates to the identity-checking shared post-image builder'
+require_pattern 'br2_external_dcentos/board/amlogic/post-image-family.sh' 'Rootfs audit: access services present; telnet paths absent' 'am3-s21 post-image runs rootfs service-surface audit'
+require_pattern 'br2_external_dcentos/board/amlogic/post-image-family.sh' 'host_driven_rootfs_window_lab' 'am3-s21 manifest marks host-driven install mode'
+require_pattern 'br2_external_dcentos/board/amlogic/post-image-family.sh' 'DCENT_TARGET_SIDE_SYSUPGRADE=false' 'am3-s21 manifest disables target-side sysupgrade claim'
+require_pattern 'br2_external_dcentos/board/amlogic/post-image-family.sh' 'dcent_write_sysupgrade_manifest' 'am3-s21 post-image uses shared manifest helper'
+require_pattern 'br2_external_dcentos/board/amlogic/post-image-family.sh' 'require_rootfs_path "etc/init.d/S50dropbear"' 'am3-s21 rootfs audit requires Dropbear init'
+require_pattern 'br2_external_dcentos/board/amlogic/post-image-family.sh' 'require_rootfs_path "root/web/mcp_server.py"' 'am3-s21 rootfs audit requires MCP server'
+require_pattern 'br2_external_dcentos/board/amlogic/post-image-family.sh' 'require_rootfs_path "uninstall.sh"' 'am3-s21 rootfs audit requires uninstall hook'
+require_pattern 'br2_external_dcentos/board/amlogic/post-image-family.sh' 'reject_rootfs_pattern' 'am3-s21 rootfs audit rejects forbidden paths'
 require_pattern 'scripts/revert_to_stock_am335x_bb.sh' 'AM335x BB NAND revert is disabled' 'am3-bb revert refuses unvalidated NAND path by default'
 require_pattern 'scripts/revert_to_stock_am335x_bb.sh' 'DCENT_AM3_BB_PROC_MTD_EVIDENCE' 'am3-bb revert requires live proc-mtd evidence before future override'
 require_pattern 'scripts/revert_to_stock_am335x_bb.sh' 'DCENT_AM3_BB_ENABLE_NAND_REVERT is not accepted as a bypass' 'am3-bb revert has no env-only bypass'
@@ -3390,6 +3554,63 @@ regression_cross_family_check
 # root cred. This gate proves the wiring exists in source so a release build
 # cannot regress to dev-open posture unnoticed.
 #
+nopic_post_build_release_delegate_ok() {
+    _nopic_wrapper=$1
+    [ -f "$_nopic_wrapper" ] && [ ! -L "$_nopic_wrapper" ] || return 1
+    # Exact bounded prerequisite checks followed by the sole shared transaction.
+    # This is a program contract, not a filename-only release exemption.
+    # Each admitted wrapper's non-comment program text is pinned byte-exact.
+    case "$_nopic_wrapper" in
+        br2_external_dcentos/board/amlogic/am3-bm1362-nopic/post-build.sh)
+            _nopic_expected=$(cat <<'DCENT_NOPIC_RELEASE_PROGRAM_BM1362'
+set -eu
+TARGET_DIR=$1
+SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+TARGET=$(cat "$TARGET_DIR/etc/dcentos/board_target")
+case "$TARGET" in am3-s19jproa|am3-s19jproplus) ;; *) echo "ERROR: exact A126/Plus120 target required" >&2; exit 1 ;; esac
+for required in etc/dcentos-early-init.sh etc/init.d/S45persistent \
+    usr/libexec/dcentos/bm1362-nopic-storage.py usr/sbin/ubiattach; do
+    [ -f "$TARGET_DIR/$required" ] && [ ! -L "$TARGET_DIR/$required" ] || {
+        echo "ERROR: required A126/Plus120 startup file missing/indirect: $required" >&2
+        exit 1
+    }
+    chmod 0755 "$TARGET_DIR/$required"
+done
+exec "$SCRIPT_DIR/../am3-s21/post-build.sh" "$@"
+DCENT_NOPIC_RELEASE_PROGRAM_BM1362
+)
+            ;;
+        br2_external_dcentos/board/amlogic/am3-s19kpro-nopic/post-build.sh)
+            _nopic_expected=$(cat <<'DCENT_NOPIC_RELEASE_PROGRAM_S19KPRO'
+set -eu
+TARGET_DIR=$1
+SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+TARGET=$(cat "$TARGET_DIR/etc/dcentos/board_target")
+case "$TARGET" in am3-s19kpro) ;; *) echo "ERROR: exact S19k Pro target required" >&2; exit 1 ;; esac
+for required in etc/dcentos-early-init.sh etc/init.d/S45persistent \
+    usr/libexec/dcentos/s19kpro-nopic-storage.py usr/sbin/ubiattach; do
+    [ -f "$TARGET_DIR/$required" ] && [ ! -L "$TARGET_DIR/$required" ] || {
+        echo "ERROR: required S19k Pro startup file missing/indirect: $required" >&2
+        exit 1
+    }
+    chmod 0755 "$TARGET_DIR/$required"
+done
+exec "$SCRIPT_DIR/../am3-s21/post-build.sh" "$@"
+DCENT_NOPIC_RELEASE_PROGRAM_S19KPRO
+)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _nopic_actual=$(sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' "$_nopic_wrapper")
+    [ "$_nopic_actual" = "$_nopic_expected" ] || return 1
+    _nopic_delegate=br2_external_dcentos/board/amlogic/am3-s21/post-build.sh
+    [ -f "$_nopic_delegate" ] && [ ! -L "$_nopic_delegate" ] || return 1
+    grep -Fxq '. "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/release_image_provision.sh"' "$_nopic_delegate" || return 1
+    grep -Fxq 'dcent_provision_release_image "$TARGET_DIR" "$BOARD_NAME"' "$_nopic_delegate"
+}
+
 release_image_hardening_check() {
     # (a) the provisioning helper exists and stamps the marker.
     require_pattern \
@@ -3405,6 +3626,29 @@ release_image_hardening_check() {
         pass 'SW-05a release-image: adversarial provisioning lifecycle tests pass'
     else
         fail 'SW-05a release-image: adversarial provisioning lifecycle tests FAILED'
+    fi
+
+    # WS-A4 (2026-09-01): RELEASE is the DEFAULT image posture (operator
+    # T-OP-7). Pin the flip itself: canonical resolver semantics, the
+    # s19kpro-style refusal on explicit opt-out, driver wiring, and the
+    # marker-keyed auth surfaces.
+    require_file 'scripts/lib/release_posture.sh'
+    require_pattern \
+        'scripts/lib/release_posture.sh' \
+        'DCENT_DEV_IMAGE' \
+        'WS-A4 release-default: canonical resolver defines the DCENT_DEV_IMAGE opt-out'
+    require_file 'scripts/test_release_posture_default.sh'
+    if sh scripts/test_release_posture_default.sh >/dev/null 2>&1; then
+        pass 'WS-A4 release-default: posture resolver, refusal, drivers, and marker-keyed auth surfaces pass'
+    else
+        fail 'WS-A4 release-default: release-default posture tests FAILED'
+    fi
+
+    require_file 'scripts/test_media_gate_delegates.py'
+    if run_python_script scripts/test_media_gate_delegates.py >/dev/null 2>&1; then
+        pass 'Media helper delegation gates reject missing, commented, redirected and early-success source paths'
+    else
+        fail 'Media helper delegation gate negative fixtures failed'
     fi
 
     # (a cont.) every activating board post-build.sh that ships a rootfs must
@@ -3458,6 +3702,9 @@ release_image_hardening_check() {
             && [ -f "br2_external_dcentos/$pb_delegate" ] \
             && grep -Eq -- '^[[:space:]]*dcent_provision_release_image([[:space:]]|$)' \
                 "br2_external_dcentos/$pb_delegate" >/dev/null 2>&1; then
+            continue
+        fi
+        if nopic_post_build_release_delegate_ok "$pb"; then
             continue
         fi
         pb_missing="$pb_missing $pb"
@@ -3913,8 +4160,6 @@ stale_binary_guard_check() {
         'CI-GATE-STALE-BINARY: dcentos-discovery receipt is emitted'
     require_pattern 'scripts/build_cv1835_s19jpro.sh' 'exit 78' \
         'CI-GATE-STALE-BINARY: CV1835 standalone build entry point refuses before consuming binaries'
-    require_pattern 'br2_external_dcentos/board/cvitek/cv1835-s19jpro/post-build.sh' 'exit 78' \
-        'CI-GATE-STALE-BINARY: CV1835 post-build refuses before staging binaries'
     require_pattern "$f" '--source-workspace DCENT_OS_Antminer/dcentrald' \
         'CI-GATE-STALE-BINARY: receipt inventory is rooted in the authenticated snapshot workspace'
     require_pattern 'scripts/binary_build_receipt.py' 'exact-git-object-snapshot' \
@@ -4002,33 +4247,15 @@ ota_preserve_data_dcent_check
 # authority so direct assembly, a synthetic merge, or warm-build residue cannot
 # reopen that brick vector. The supported build hooks refuse before assembly.
 #
-cvitek_s99upgrade_shadow_check() {
-    f='br2_external_dcentos/board/cvitek/cv1835-s19jpro/rootfs-overlay/etc/init.d/S99upgrade'
-    require_file "$f"
-    if [ ! -f "$f" ]; then
-        return
-    fi
-    require_pattern "$f" 'persistent-update containment shadow' \
-        'CI-GATE-CVITEK-S99UPGRADE-SHADOW: cvitek S99upgrade identifies its negative authority' || true
-    # No NAND/flash/env write outside the explanatory header comment. Strip the
-    # leading "LINENO:" grep prefix, then drop comment-only lines; any remaining
-    # write token is a real command and fails the gate.
-    write_hits=$(grep -nE 'flash_erase|nandwrite|fw_setenv|nanddump|/dev/mtd|/dev/nand_env' "$f" 2>/dev/null \
-        | awk '{
-            line=$0
-            sub(/^[0-9]+:/, "", line)
-            sub(/^[[:space:]]+/, "", line)
-            if (line ~ /^#/) next
-            print
-        }' || true)
-    if [ -n "$write_hits" ]; then
-        fail "CI-GATE-CVITEK-S99UPGRADE-SHADOW: cvitek S99upgrade shadow contains a real NAND/flash/env write (must stay a no-op — only the header may name these tokens)"
-        printf '%s\n' "$write_hits" >&2
+cvitek_retired_overlay_check() {
+    f='br2_external_dcentos/board/cvitek/cv1835-s19jpro'
+    if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+        pass 'CI-GATE-CVITEK-RETIRED: orphan board overlay is absent'
     else
-        pass "CI-GATE-CVITEK-S99UPGRADE-SHADOW: cvitek S99upgrade is a no-op shadow (no flash_erase/nandwrite/fw_setenv/mtd/nand_env writes outside comments)"
+        fail 'CI-GATE-CVITEK-RETIRED: orphan board overlay was reintroduced'
     fi
 }
-cvitek_s99upgrade_shadow_check
+cvitek_retired_overlay_check
 
 #
 # CI-GATE-CVITEK-BRICK-VECTOR-RETIREMENT: held CV1835 U-Boot fingerprints use
@@ -4043,22 +4270,14 @@ cv1835_brick_vector_retirement_check() {
     builder='scripts/build_cv1835_s19jpro.sh'
     consumer='scripts/safe_sysupgrade_cv_emmc.sh'
     revert='scripts/revert_to_stock_cv1835.sh'
-    post_image='br2_external_dcentos/board/cvitek/cv1835-s19jpro/post-image.sh'
-    post_build='br2_external_dcentos/board/cvitek/cv1835-s19jpro/post-build.sh'
     fw_env='br2_external_dcentos/board/cvitek/cv1835-s19jpro/rootfs-overlay/etc/fw_env.config'
 
     require_file "$test_script"
     require_file "$builder"
     require_file "$consumer"
     require_file "$revert"
-    require_file "$post_image"
-    require_file "$post_build"
     require_pattern "$builder" 'exit 78' \
         "$tag: standalone build entry point refuses every artifact lane"
-    require_pattern "$post_build" 'exit 78' \
-        "$tag: direct Buildroot post-build invocation fails closed"
-    require_pattern "$post_image" 'exit 78' \
-        "$tag: direct Buildroot post-image invocation fails closed"
     require_pattern "$consumer" 'exit 78' \
         "$tag: updater exits with an unconditional unavailable status"
     require_pattern "$revert" 'exit 78' \
@@ -4310,7 +4529,7 @@ commit_authority_normalization_check() {
     sw_host_py='scripts/switch_firmware.py'
     runtime_prune="$base/common/prune-runtime-research-tools.sh"
 
-    # Comment-stripped token scan (VERBATIM cvitek_s99upgrade_shadow_check idiom):
+    # Comment-stripped token scan (shared shell token-scan idiom):
     # strip grep's "N:" line-number prefix + leading whitespace, drop comment-only
     # lines, print any remaining match. $1=file, $2=ERE.
     _ca_noncomment_hits() {
@@ -4480,43 +4699,18 @@ commit_authority_normalization_check
 
 #
 # CI-GATE-S99VERIFY-DRIFT ( beta): the post-flash S99verify proof-matrix
-# init script ships as 4 per-overlay copies (zynq, amlogic, cvitek, and
-# beaglebone/am3-bb-s19jpro). Unlike the silicon profiles guarded by
-# check_profiles_drift.sh there is no migration tool that regenerates them, so a
-# hand-edit to one copy can silently drift from the others. This gate ASSERTS
-# THE CURRENT KNOWN-GOOD STATE so future *unintended* drift fails closed,
-# WITHOUT unifying the scripts or changing any boot behavior:
-#
-#   1. CORE-INVARIANT MARKERS: all 4 copies carry the shared V1..V14
-#      proof-matrix contract (run_verify/emit_check/the V1..V14 banner/schema
-#      version=2). Catches an accidentally gutted or truncated copy.
-#   2. REPORT-ONLY COMMIT AUTHORITY: all copies are non-mutating proof
-#      consumers. They must not contain command-position durable boot-state
-#      mutation, while the Zynq copy observes S99upgrade's decision marker.
-#   3. NON-CV NON-ZYNQ EQUIVALENCE MODULO ARCH-FALLBACK: Amlogic and
-#      BeagleBone are byte-identical after stripping only their two sanctioned
-#      `uname -m` BOARD_FAMILY fallback lines. CV1835 is deliberately excluded
-#      from this pair because its evidence-backed V14 result must remain red.
-#   4. CV1835 BUILTIN-VOLATILE EXCEPTION: CV may differ only in its exact
-#      architecture fallback, V14 maturity prose/result, and matching final
-#      report-only comment. Its normalized hash must still equal Amlogic.
-#
-# FINDING (surfaced, NOT forced): CV1835's vendor FIP/BL33 evidence proves a
-# built-in volatile U-Boot environment and a p2 payload selector, not an
-# implemented persistent update/rollback transaction. Treating CV as another
-# positive non-Zynq verifier would make a missing updater look successful.
+# init script ships in Zynq, Amlogic and BeagleBone overlays. Require the
+# shared V1..V14 schema and report-only behavior in all three. Amlogic and
+# BeagleBone differ only in their architecture fallback. The incomplete
+# CV1835 overlay was retired in L17 and has no parity exception.
 #
 s99verify_drift_check() {
     base='br2_external_dcentos/board'
     zynq="$base/zynq/rootfs-overlay/etc/init.d/S99verify"
     aml="$base/amlogic/rootfs-overlay/etc/init.d/S99verify"
-    cvi="$base/cvitek/cv1835-s19jpro/rootfs-overlay/etc/init.d/S99verify"
     bb="$base/beaglebone/am3-bb-s19jpro/rootfs-overlay/etc/init.d/S99verify"
 
-    all="$zynq $aml $cvi $bb"
-    # Keep the ordinary non-Zynq parity set separate from CV1835. CV has an
-    # evidence-backed fail-red BuiltInVolatile maturity contract, checked below
-    # as an exact exception rather than admitted by a broad parity waiver.
+    all="$zynq $aml $bb"
     noncv_nonzynq="$aml $bb"
 
     # Presence — if any copy is missing the rest of the gate cannot reason about
@@ -4602,103 +4796,9 @@ s99verify_drift_check() {
         fi
     fi
 
-    # 4. CV1835 is an explicit evidence-maturity exception, not a general
-    #    parity exemption. Vendor FIP/BL33 evidence identifies BuiltInVolatile
-    #    env plus a p2 payload selector, but no persistent update/rollback
-    #    transaction. Pin the fail-red runtime result and every sanctioned
-    #    textual difference, then normalize only those lines back to the common
-    #    Amlogic form. Any unrelated CV drift still changes the hash and fails.
-    cv_contract_ok=1
-    for marker in \
-        'aarch64|arm64) BOARD_FAMILY="cv1835-s19jpro" ;; # CV1835 overlay fallback' \
-        'persistent update is NOT IMPLEMENTED for the' \
-        'BuiltInVolatile/p2-selector fingerprints.' \
-        'CV1835 has no implemented persistent updater,' \
-        'automatic revert, persistent boot count, or p2 marker-write transaction.' \
-        'emit_check V14 false "CV1835 persistent update NOT IMPLEMENTED: BuiltInVolatile environment is mutation-denied and no p2 marker-write transaction exists"'
-    do
-        count=$(grep -F -c -- "$marker" "$cvi" 2>/dev/null || true)
-        if [ "${count:-0}" -ne 1 ]; then
-            fail "CI-GATE-S99VERIFY-DRIFT: CV1835 evidence-maturity marker must occur exactly once: '$marker' (found ${count:-0})"
-            cv_contract_ok=0
-        fi
-    done
+    # CV1835 is retired. Its former verifier is absent; remaining overlay
+    # parity is checked above and the retirement gate enforces its absence.
 
-    cv_route_count=$(grep -F -c -- 'cv1835*)            PLATFORM="cv1835" ;;' "$cvi" 2>/dev/null || true)
-    if [ "${cv_route_count:-0}" -ne 2 ]; then
-        fail "CI-GATE-S99VERIFY-DRIFT: CV1835 must route to PLATFORM=cv1835 in both detect_platform and run_verify (found ${cv_route_count:-0} exact routes)"
-        cv_contract_ok=0
-    fi
-
-    # Extract only check_upgrade_stage_cleared's cv1835 branch. It must fail
-    # red and return before the generic AM2 env observer. Even read access is
-    # forbidden in this branch: BuiltInVolatile is not persistent authority.
-    cv_v14_branch=$(awk '
-        /^check_upgrade_stage_cleared\(\)[[:space:]]*\{/ { in_function = 1; next }
-        in_function && /^[[:space:]]*cv1835\)[[:space:]]*$/ { in_cv = 1 }
-        in_cv { print }
-        in_cv && /^[[:space:]]*;;[[:space:]]*$/ { exit }
-    ' "$cvi")
-    cv_branch_count=$(printf '%s\n' "$cv_v14_branch" | grep -cE '^[[:space:]]*cv1835\)[[:space:]]*$' 2>/dev/null || true)
-    if [ "${cv_branch_count:-0}" -ne 1 ] || \
-       ! printf '%s\n' "$cv_v14_branch" | grep -F 'emit_check V14 false "CV1835 persistent update NOT IMPLEMENTED: BuiltInVolatile environment is mutation-denied and no p2 marker-write transaction exists"' >/dev/null 2>&1 || \
-       ! printf '%s\n' "$cv_v14_branch" | grep -Eq '^[[:space:]]*return[[:space:]]*$'; then
-        fail "CI-GATE-S99VERIFY-DRIFT: CV1835 V14 must fail red as NOT IMPLEMENTED and return before generic env observation"
-        cv_contract_ok=0
-    fi
-    cv_forbidden=$(printf '%s\n' "$cv_v14_branch" | grep -nE 'fw_printenv|fw_setenv|bootcount|bootlimit|dcent_boot_count|emit_check[[:space:]]+V14[[:space:]]+true' 2>/dev/null || true)
-    if [ -n "$cv_forbidden" ]; then
-        fail "CI-GATE-S99VERIFY-DRIFT: CV1835 V14 regained env/bootcount access or falsely reports update support"
-        printf '%s\n' "$cv_forbidden" >&2
-        cv_contract_ok=0
-    fi
-
-    aml_common_hash=$(grep -vE "$arch_strip" "$aml" | sha256sum | awk '{print $1}')
-    cv_common_hash=$(awk '
-        /^[[:space:]]*(armv7l\|arm|aarch64\|arm64)\)/ { next }
-        $0 == "#   V14 upgrade-commit-state   : report the platform updater\047s maturity or" {
-            print "#   V14 upgrade-commit-state   : report the platform upgrader\047s commit state."
-            next
-        }
-        $0 == "#                                commit state. On CV1835 this remains red:" {
-            print "#                                S99verify is a proof consumer and never"
-            next
-        }
-        $0 == "#                                persistent update is NOT IMPLEMENTED for the" {
-            print "#                                mutates U-Boot environment state."
-            next
-        }
-        $0 == "#                                BuiltInVolatile/p2-selector fingerprints." { next }
-        $0 == "# CONTRACT: failures are logged loudly to syslog. S99verify never mutates" {
-            print "# CONTRACT: failures are logged loudly to syslog. S99verify does NOT"
-            next
-        }
-        $0 == "# storage or performs recovery. CV1835 has no implemented persistent updater," {
-            print "# auto-revert -- that authority belongs to S99upgrade / U-Boot bootcount."
-            next
-        }
-        $0 == "# automatic revert, persistent boot count, or p2 marker-write transaction." { next }
-        /^check_upgrade_stage_cleared\(\)[[:space:]]*\{/ { in_upgrade = 1; print; next }
-        in_upgrade && $0 == "        am3-bb)" { print "        am3-bb|cv1835)"; next }
-        in_upgrade && $0 == "        cv1835)" { in_cv_v14 = 1; next }
-        in_cv_v14 && $0 == "            ;;" { in_cv_v14 = 0; next }
-        in_cv_v14 { next }
-        in_upgrade && /^# --- main / { in_upgrade = 0 }
-        $0 == "        # is report-only and never performs update commit or automatic revert." {
-            print "        # does NOT auto-revert -- that authority belongs to S99upgrade /"
-            print "        # U-Boot bootcount per QA report Q2 contract."
-            next
-        }
-        { print }
-    ' "$cvi" | sha256sum | awk '{print $1}')
-    if [ "$cv_common_hash" != "$aml_common_hash" ]; then
-        fail "CI-GATE-S99VERIFY-DRIFT: CV1835 drift exceeds the exact BuiltInVolatile V14 exception (normalized sha256 $cv_common_hash != common $aml_common_hash)"
-        cv_contract_ok=0
-    fi
-
-    if [ "$cv_contract_ok" -eq 1 ]; then
-        pass "CI-GATE-S99VERIFY-DRIFT: CV1835 differs only by the exact fail-red BuiltInVolatile/p2-selector V14 contract (normalized sha256 $cv_common_hash)"
-    fi
 }
 s99verify_drift_check
 
@@ -4974,9 +5074,9 @@ else
     fail 'BM1491/L9 ledger: source modules, scaffold boundaries, fail-closed authority, or CI execution drifted'
 fi
 if run_python_script scripts/test_bm1396_x17_ledger_convergence.py -q >/dev/null 2>&1; then
-    pass 'BM1396/X17 ledger: ten offline contracts, recovery-symbol isolation, no-driver boundary, and CI execution stay converged'
+    pass 'BM1396/X17 ledger: historical contracts, explicit native extension, recovery isolation, unregistered generic driver, and CI execution stay converged'
 else
-    fail 'BM1396/X17 ledger: source modules, recovery isolation, live-driver refusal, or CI execution drifted'
+    fail 'BM1396/X17 ledger: source modules, recovery isolation, generic driver registration, or CI execution drifted'
 fi
 if run_python_script scripts/test_bm1391_s15_t15_ledger_convergence.py -q >/dev/null 2>&1; then
     pass 'BM1391/S15/T15 ledger: seven offline contracts, all-operation scaffold refusal, and CI execution stay converged'
@@ -5229,9 +5329,9 @@ if [ -f "$base/skus.conf" ]; then
         'hw-acceptance: external-media AM3-BB and every ephemeral runtime suppress persistent capability publication'
     require_pattern 'dcentrald/dcentrald/src/main.rs' 'skipping persistent verify-bundle capability publication for non-persistent runtime' \
         'hw-acceptance: capability suppression is explicitly observable'
-    procedure='../../docs/dev/2026-07-02-antminer-production-readiness/hw-procedures/BP-AM3-BB-GPIO59-WATCHDOG.md'
+    procedure='../../docs/dev/2026-07-02-antminer-production-readiness/hw-procedures/BP-AM3-BB-PSU65-WATCHDOG.md'
     require_file "$procedure"
-    require_pattern "$procedure" 'AM3_BB_GPIO59_WATCHDOG_ACCEPTANCE_OK' \
+    require_pattern "$procedure" 'AM3_BB_PSU65_WATCHDOG_ACCEPTANCE_OK' \
         'hw-acceptance: AM3-BB procedure defines the exact reviewed completion sentinel'
     require_pattern "$procedure" 'External media or `/tmp` runtime only' \
         'hw-acceptance: AM3-BB procedure keeps NAND and boot-environment writes out of scope'
@@ -5361,6 +5461,13 @@ secret_debug_log_class_check
 # its own OTA (a bricked update path). The self-test skips cleanly if openssl/od
 # are unavailable, so this stays green on a minimal host.
 key_ceremony_selftest_check() {
+    require_file 'scripts/release_host_tools.py'
+    require_file 'scripts/test_release_host_tools.py'
+    if python3 scripts/test_release_host_tools.py --host-platform >/dev/null 2>&1; then
+        pass "release host tools: host-specific OpenSSL selection and path tests"
+    else
+        fail "release host tools: host-specific OpenSSL selection/path test failed"
+    fi
     require_file 'scripts/generate_release_keypair.sh'
     require_file 'scripts/verify_release_keypair.sh'
     require_file 'scripts/test_verify_release_keypair.sh'
@@ -5589,6 +5696,16 @@ release_capsule_primitives_check() {
     require_file 'scripts/release_capsule_target_policy.py'
     require_file 'scripts/test_release_capsule_target_policy.py'
     require_file 'scripts/test_release_capsule_target_policy.sh'
+    require_file 'scripts/release_train.py'
+    require_file 'scripts/test_release_train.py'
+    require_file 'scripts/test_release_train.sh'
+    require_file 'scripts/release_producer_evidence.py'
+    require_file 'scripts/test_release_producer_evidence.py'
+    if python3 scripts/test_release_producer_evidence.py; then
+        pass "current producer exact-set audit rejects extra, missing, foreign, and unsealed members"
+    else
+        fail "current producer exact-set audit regressed"
+    fi
     require_file 'scripts/portable_release_evidence.py'
     require_file 'scripts/test_portable_release_evidence.py'
     require_file 'scripts/test_portable_release_evidence.sh'
@@ -5598,7 +5715,14 @@ release_capsule_primitives_check() {
     require_file 'scripts/release_set_publication.py'
     require_file 'scripts/test_release_set_publication.py'
     require_file 'scripts/test_release_set_publication.sh'
+    require_file 'scripts/test_host_path_text.py'
+    require_file 'scripts/test_host_path_text.sh'
 
+    if sh 'scripts/test_host_path_text.sh' >/dev/null 2>&1; then
+        pass "MSYS host-path normalization boundaries hold across all release tools"
+    else
+        fail "MSYS host-path normalization boundary behavior regressed"
+    fi
     if sh 'scripts/test_release_invocation.sh' >/dev/null 2>&1; then
         pass "release invocation identities are unique, capability-owned, and explicitly GC-gated"
     else
@@ -5635,6 +5759,11 @@ release_capsule_primitives_check() {
         pass "release-capsule targets use one exact fail-closed identity policy"
     else
         fail "release-capsule target admission policy regressed"
+    fi
+    if bash 'scripts/test_release_train.sh' >/dev/null 2>&1; then
+        pass "release train composes frozen capsule policy with live admission rings and refuses Denied publishes"
+    else
+        fail "release-train admission/publish-posture boundary regressed"
     fi
     if sh 'scripts/test_source_snapshot.sh' >/dev/null 2>&1; then
         pass "source snapshots materialize exact Git-object bytes outside the live worktree"
@@ -5793,20 +5922,20 @@ source_closure_check() {
         'source_closure.py" generate' \
         'all Docker image producers emit a source-closure receipt'
     require_pattern '../../.github/workflows/dcentos-image-smoke.yml' \
-        'portable_release_evidence.py verify' \
+        'release_producer_evidence.py verify-cohort' \
         'S9 image smoke reauthenticates closure, receipts, inputs, and artifacts after capsule cleanup'
     require_pattern '../../.github/workflows/dcentos-image-smoke.yml' \
-        'portable-release-evidence.json.sig' \
-        'S9 image smoke requires the signed portable exact-set index'
-    require_pattern '../../.github/workflows/dcentos-image-smoke.yml' \
-        '.dcent-release-set.json' \
-        'S9 image smoke requires the final sealed release-set descriptor'
+        'scripts/release_producer.py verify-cohort-result' \
+        'Zynq image smoke authenticates each exact signed producer result'
+    require_pattern 'scripts/release_producer_evidence.py' \
+        'release_set_publication.DESCRIPTOR_NAME' \
+        'producer evidence verifies the final sealed release-set descriptor'
     require_pattern '../../.github/workflows/dcentos-image-smoke.yml' \
         '${{ runner.temp }}/dcentos-image-smoke-${{ github.run_id }}-${{ github.run_attempt }}/releases/' \
         'S9 image smoke uploads the atomic published directory instead of a hand-picked flat sidecar subset'
     require_pattern '../../.github/workflows/dcentos-image-smoke.yml' \
-        'AM2 package smoke: intentionally unavailable' \
-        'AM2 image-smoke source-closure coverage remains explicitly blocked until an AM2 capsule exists'
+        '--producer s9 --producer am2-s19jpro' \
+        'AM2 source-closure audit consumes its exact selected producer result'
 }
 source_closure_check
 
@@ -5902,11 +6031,11 @@ rust_dependency_inventory_check() {
         '--artifact "$RUST_INVENTORY_PATH"' \
         'source-closure receipt binds the Rust dependency inventory'
     require_pattern '../../.github/workflows/dcentos-image-smoke.yml' \
-        'portable_release_evidence.py verify' \
-        'S9 image smoke verifies the closure-bound Rust inventory through portable capsule evidence'
+        'release_producer_evidence.py verify-cohort' \
+        'S9 image smoke verifies the closure-bound Rust inventory through retained producer source evidence'
     require_pattern '../../.github/workflows/dcentos-image-smoke.yml' \
-        'AM2 package smoke: intentionally unavailable' \
-        'AM2 Rust-inventory workflow coverage is not claimed without an admitted capsule'
+        '--producer s9 --producer am2-s19jpro' \
+        'AM2 closure-bound Rust inventory is audited with its selected producer result'
 }
 rust_dependency_inventory_check
 
@@ -6016,6 +6145,22 @@ runtime_hardware_ownership_check() {
     fi
 }
 runtime_hardware_ownership_check
+
+# Image-content leak gate (2026-10-06): release rootfs images must not carry
+# internal lab/workspace details. The common post-build prune runs the scanner
+# over every RELEASE TARGET_DIR; this host check keeps the scanner, its
+# planted-leak fixtures, and the shipped source overlays themselves clean.
+image_content_leak_gate_check() {
+    require_file 'scripts/image_content_leak_scan.py'
+    require_file 'scripts/test_image_content_leak_scan.py'
+    require_pattern 'br2_external_dcentos/board/common/prune-runtime-research-tools.sh' 'image_content_leak_scan.py' 'common release prune runs the image-content leak scanner'
+    if python3 'scripts/test_image_content_leak_scan.py' >/dev/null 2>&1; then
+        pass 'IMAGE-LEAK: scanner fails planted leaks, passes clean rootfs, and shipped overlays are leak-free'
+    else
+        fail 'IMAGE-LEAK: image-content leak scanner or shipped overlay cleanliness regressed'
+    fi
+}
+image_content_leak_gate_check
 
 # Recovery-feature manifest/source gate (guarantee #2 from the .74/.139 incident).
 # Historical protocol research remains feature-gated inside library crates.
@@ -6151,12 +6296,12 @@ ce026_reverse_ab_and_am2_first_install_boundary_check() {
         "$tag CI-WIRING: workflow asserts the am1-s9 reverse sentinel"
     require_pattern "$workflow" "grep -q 'OFFLINE_FIRST_INSTALL_PROOF_OK target=am1-s9'" \
         "$tag CI-WIRING: workflow asserts the am1-s9 first-install sentinel"
-    require_pattern "$workflow" 'AM2 nandsim: intentionally unavailable' \
-        "$tag CI-WIRING: workflow reports AM2 nandsim as unavailable without a capsule"
-    require_pattern "$workflow" 'No AM2 nandsim, first-install, OTA-parser, boot, or mining claim is made by this run.' \
-        "$tag CI-WIRING: workflow explicitly bounds the missing AM2 dynamic claims"
-    reject_pattern "$workflow" "grep -q 'OFFLINE_NANDSIM_PROOF_OK target=am2-s19jpro direction=reverse'" \
-        "$tag CI-WIRING: workflow does not assert an AM2 reverse proof it cannot build"
+    require_pattern "$workflow" '--producer s9 --producer am2-s19jpro' \
+        "$tag CI-WIRING: workflow builds the exact S9 and AM2 producer cohort"
+    require_pattern "$workflow" '--s19jpro-package "$DCENT_AM2_NANDSIM_PACKAGE"' \
+        "$tag CI-WIRING: workflow consumes the exact verified AM2 artifact"
+    require_pattern "$workflow" "grep -q 'OFFLINE_NANDSIM_PROOF_OK target=am2-s19jpro direction=reverse'" \
+        "$tag CI-WIRING: workflow requires the actual AM2 reverse proof"
     reject_pattern "$workflow" "grep -q 'OFFLINE_FIRST_INSTALL_PROOF_OK target=am2-s19jpro'" \
         "$tag CI-WIRING: workflow does not assert an AM2 first-install proof it cannot build"
 }
@@ -6436,7 +6581,7 @@ sim_hal_evidence_contract_gates() {
         'sh ../scripts/run_exact_cargo_test.sh psu::tests::cancellable_heartbeat_stops_during_retry_flush_before_second_read --locked -p dcentrald-hal --lib' \
         'CI: APW heartbeat cancellation stops a retry flush before its second service read'
     require_pattern "$sim_workflow" \
-        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::bm1398_native_route_fails_closed_before_optional_hardware_observation --locked -p dcentrald --bin dcentrald' \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::bm1398_native_route_consumes_exact_admission_before_generic_hardware --locked -p dcentrald --bin dcentrald' \
         'CI: BM1398 native route fails closed before optional EEPROM observation without exact physical identity'
     require_pattern "$sim_workflow" \
         'sh ../scripts/run_exact_cargo_test.sh am2_bm1362_serial_admission::tests::exact_am2_zynq_bm1362_direct_serial_composition_is_admitted --locked -p dcentrald --bin dcentrald' \
@@ -6958,6 +7103,9 @@ sim_hal_evidence_contract_gates() {
         'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::s19k_wrap_epoch_advances_only_in_physical_commit_consumer --locked -p dcentrald --bin dcentrald' \
         'CI: S19k wrap epoch advances only in the physical-commit consumer'
     require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::s19k_stale_epoch_commit_retires_under_present_authority --locked -p dcentrald --bin dcentrald' \
+        'CI: S19k stale-epoch commit retires under present authority'
+    require_pattern "$sim_workflow" \
         'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::track1_live_identity_command_is_bounded_and_reaps_a_hung_probe --locked -p dcentrald --bin dcentrald' \
         'CI: Track-1 live-identity command is bounded and reaps a hung probe'
     require_pattern "$sim_workflow" \
@@ -6979,11 +7127,26 @@ sim_hal_evidence_contract_gates() {
         'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::bm1366_native_post_baud_admission_requires_exact_host_pair_and_fresh_geometry --locked -p dcentrald --bin dcentrald' \
         'CI: native BM1366 post-baud admission requires the exact host pair and fresh geometry'
     require_pattern "$sim_workflow" \
-        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::bm1366_native_route_is_default_off_then_evidence_joined --locked -p dcentrald --bin dcentrald' \
-        'CI: native BM1366 route is default-off and evidence-joined'
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::bm1366_native_route_requires_configured_request_then_evidence_joined --locked -p dcentrald --bin dcentrald' \
+        'CI: native BM1366 route is configured and evidence-joined'
     require_pattern "$sim_workflow" \
         'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::s19k_native_cold_start_opt_in_is_strict_and_never_the_token_issuer --locked -p dcentrald --bin dcentrald' \
         'CI: S19k native cold-start opt-in is strict and cannot issue authority'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::s19k_native_configured_dispatch_needs_no_extra_environment_flag --locked -p dcentrald --bin dcentrald' \
+        'CI: S19k native identity s19k_native_configured_dispatch_needs_no_extra_environment_flag'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::s19k_native_identity::tests::native_identity_decodes_held_page_for_every_nonempty_population --locked -p dcentrald --bin dcentrald' \
+        'CI: S19k native identity native_identity_decodes_held_page_for_every_nonempty_population'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::s19k_native_identity::tests::native_identity_decodes_every_mixed_and_homogeneous_supported_slot_map --locked -p dcentrald --bin dcentrald' \
+        'CI: S19k native identity native_identity_decodes_every_mixed_and_homogeneous_supported_slot_map'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::s19k_native_identity::tests::native_identity_refuses_wrong_controller_population_and_corrupt_pages --locked -p dcentrald --bin dcentrald' \
+        'CI: S19k native identity native_identity_refuses_wrong_controller_population_and_corrupt_pages'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::s19k_native_identity::tests::same_header_bm1366_xp_is_not_an_s19k_board --locked -p dcentrald --bin dcentrald' \
+        'CI: S19k native identity same_header_bm1366_xp_is_not_an_s19k_board'
     require_pattern "$sim_workflow" \
         'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::s19k_native_cooling_pins_all_four_channels_at_2000_rpm --locked -p dcentrald --bin dcentrald' \
         'CI: S19k native cooling pins four channels at the 2000 RPM floor'
@@ -7203,11 +7366,47 @@ sim_hal_evidence_contract_gates() {
         'sh ../scripts/run_exact_cargo_test.sh daemon::work_dispatch_admission_tests::daemon_run_owns_lifecycle_and_admits_before_work_dispatcher --locked -p dcentrald --bin dcentrald' \
         'CI: daemon run owns WorkDispatchLifecycle and admits before WorkDispatcher'
     require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::serial_job_id_steps_and_wrap_match_each_supported_family --locked -p dcentrald --bin dcentrald' \
+        'CI: L08 serial_job_id_steps_and_wrap_match_each_supported_family'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::serial_job_id_rejects_unknown_chips_and_mismatched_xp_dialect --locked -p dcentrald --bin dcentrald' \
+        'CI: L08 serial_job_id_rejects_unknown_chips_and_mismatched_xp_dialect'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::bm1370_job_id_dispatch_cycle_round_trips_all_small_cores --locked -p dcentrald --bin dcentrald' \
+        'CI: L08 bm1370_job_id_dispatch_cycle_round_trips_all_small_cores'
+    require_pattern "$sim_workflow" \
         'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::serial_rolled_version_reconstructs_when_pool_did_not_negotiate_mask --locked -p dcentrald --bin dcentrald' \
         'CI: serial BIP320 rolled version reconstructs without negotiated mask'
     require_pattern "$sim_workflow" \
-        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::serial_rolled_version_accepts_only_negotiated_mask_bits --locked -p dcentrald --bin dcentrald' \
-        'CI: serial BIP320 rolled version accepts only negotiated mask bits'
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::serial_rolled_version_retains_full_field_for_later_pool_admission --locked -p dcentrald --bin dcentrald' \
+        'CI: serial BIP320 retains full field for separate pool admission'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::bm1362_aml_cold_parser_keeps_short_identity_separate_from_assigned_coverage --locked -p dcentrald --bin dcentrald' \
+        'CI: native serial exact contract bm1362_aml_cold_parser_keeps_short_identity_separate_from_assigned_coverage'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::bm1362_aml_native_actual_init_work_and_known_nonce_on_a_and_plus_ptys --locked -p dcentrald --bin dcentrald' \
+        'CI: native serial exact contract bm1362_aml_native_actual_init_work_and_known_nonce_on_a_and_plus_ptys'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::bm1362_aml_runtime_clock_and_hcn_share_all_three_uart_fences --locked -p dcentrald --bin dcentrald' \
+        'CI: native serial exact contract bm1362_aml_runtime_clock_and_hcn_share_all_three_uart_fences'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::bm1366_xp_native_actual_init_work_and_known_nonce_on_xp_and_jxp_ptys --locked -p dcentrald --bin dcentrald' \
+        'CI: native serial exact contract bm1366_xp_native_actual_init_work_and_known_nonce_on_xp_and_jxp_ptys'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::bm1370_native_actual_init_work_and_known_nonce_on_pro_and_xp_ptys --locked -p dcentrald --bin dcentrald' \
+        'CI: native serial exact contract bm1370_native_actual_init_work_and_known_nonce_on_pro_and_xp_ptys'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::s21_native_selected_uart_work_and_genesis_nonce_round_trip --locked -p dcentrald --bin dcentrald' \
+        'CI: native serial exact contract s21_native_selected_uart_work_and_genesis_nonce_round_trip'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::serial_pool_version_checks_both_set_and_cleared_base_bits --locked -p dcentrald --bin dcentrald' \
+        'CI: native serial exact contract serial_pool_version_checks_both_set_and_cleared_base_bits'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::serial_pool_version_genesis_matches_the_actual_v1_wire_header --locked -p dcentrald --bin dcentrald' \
+        'CI: native serial exact contract serial_pool_version_genesis_matches_the_actual_v1_wire_header'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::serial_pool_version_leaves_bm1398_and_s19k_reconstruction_unchanged --locked -p dcentrald --bin dcentrald' \
+        'CI: native serial exact contract serial_pool_version_leaves_bm1398_and_s19k_reconstruction_unchanged'
     require_pattern "$sim_workflow" \
         'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::exact_am2_source_clears_stale_work_when_hash_on_disconnect_is_false --locked -p dcentrald --bin dcentrald' \
         'CI: serial clears stale work when hash_on_disconnect does not cut hash'
@@ -7424,6 +7623,21 @@ sim_hal_evidence_contract_gates() {
     require_pattern "$sim_workflow" \
         'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::serial_night_frequency_midrun_enqueues_pll0_write --locked -p dcentrald --bin dcentrald' \
         'CI: serial night mid-run frequency transition enqueues the bounded PLL0 write'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::active_capacity_frequency_requires_completed_serial_pll_write --locked -p dcentrald --bin dcentrald' \
+        'CI: active capacity changes only after completed serial PLL writes'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::install_custody_is_a_pre_uart_gpio437_only_terminal_composition --locked -p dcentrald --bin dcentrald' \
+        'CI: S19k install custody is a pre-UART GPIO437-only terminal composition'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::install_custody_panic_and_receipt_contracts_remain_cut_only --locked -p dcentrald --bin dcentrald' \
+        'CI: S19k install custody panic and receipt contracts remain cut-only'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::install_custody_receipt_contract_rejects_both_mode_mismatches --locked -p dcentrald --bin dcentrald' \
+        'CI: S19k install custody receipt contract rejects both mode mismatches'
+    require_pattern "$sim_workflow" \
+        'sh ../scripts/run_exact_cargo_test.sh serial_mining::tests::s19k_install_custody_cli_must_match_the_immutable_runtime_binding --locked -p dcentrald --bin dcentrald' \
+        'CI: S19k install custody CLI must match the immutable runtime binding'
     require_pattern "$sim_workflow" \
         'sh ../scripts/run_exact_cargo_test.sh s19j_hybrid_mining::tests::am2_thermal_selection_preserves_effective_source_provenance --locked -p dcentrald --bin dcentrald' \
         'CI: hybrid am2 thermal selection preserves effective source provenance'
@@ -7751,17 +7965,13 @@ require_pattern 'dcentrald/dcentrald-hal/src/psu.rs' \
 # Raw public I2C operations are conservatively terminal-fenced mutations;
 # privileged intent is HAL-internal. Production protocol modules use typed
 # plans or audit-only mutation labels instead of the compatibility transaction.
-if grep -R -n --include='*.rs' --exclude='i2c.rs' '\.transaction(' \
-    dcentrald/dcentrald-hal/src \
-    dcentrald/dcentrald-asic/src \
-    dcentrald/dcentrald/src \
-    >/tmp/dcentos-untyped-i2c-transaction.$$ 2>/dev/null; then
-    fail 'I2C mutation labeling: compatibility transaction call remains in production modules'
-    cat /tmp/dcentos-untyped-i2c-transaction.$$ >&2
-else
+require_file 'scripts/check_i2c_transaction_labeling.py'
+if _dcent_i2c_labeling_output=$(python3 scripts/check_i2c_transaction_labeling.py --self-test 2>&1); then
     pass 'I2C mutation labeling: raw public operations are conservatively fenced; production compound transactions use typed plans or audit labels'
+else
+    printf '%s\n' "$_dcent_i2c_labeling_output" >&2
+    fail 'I2C mutation labeling: compatibility transaction call remains in production modules'
 fi
-rm -f /tmp/dcentos-untyped-i2c-transaction.$$
 
 # Application crates must never regain the ability to select the HAL's
 # authorizing intent or invoke an intent-bearing executor. Keep the scan on
@@ -7994,8 +8204,7 @@ if "$PY" -m py_compile \
    run_python_script scripts/test_s19k_persistent_transaction_verifiers.py -q && \
    run_python_script scripts/test_s19k_board_population_matrix_verify.py -q && \
    run_python_script scripts/test_s19k_gauntlet_workflow.py -q && \
-   run_python_script scripts/s19k_gauntlet_workflow.py verify \
-       --expect-frontier "${DCENT_EXPECT_FRONTIER:-portable-artifact-custody,native-build-reproducibility,native-secure-firmware-re,static-bhb5690x-controller-interface}"; then
+   sh scripts/test_s19k_workflow_checkout.sh; then
     pass 'S19k dynamic workflow: secure-firmware classification, evidence-derived adopted/native/persistent DAG, and bounded expert wave remain fail-closed'
 else
     fail 'S19k dynamic workflow: secure-firmware evidence, campaign DAG, evidence derivation, expert wave, or terminal refusal regressed'
@@ -8240,6 +8449,12 @@ if sh scripts/test_s99verify_v6_board_target.sh >/dev/null 2>&1; then
     pass 'S99verify V6 is board_target-scoped (not all am3-aml = TAS5782M)'
 else
     fail 'S99verify V6 board_target-scoping contract regressed'
+fi
+require_file 'scripts/test_s19kpro_beta_capsule_lane.sh'
+if bash scripts/test_s19kpro_beta_capsule_lane.sh >/dev/null 2>&1; then
+    pass 'S19k Pro beta capsule lane: build-lane target/artifact/signing/DACL invariants are pinned'
+else
+    fail 'S19k Pro beta capsule lane invariants regressed'
 fi
 if python3 scripts/check_test_gate_reachability.py --self-test >/dev/null 2>&1 &&
    python3 scripts/check_test_gate_reachability.py; then

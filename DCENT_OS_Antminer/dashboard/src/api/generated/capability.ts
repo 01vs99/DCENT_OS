@@ -8,13 +8,13 @@ export const CAPABILITY_SCHEMA_VERSION = 3 as const;
 export const RUNTIME_CAPABILITY_VALUES = ['detect', 'inventory', 'monitoring', 'pools-read', 'pools-rw', 'config-read', 'config-rw', 'reboot', 'logs-read', 'backup', 'restore', 'flash-ota', 'flash-otawww', 'nvs-gen', 'settings-patch', 'asic-options', 'statistics', 'identify', 'wifi-scan', 'power-control'] as const;
 export type RuntimeCapability = typeof RUNTIME_CAPABILITY_VALUES[number];
 
-export const INSTALL_CAPABILITY_VALUES = ['auth-ssh', 'root-ssh', 'persistent-install', 'runtime-install', 'restore-verified', 'recovery-staged', 'backup', 'physical-sd-card', 'luxos-uninstall', 'vnish-cgminer-detected', 'target-sysupgrade-first-install-capsule', 'bcb100-accept-unverified', 'http-ota-or-usb-serial', 'manifest-board-match', 'stock-bmu-root-flasher'] as const;
+export const INSTALL_CAPABILITY_VALUES = ['auth-ssh', 'root-ssh', 'persistent-install', 'runtime-install', 'restore-verified', 'recovery-staged', 'backup', 'physical-sd-card', 'luxos-uninstall', 'vnish-cgminer-detected', 'target-sysupgrade-first-install-capsule', 'bcb100-accept-unverified', 'http-ota-or-usb-serial', 'manifest-board-match', 'stock-bmu-root-flasher', 't21-controller-specific-storage-map', 't21-recovery-flag-offset', 't21-write-readback-proof', 't21-rollback-witness', 'bb-nand-first-install-capsule'] as const;
 export type InstallCapability = typeof INSTALL_CAPABILITY_VALUES[number];
 
 export const PLANNER_OUTCOME_VALUES = ['supported', 'ota-supported', 'runtime-only', 'evidence-gap'] as const;
 export type PlannerOutcome = typeof PLANNER_OUTCOME_VALUES[number];
 
-export const PROOF_SCOPE_VALUES = ['exact_target', 'exact_target_lab_only', 'local_artifact_only', 'passthrough_only', 'physical_media_required', 'upload_only_boot_pending'] as const;
+export const PROOF_SCOPE_VALUES = ['exact_target', 'exact_target_lab_only', 'local_artifact_only', 'passthrough_only', 'desk_evidence_only', 'physical_media_required', 'upload_only_boot_pending'] as const;
 export type ProofScope = typeof PROOF_SCOPE_VALUES[number];
 
 export const DEVICE_FAMILY_VALUES = ['antminer', 'esp', 'whatsminer', 'avalon', 'innosilicon', 'unknown'] as const;

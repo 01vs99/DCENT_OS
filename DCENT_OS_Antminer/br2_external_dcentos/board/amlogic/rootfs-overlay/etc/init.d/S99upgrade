@@ -2,32 +2,32 @@
 #
 # S99upgrade - Commit DCENT_OS first-boot recovery flag (am3-aml)
 #
-# `a lab unit` stock-return is recovery-flag 0x02 → recover_to_stock.
+# lab-unit stock-return is recovery-flag 0x02 â†’ recover_to_stock.
 # firstboot WAL is a DCENT companion write, not a second revert arm.
 #
 #   (a) Recovery flag byte at mtd5 LOCAL offset from system.sh
-#       (.78 dmesg physical mtd5 0x06700000 → local 0x04D00000).
+#       (lab-unit dmesg physical mtd5 0x06700000 â†’ local 0x04D00000).
 #       Never default to 0x05300000 (that assumed size-sum 0x06100000).
 #       Values:
 #         0x1  RECOVERY_FLAG_INSTALLED   (host installer)
 #         0x2  RECOVERY_FLAG_FIRST_BOOT  (U-Boot, before kernel handoff)
 #         0x3  RECOVERY_FLAG_SUCCESSFUL  (this script, on healthy boot)
 #       If a reboot happens while flag still = 0x2, U-Boot does NOT
-#       bootm mtd2 stock_system. `a lab unit` bootcmd falls through to
+#       bootm mtd2 stock_system. lab-unit bootcmd falls through to
 #       recover_to_stock (recover_env + nand erase.part nvdata + reset).
 #       We promote 0x2 -> 0x3 only after health checks pass.
 #
 #   (b) U-Boot env `firstboot` is a DCENT S99 WAL companion only.
-#       `a lab unit` bootcmd never reads firstboot. Stock-return is flag 0x02
+#       lab-unit bootcmd never reads firstboot. Stock-return is flag 0x02
 #       -> recover_to_stock. fw_setenv firstboot=0 is not the revert disarm.
 #
 # CRITICAL fail-closed: if libubootenv-tools (fw_setenv/fw_printenv) is
 # missing, log a clear ERROR and exit non-zero. Silent ignore = brick risk
-# ( — this exact bug bricked
+# (see am2 dcentos fw setenv missing rule â€” this exact bug bricked
 # am2 and is being prevented here per O.3 spec).
 #
 # fw_env.config layout used here lives at /etc/fw_env.config and points at
-# /dev/nand_env (Amlogic NAND env chardev, single 64KB instance). Live .78
+# /dev/nand_env (Amlogic NAND env chardev, single 64KB instance). Live lab-unit
 # validation on 2026-04-29 confirmed standard U-Boot env format:
 # CRC32 + null-terminated key=value entries, fw_printenv/fw_setenv compatible.
 #
@@ -37,7 +37,7 @@
 # / loses power / EINTRs, /data/.firstboot-pending remains as a replay
 # intent. On every subsequent boot, replay_pending_env_clear() runs before
 # any recovery-flag check and idempotently re-attempts fw_setenv firstboot=0
-# until it succeeds.
+# until it succeeds. See internal engineering notes
 #
 
 HEALTH_OK=true
@@ -45,7 +45,7 @@ HEALTH_OK=true
 [ -f /lib/functions/system.sh ] && . /lib/functions/system.sh
 
 # Local flag comes from system.sh mtd_device_offset (adds the 6 MiB
-# mtd0→mtd1 hole). Refuse the naive 0x05300000 size-sum pairing.
+# mtd0â†’mtd1 hole). Refuse the naive 0x05300000 size-sum pairing.
 RECOVERY_FLAG_OFFSET=${DCENTOS_LOCAL_RECOVERY_FLAGS_OFFSET:-}
 if [ -z "$RECOVERY_FLAG_OFFSET" ]; then
     echo "ERROR: S99upgrade: DCENTOS_LOCAL_RECOVERY_FLAGS_OFFSET unset; refuse naive 0x05300000" >&2
@@ -202,8 +202,8 @@ check_health() {
         return
     fi
 
-    # Check 6 (W8 parity — ported from zynq S99upgrade): REAL health verdict.
-    # The socket-bind probes above answer the instant dcentrald binds a port —
+    # Check 6 (W8 parity â€” ported from zynq S99upgrade): REAL health verdict.
+    # The socket-bind probes above answer the instant dcentrald binds a port â€”
     # they do NOT prove the daemon is actually alive+steady. On NoPic Amlogic a
     # bind-then-crash daemon would otherwise be committed permanently, defeating
     # U-Boot first-boot auto-revert (the "defeated by S99" hole).
@@ -257,8 +257,8 @@ check_health() {
 # : OTA-08 is Amlogic-overlay only. Same sealed identities as S37.
 # Missing, unknown, alias, or mixed platform:target identity fails closed
 # before WAL replay or any recovery-flag NAND read/write/erase.
-# : `a lab unit` bootcmd ignores firstboot. Blocking 0x03 on WAL failure
-# leaves 0x02 → recover_to_stock after a healthy S19k boot. Other Amlogic
+# : lab-unit bootcmd ignores firstboot. Blocking 0x03 on WAL failure
+# leaves 0x02 â†’ recover_to_stock after a healthy S19k boot. Other Amlogic
 # identities keep the WAL fail-closed gate.
 s19k_firstboot_is_wal_companion_only() {
     require_amlogic_ota08_identity || return 1
@@ -292,26 +292,31 @@ require_amlogic_ota08_identity() {
 
 require_ota_mutation_policy() {
     POLICY_TARGET=$(tr -d ' \t\r\n' < "$BOARD_TARGET_FILE" 2>/dev/null || true)
-    case "$POLICY_TARGET" in
-        am3-s19k|am3-s19kpro|am3-aml-s19kpro)
-            if [ ! -r "$MUTATION_POLICY_HELPER" ]; then
-                echo "  *** ERROR: S19k mutation-policy helper is missing; refuse OTA/recovery mutation ***"
-                return 1
-            fi
-            . "$MUTATION_POLICY_HELPER"
-            if ! dcent_mutation_policy_has "$MUTATION_POLICY_FILE" ota-storage; then
-                echo "  *** ERROR: S19k ota-storage capability is missing or insecure; refuse OTA/recovery mutation ***"
-                return 1
-            fi
-            return 0
+    POLICY_PLATFORM=$(tr -d ' \t\r\n' < "$PLATFORM_FILE" 2>/dev/null || true)
+    case "$POLICY_PLATFORM:$POLICY_TARGET" in
+        am3-aml-s19jproa:*|*:am3-s19jproa|am3-aml-s19jproplus:*|*:am3-s19jproplus)
+            echo "  *** ERROR: A126/Plus120 nvdata image does not admit legacy OTA-08 environment/NAND commits ***"
+            return 1
             ;;
     esac
-    [ -e "$MUTATION_POLICY_FILE" ] || return 0
-    POLICY=$(tr -d ' \t\r\n' < "$MUTATION_POLICY_FILE" 2>/dev/null || true)
-    [ "$POLICY" = hardware-enabled ] || {
-        echo "  *** ERROR: mutation_policy='$POLICY'; refuse OTA/recovery mutation ***"
+    case "$POLICY_TARGET" in
+        am3-s19jpro-aml)
+            # This candidate mounts the exact seven-partition nvdata layout.
+            # The legacy system-partition flag/WAL is a different contract;
+            # neither an inherited pending file nor missing policy admits it.
+            echo "  *** ERROR: Classic AML nvdata image does not admit legacy OTA-08 environment/NAND commits ***"
+            return 1
+            ;;
+    esac
+    if [ ! -r "$MUTATION_POLICY_HELPER" ]; then
+        echo "  *** ERROR: mutation-policy helper is missing; refuse OTA/recovery mutation ***"
         return 1
-    }
+    fi
+    . "$MUTATION_POLICY_HELPER"
+    if ! dcent_mutation_policy_has "$MUTATION_POLICY_FILE" ota-storage; then
+        echo "  *** ERROR: ota-storage capability is missing or insecure; refuse OTA/recovery mutation ***"
+        return 1
+    fi
 }
 
 read_recovery_flag() {
@@ -524,7 +529,7 @@ commit_recovery_flag() {
 
 clear_uboot_env() {
     # Best-effort: clear the AML first-boot guard after recovery-flag commit.
-    # Live .78 U-Boot env uses `firstboot` (not `first_boot`).
+    # Live lab-unit U-Boot env uses `firstboot` (not `first_boot`).
     #
     #  B2: idempotent. Safe to call multiple times. If firstboot is
     # already 0, returns success without re-writing. The caller manages the
@@ -607,7 +612,7 @@ clear_firstboot_pending() {
 replay_pending_env_clear() {
     # Called FIRST in the start case. If a previous boot crashed between
     # commit_recovery_flag and clear_uboot_env, $FIRSTBOOT_PENDING_FILE
-    # exists and we owe a fw_setenv firstboot=0. Idempotent — safe to
+    # exists and we owe a fw_setenv firstboot=0. Idempotent â€” safe to
     # invoke whether or not the file exists.
     [ -f "$FIRSTBOOT_PENDING_FILE" ] || return 0
     echo "[WAL] $FIRSTBOOT_PENDING_FILE present - replaying firstboot=0 commit"
@@ -628,7 +633,7 @@ case "$1" in
         # later recovery-flag commit.
         require_ota_mutation_policy || exit 1
         if [ ! -e "$RECOVERY_MTD" ]; then
-            # No mtd5 — not on Amlogic NAND. Nothing to do.
+            # No mtd5 â€” not on Amlogic NAND. Nothing to do.
             exit 0
         fi
         require_amlogic_ota08_identity || exit 1
@@ -686,13 +691,13 @@ case "$1" in
                 clear_firstboot_pending
                 ;;
             0x03)
-                # Already committed — normal boot, nothing to do.
+                # Already committed â€” normal boot, nothing to do.
                 exit 0
                 ;;
             0x01)
                 # InstallArm leftover. U-Boot try_to_boot_bos_after_install
                 # must write 0x02 before kernel handoff so first-boot revert
-                # is armed. Do not promote 0x01 → 0x03 (skips health + WAL).
+                # is armed. Do not promote 0x01 â†’ 0x03 (skips health + WAL).
                 echo "  *** ERROR: recovery flag = 0x01 (INSTALLED) leftover in userspace; U-Boot did not write 0x02; refuse OTA-08 ***"
                 exit 1
                 ;;

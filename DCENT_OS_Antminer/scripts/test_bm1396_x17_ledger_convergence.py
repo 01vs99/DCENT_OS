@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin the BM1396/X17 source, ledger, no-driver, and CI contract."""
+"""Pin the historical BM1396 ledger and explicit current native extension."""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ EXPECTED_MODULES = {
     "bm1396_work",
     "bm1396_work_binding",
 }
+CURRENT_NATIVE_EXTENSIONS = {"bm1396_s17e_factory"}
 
 EXPECTED_TESTS = {
     "Windows: py -3 -m pytest -q test_x17_amtc_evidence.py --rootdir=. from tools/ (12/12 held corpus)",
@@ -55,14 +56,18 @@ class Bm1396X17LedgerConvergenceTests(unittest.TestCase):
 
     def test_ledger_tracks_every_bm1396_contract_module_exactly(self) -> None:
         source_modules = {path.stem for path in COMMON_SRC.glob("bm1396_*.rs")}
-        self.assertEqual(source_modules, EXPECTED_MODULES)
+        # The archived ten-module acceptance is not rewritten to claim tests
+        # of the later S17e owner. Current source permits exactly that explicit
+        # extension; current admission and native-owner tests qualify its use.
+        self.assertEqual(source_modules, EXPECTED_MODULES | CURRENT_NATIVE_EXTENSIONS)
         self.assertEqual(set(self.entry["offline_contract_modules"]), EXPECTED_MODULES)
 
     def test_every_contract_module_is_compile_exported_and_anchored(self) -> None:
         lib_rs = (COMMON_SRC / "lib.rs").read_text(encoding="utf-8")
         anchor = self.entry["dcentos_anchor"]
-        for module in sorted(EXPECTED_MODULES):
+        for module in sorted(EXPECTED_MODULES | CURRENT_NATIVE_EXTENSIONS):
             self.assertIn(f"pub mod {module};", lib_rs)
+        for module in sorted(EXPECTED_MODULES):
             self.assertIn(f"{module}.rs", anchor)
         self.assertIn("drivers/bm1396.rs", anchor)
 
@@ -85,14 +90,22 @@ class Bm1396X17LedgerConvergenceTests(unittest.TestCase):
             self.assertIn(needle, row)
 
     def test_live_driver_remains_absent_and_protocol_wrapper_non_authorizing(self) -> None:
+        # Re-pinned 2026-09-12 (R06 wave-1 landing, V01-confirmed): the driver
+        # now CARRIES an evidence-cited `impl ChipDriver for Bm1396Driver`
+        # whose carrier-bound methods (init_chain/set_frequency/send_work/
+        # set_voltage) REFUSE, naming the retained HAL owner
+        # (`stock_bm1396::Transport`) and the 0x52 job-packet + DDR-DMA spine.
+        # The load-bearing invariant is unchanged and stays pinned here:
+        # `ChipRegistry::detect(0x1396)` remains None and the registry never
+        # registers the driver (anti-BM1397-aliasing PR-056 pin below).
         helper = (ASIC_DRIVERS / "bm1396.rs").read_text(encoding="utf-8")
         registry = (ASIC_DRIVERS / "mod.rs").read_text(encoding="utf-8")
         for needle in (
-            "intentionally does not implement `ChipDriver`",
-            "falls through",
-            "ChipRegistry::detect()` to `None`",
-            "protocol_recovery_does_not_register_a_live_driver",
-            'concat!("impl Chip", "Driver for Bm1396Driver")',
+            "impl ChipDriver for Bm1396Driver",
+            "CARRIER_REFUSAL",
+            "WORK_TX_REFUSAL",
+            "stock_bm1396::Transport",
+            "Promotion status: this `impl ChipDriver` is NOT regi",
         ):
             self.assertIn(needle, helper)
         self.assertNotIn("register(Box::new(bm1396::Bm1396Driver", registry)

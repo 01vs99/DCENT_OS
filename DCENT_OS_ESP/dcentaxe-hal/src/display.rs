@@ -2,6 +2,22 @@
 //!
 //! When `display-ssd1306` feature is active: full SSD1306 OLED driver (128x32, I2C).
 //! When `display-none` feature is active: no-op stub with the same API (headless boards).
+//!
+//! This file is the I2C **transport** only. Every routine that decides which
+//! pixels are set — the 5x7 font, the glyph blitter, text/centred-text layout,
+//! the bitmap / sparkline / progress-bar helpers, the XOR rectangle and the
+//! notification queue's ordering rules — lives in the host-pure
+//! [`crate::display_convert`] module so it can be executed, rendered to PNG and
+//! asserted in the host test gate with no hardware. Same split as
+//! `tmp451_convert.rs`/`tmp451.rs` and `pca9544_convert.rs`/`pca9544.rs`.
+//!
+//! The public API of `Ssd1306Display` is unchanged by that split, and
+//! `display_convert`'s differential tests pin every drawing routine
+//! byte-for-byte against the pre-split implementation.
+
+// The notification record is shared by both variants so a `display-none` board
+// and an SSD1306 board cannot drift apart on the queue's data shape.
+pub use crate::display_convert::OledNotification;
 
 // ============================================================================
 // Headless stub — all display calls become no-ops, saves ~20KB flash
@@ -10,19 +26,10 @@
 mod headless {
     use crate::i2c::I2cBus;
 
-    #[derive(Debug, Clone)]
-    pub struct OledNotification {
-        pub line0: String,
-        pub line1: String,
-        pub line2: String,
-        pub line3: String,
-        pub urgent: bool,
-    }
-
     pub struct Ssd1306Display {
         pub initialized: bool,
         pub inverted: bool,
-        pub notifications: Vec<OledNotification>,
+        pub notifications: Vec<super::OledNotification>,
     }
 
     impl Ssd1306Display {
@@ -89,18 +96,13 @@ pub use headless::*;
 // Full SSD1306 OLED driver
 // ============================================================================
 #[cfg(feature = "display-ssd1306")]
+use crate::display_convert::{FrameBuffer, PAGES, WIDTH};
+#[cfg(feature = "display-ssd1306")]
 use crate::i2c::{I2cBus, I2cError};
 
 #[cfg(feature = "display-ssd1306")]
 /// SSD1306 I2C address (0x3C is standard for BitAxe OLED)
 const SSD1306_ADDR: u8 = 0x3C;
-
-#[cfg(feature = "display-ssd1306")]
-const WIDTH: usize = 128;
-#[cfg(feature = "display-ssd1306")]
-const HEIGHT: usize = 32;
-#[cfg(feature = "display-ssd1306")]
-const PAGES: usize = HEIGHT / 8;
 
 #[cfg(feature = "display-ssd1306")]
 const CMD_SINGLE: u8 = 0x00;
@@ -110,19 +112,10 @@ const CMD_STREAM: u8 = 0x00;
 const DATA_STREAM: u8 = 0x40;
 
 #[cfg(feature = "display-ssd1306")]
-#[derive(Debug, Clone)]
-pub struct OledNotification {
-    pub line0: String,
-    pub line1: String,
-    pub line2: String,
-    pub line3: String,
-    pub urgent: bool,
-}
-
-#[cfg(feature = "display-ssd1306")]
 pub struct Ssd1306Display {
-    /// Framebuffer: 4 pages of 128 bytes each (1 bit per pixel, column-major)
-    framebuf: [u8; WIDTH * PAGES],
+    /// Framebuffer: 4 pages of 128 bytes each (1 bit per pixel, column-major).
+    /// All drawing lives in the host-pure `display_convert::FrameBuffer`.
+    framebuf: FrameBuffer,
     /// Whether the display was successfully initialized
     pub initialized: bool,
     /// Whether the display is flipped 180 degrees
@@ -136,7 +129,7 @@ impl Ssd1306Display {
     /// Create a new display instance (uninitialized).
     pub fn new() -> Self {
         Self {
-            framebuf: [0; WIDTH * PAGES],
+            framebuf: FrameBuffer::new(),
             initialized: false,
             inverted: false,
             notifications: Vec::new(),
@@ -149,21 +142,7 @@ impl Ssd1306Display {
         if !self.initialized {
             return;
         }
-        // Keep newest normal events, but never let them bury IP/hashrate/block pages.
-        if self.notifications.len() >= 3 {
-            if let Some(pos) = self.notifications.iter().position(|notif| !notif.urgent) {
-                self.notifications.remove(pos);
-            } else {
-                return;
-            }
-        }
-        self.notifications.push(OledNotification {
-            line0: line0.to_string(),
-            line1: line1.to_string(),
-            line2: line2.to_string(),
-            line3: line3.to_string(),
-            urgent: false,
-        });
+        crate::display_convert::push_normal(&mut self.notifications, line0, line1, line2, line3);
     }
 
     /// Push an urgent notification that preempts position 0 in the queue.
@@ -172,26 +151,12 @@ impl Ssd1306Display {
         if !self.initialized {
             return;
         }
-        let notif = OledNotification {
-            line0: line0.to_string(),
-            line1: line1.to_string(),
-            line2: line2.to_string(),
-            line3: line3.to_string(),
-            urgent: true,
-        };
-        self.notifications.insert(0, notif);
-        // Trim excess from the back (drop gamification, keep safety)
-        while self.notifications.len() > 5 {
-            self.notifications.pop();
-        }
+        crate::display_convert::push_urgent(&mut self.notifications, line0, line1, line2, line3);
     }
 
     /// Whether an urgent notification is waiting at the front of the queue.
     pub fn has_urgent_notification(&self) -> bool {
-        self.notifications
-            .first()
-            .map(|notif| notif.urgent)
-            .unwrap_or(false)
+        crate::display_convert::has_urgent(&self.notifications)
     }
 
     /// Check if there's a pending notification. If so, display it and remove it.
@@ -201,8 +166,7 @@ impl Ssd1306Display {
             self.notifications.clear();
             return false;
         }
-        if let Some(notif) = self.notifications.first().cloned() {
-            self.notifications.remove(0);
+        if let Some(notif) = crate::display_convert::take_next(&mut self.notifications) {
             self.show_status(i2c, &notif.line0, &notif.line1, &notif.line2, &notif.line3);
             true
         } else {
@@ -277,7 +241,7 @@ impl Ssd1306Display {
 
     /// Clear the framebuffer (all pixels off).
     pub fn clear(&mut self) {
-        self.framebuf.fill(0);
+        self.framebuf.clear();
     }
 
     /// Flush the entire framebuffer to the display over I2C.
@@ -292,11 +256,9 @@ impl Ssd1306Display {
 
         // Send framebuffer data page by page (I2C max transaction ~128 bytes safe)
         for page in 0..PAGES {
-            let start = page * WIDTH;
-            let end = start + WIDTH;
             let mut buf = [0u8; WIDTH + 1];
             buf[0] = DATA_STREAM;
-            buf[1..].copy_from_slice(&self.framebuf[start..end]);
+            buf[1..].copy_from_slice(self.framebuf.page(page));
             i2c.write(SSD1306_ADDR, &buf)?;
         }
 
@@ -305,93 +267,40 @@ impl Ssd1306Display {
 
     /// Draw a character at pixel position (x, y) using the built-in 5x7 font.
     /// y should be 0, 8, 16, or 24 for the 4 text rows.
+    ///
+    /// Kept (private, as it has always been) so this variant's method set stays
+    /// aligned with the `display-none` stub's, which exposes `draw_char`
+    /// publicly. That asymmetry predates this lane and is left for an O lane to
+    /// resolve; removing the method here would widen it rather than close it.
+    #[allow(dead_code)]
     fn draw_char(&mut self, x: usize, y: usize, ch: char) {
-        let idx = ch as usize;
-        let glyph = if idx >= 32 && idx < 128 {
-            &FONT_5X7[idx - 32]
-        } else {
-            &FONT_5X7[0] // space for unknown chars
-        };
-
-        let page = y / 8;
-        let bit_offset = y % 8;
-
-        for col in 0..5 {
-            let px = x + col;
-            if px >= WIDTH {
-                break;
-            }
-
-            let col_data = glyph[col];
-
-            if bit_offset == 0 {
-                // Aligned to page boundary — fast path
-                if page < PAGES {
-                    self.framebuf[page * WIDTH + px] |= col_data;
-                }
-            } else {
-                // Spans two pages
-                if page < PAGES {
-                    self.framebuf[page * WIDTH + px] |= col_data << bit_offset;
-                }
-                if page + 1 < PAGES {
-                    self.framebuf[(page + 1) * WIDTH + px] |= col_data >> (8 - bit_offset);
-                }
-            }
-        }
+        self.framebuf.draw_char(x, y, ch);
     }
 
     /// Draw a text string at pixel position (x, y).
     /// Characters are 6px wide (5px glyph + 1px spacing).
     pub fn draw_text(&mut self, x: usize, y: usize, text: &str) {
-        let mut cx = x;
-        for ch in text.chars() {
-            if cx + 5 > WIDTH {
-                break;
-            }
-            self.draw_char(cx, y, ch);
-            cx += 6; // 5px char + 1px gap
-        }
+        self.framebuf.draw_text(x, y, text);
     }
 
     /// Draw centered text on a given row (y = 0, 8, 16, or 24).
     pub fn draw_centered(&mut self, y: usize, text: &str) {
-        let text_width = text.len() * 6;
-        let x = if text_width < WIDTH {
-            (WIDTH - text_width) / 2
-        } else {
-            0
-        };
-        self.draw_text(x, y, text);
+        self.framebuf.draw_centered(y, text);
     }
 
     /// Set a single pixel in the framebuffer.
     pub fn set_pixel(&mut self, x: usize, y: usize, on: bool) {
-        if x >= WIDTH || y >= HEIGHT {
-            return;
-        }
-        let page = y / 8;
-        let bit = y % 8;
-        let idx = page * WIDTH + x;
-        if on {
-            self.framebuf[idx] |= 1 << bit;
-        } else {
-            self.framebuf[idx] &= !(1 << bit);
-        }
+        self.framebuf.set_pixel(x, y, on);
     }
 
     /// Draw a horizontal line from (x, y) for `len` pixels.
     pub fn draw_hline(&mut self, x: usize, y: usize, len: usize) {
-        for i in 0..len {
-            self.set_pixel(x + i, y, true);
-        }
+        self.framebuf.draw_hline(x, y, len);
     }
 
     /// Draw a vertical line from (x, y) for `len` pixels.
     pub fn draw_vline(&mut self, x: usize, y: usize, len: usize) {
-        for i in 0..len {
-            self.set_pixel(x, y + i, true);
-        }
+        self.framebuf.draw_vline(x, y, len);
     }
 
     /// Invert the display (swap black/white) via SSD1306 command.
@@ -419,53 +328,12 @@ impl Ssd1306Display {
     /// `data` is column-major: each byte is 8 vertical pixels, LSB = top.
     /// `w` = width in pixels, `h` = height in pixels (must be multiple of 8).
     pub fn draw_bitmap(&mut self, x: usize, y: usize, data: &[u8], w: usize, h: usize) {
-        let pages = h / 8;
-        for page in 0..pages {
-            for col in 0..w {
-                let src_idx = page * w + col;
-                if src_idx >= data.len() {
-                    break;
-                }
-                let px = x + col;
-                let py = y + page * 8;
-                if px >= WIDTH || py >= HEIGHT {
-                    continue;
-                }
-                let dst_page = py / 8;
-                let bit_offset = py % 8;
-                let col_data = data[src_idx];
-                if bit_offset == 0 {
-                    if dst_page < PAGES {
-                        self.framebuf[dst_page * WIDTH + px] |= col_data;
-                    }
-                } else {
-                    if dst_page < PAGES {
-                        self.framebuf[dst_page * WIDTH + px] |= col_data << bit_offset;
-                    }
-                    if dst_page + 1 < PAGES {
-                        self.framebuf[(dst_page + 1) * WIDTH + px] |= col_data >> (8 - bit_offset);
-                    }
-                }
-            }
-        }
+        self.framebuf.draw_bitmap(x, y, data, w, h);
     }
 
     /// Draw a 1-bit bitmap scaled 2x. Used for full-height companion moments.
     pub fn draw_bitmap_2x(&mut self, x: usize, y: usize, data: &[u8], w: usize, h: usize) {
-        for col in 0..w {
-            for row in 0..h {
-                let src_idx = (row / 8) * w + col;
-                if src_idx >= data.len() || (data[src_idx] & (1u8 << (row % 8))) == 0 {
-                    continue;
-                }
-                let px = x + col * 2;
-                let py = y + row * 2;
-                self.set_pixel(px, py, true);
-                self.set_pixel(px + 1, py, true);
-                self.set_pixel(px, py + 1, true);
-                self.set_pixel(px + 1, py + 1, true);
-            }
-        }
+        self.framebuf.draw_bitmap_2x(x, y, data, w, h);
     }
 
     /// Draw a sparkline using block characters (▁▂▃▄▅▆▇█).
@@ -473,39 +341,12 @@ impl Ssd1306Display {
     /// Drawn at pixel row `y` (top of the sparkline area), spanning 8 pixels tall.
     /// Each value gets `bar_width` pixels wide.
     pub fn draw_sparkline(&mut self, x: usize, y: usize, values: &[f32], bar_width: usize) {
-        let max_height: usize = 7; // max 7 pixels tall
-        for (i, &val) in values.iter().enumerate() {
-            let bar_height = ((val.clamp(0.0, 1.0) * max_height as f32) as usize).max(1);
-            let bx = x + i * bar_width;
-            // Draw bar from bottom up
-            for w in 0..bar_width.min(2) {
-                for h in 0..bar_height {
-                    self.set_pixel(bx + w, y + max_height - h, true);
-                }
-            }
-        }
+        self.framebuf.draw_sparkline(x, y, values, bar_width);
     }
 
     /// Draw a progress bar at (x, y) with given width and fill ratio (0.0-1.0).
     pub fn draw_progress_bar(&mut self, x: usize, y: usize, width: usize, ratio: f32) {
-        let filled = ((ratio.clamp(0.0, 1.0) * width as f32) as usize).min(width);
-        // Top border
-        self.draw_hline(x, y, width);
-        // Bottom border
-        self.draw_hline(x, y + 4, width);
-        // Left/right borders
-        self.set_pixel(x, y + 1, true);
-        self.set_pixel(x, y + 2, true);
-        self.set_pixel(x, y + 3, true);
-        self.set_pixel(x + width - 1, y + 1, true);
-        self.set_pixel(x + width - 1, y + 2, true);
-        self.set_pixel(x + width - 1, y + 3, true);
-        // Fill
-        for fx in 0..filled {
-            self.set_pixel(x + 1 + fx, y + 1, true);
-            self.set_pixel(x + 1 + fx, y + 2, true);
-            self.set_pixel(x + 1 + fx, y + 3, true);
-        }
+        self.framebuf.draw_progress_bar(x, y, width, ratio);
     }
 
     /// XOR a rectangular region — toggles all pixels in the area.
@@ -514,15 +355,7 @@ impl Ssd1306Display {
         if !self.initialized {
             return;
         }
-        for py in y..y.min(32).max(y) + h.min(32 - y.min(31)) {
-            for px in x..x.min(128).max(x) + w.min(128 - x.min(127)) {
-                if px < 128 && py < 32 {
-                    let page = py / 8;
-                    let bit = py % 8;
-                    self.framebuf[page * 128 + px] ^= 1 << bit;
-                }
-            }
-        }
+        self.framebuf.xor_rect(x, y, w, h);
     }
 
     /// Show a simple 4-line status screen. Each line is centered.
@@ -538,124 +371,7 @@ impl Ssd1306Display {
         if !self.initialized {
             return;
         }
-        self.clear();
-        if !line0.is_empty() {
-            self.draw_centered(0, line0);
-        }
-        if !line1.is_empty() {
-            self.draw_centered(8, line1);
-        }
-        if !line2.is_empty() {
-            self.draw_centered(16, line2);
-        }
-        if !line3.is_empty() {
-            self.draw_centered(24, line3);
-        }
+        self.framebuf.draw_status([line0, line1, line2, line3]);
         let _ = self.flush(i2c);
     }
 }
-
-// ==========================================================================
-// Built-in 5x7 pixel font (ASCII 32-127, 96 characters)
-// Each character is 5 bytes — one byte per column, LSB = top pixel.
-// ==========================================================================
-#[cfg(feature = "display-ssd1306")]
-#[rustfmt::skip]
-const FONT_5X7: [[u8; 5]; 96] = [
-    [0x00,0x00,0x00,0x00,0x00], // 32 ' '
-    [0x00,0x00,0x5F,0x00,0x00], // 33 '!'
-    [0x00,0x07,0x00,0x07,0x00], // 34 '"'
-    [0x14,0x7F,0x14,0x7F,0x14], // 35 '#'
-    [0x24,0x2A,0x7F,0x2A,0x12], // 36 '$'
-    [0x23,0x13,0x08,0x64,0x62], // 37 '%'
-    [0x36,0x49,0x55,0x22,0x50], // 38 '&'
-    [0x00,0x05,0x03,0x00,0x00], // 39 '''
-    [0x00,0x1C,0x22,0x41,0x00], // 40 '('
-    [0x00,0x41,0x22,0x1C,0x00], // 41 ')'
-    [0x08,0x2A,0x1C,0x2A,0x08], // 42 '*'
-    [0x08,0x08,0x3E,0x08,0x08], // 43 '+'
-    [0x00,0x50,0x30,0x00,0x00], // 44 ','
-    [0x08,0x08,0x08,0x08,0x08], // 45 '-'
-    [0x00,0x60,0x60,0x00,0x00], // 46 '.'
-    [0x20,0x10,0x08,0x04,0x02], // 47 '/'
-    [0x3E,0x51,0x49,0x45,0x3E], // 48 '0'
-    [0x00,0x42,0x7F,0x40,0x00], // 49 '1'
-    [0x42,0x61,0x51,0x49,0x46], // 50 '2'
-    [0x21,0x41,0x45,0x4B,0x31], // 51 '3'
-    [0x18,0x14,0x12,0x7F,0x10], // 52 '4'
-    [0x27,0x45,0x45,0x45,0x39], // 53 '5'
-    [0x3C,0x4A,0x49,0x49,0x30], // 54 '6'
-    [0x01,0x71,0x09,0x05,0x03], // 55 '7'
-    [0x36,0x49,0x49,0x49,0x36], // 56 '8'
-    [0x06,0x49,0x49,0x29,0x1E], // 57 '9'
-    [0x00,0x36,0x36,0x00,0x00], // 58 ':'
-    [0x00,0x56,0x36,0x00,0x00], // 59 ';'
-    [0x00,0x08,0x14,0x22,0x41], // 60 '<'
-    [0x14,0x14,0x14,0x14,0x14], // 61 '='
-    [0x41,0x22,0x14,0x08,0x00], // 62 '>'
-    [0x02,0x01,0x51,0x09,0x06], // 63 '?'
-    [0x32,0x49,0x79,0x41,0x3E], // 64 '@'
-    [0x7E,0x11,0x11,0x11,0x7E], // 65 'A'
-    [0x7F,0x49,0x49,0x49,0x36], // 66 'B'
-    [0x3E,0x41,0x41,0x41,0x22], // 67 'C'
-    [0x7F,0x41,0x41,0x22,0x1C], // 68 'D'
-    [0x7F,0x49,0x49,0x49,0x41], // 69 'E'
-    [0x7F,0x09,0x09,0x01,0x01], // 70 'F'
-    [0x3E,0x41,0x41,0x51,0x32], // 71 'G'
-    [0x7F,0x08,0x08,0x08,0x7F], // 72 'H'
-    [0x00,0x41,0x7F,0x41,0x00], // 73 'I'
-    [0x20,0x40,0x41,0x3F,0x01], // 74 'J'
-    [0x7F,0x08,0x14,0x22,0x41], // 75 'K'
-    [0x7F,0x40,0x40,0x40,0x40], // 76 'L'
-    [0x7F,0x02,0x04,0x02,0x7F], // 77 'M'
-    [0x7F,0x04,0x08,0x10,0x7F], // 78 'N'
-    [0x3E,0x41,0x41,0x41,0x3E], // 79 'O'
-    [0x7F,0x09,0x09,0x09,0x06], // 80 'P'
-    [0x3E,0x41,0x51,0x21,0x5E], // 81 'Q'
-    [0x7F,0x09,0x19,0x29,0x46], // 82 'R'
-    [0x46,0x49,0x49,0x49,0x31], // 83 'S'
-    [0x01,0x01,0x7F,0x01,0x01], // 84 'T'
-    [0x3F,0x40,0x40,0x40,0x3F], // 85 'U'
-    [0x1F,0x20,0x40,0x20,0x1F], // 86 'V'
-    [0x7F,0x20,0x18,0x20,0x7F], // 87 'W'
-    [0x63,0x14,0x08,0x14,0x63], // 88 'X'
-    [0x03,0x04,0x78,0x04,0x03], // 89 'Y'
-    [0x61,0x51,0x49,0x45,0x43], // 90 'Z'
-    [0x00,0x00,0x7F,0x41,0x41], // 91 '['
-    [0x02,0x04,0x08,0x10,0x20], // 92 '\'
-    [0x41,0x41,0x7F,0x00,0x00], // 93 ']'
-    [0x04,0x02,0x01,0x02,0x04], // 94 '^'
-    [0x40,0x40,0x40,0x40,0x40], // 95 '_'
-    [0x00,0x01,0x02,0x04,0x00], // 96 '`'
-    [0x20,0x54,0x54,0x54,0x78], // 97 'a'
-    [0x7F,0x48,0x44,0x44,0x38], // 98 'b'
-    [0x38,0x44,0x44,0x44,0x20], // 99 'c'
-    [0x38,0x44,0x44,0x48,0x7F], // 100 'd'
-    [0x38,0x54,0x54,0x54,0x18], // 101 'e'
-    [0x08,0x7E,0x09,0x01,0x02], // 102 'f'
-    [0x08,0x14,0x54,0x54,0x3C], // 103 'g'
-    [0x7F,0x08,0x04,0x04,0x78], // 104 'h'
-    [0x00,0x44,0x7D,0x40,0x00], // 105 'i'
-    [0x20,0x40,0x44,0x3D,0x00], // 106 'j'
-    [0x00,0x7F,0x10,0x28,0x44], // 107 'k'
-    [0x00,0x41,0x7F,0x40,0x00], // 108 'l'
-    [0x7C,0x04,0x18,0x04,0x78], // 109 'm'
-    [0x7C,0x08,0x04,0x04,0x78], // 110 'n'
-    [0x38,0x44,0x44,0x44,0x38], // 111 'o'
-    [0x7C,0x14,0x14,0x14,0x08], // 112 'p'
-    [0x08,0x14,0x14,0x18,0x7C], // 113 'q'
-    [0x7C,0x08,0x04,0x04,0x08], // 114 'r'
-    [0x48,0x54,0x54,0x54,0x20], // 115 's'
-    [0x04,0x3F,0x44,0x40,0x20], // 116 't'
-    [0x3C,0x40,0x40,0x20,0x7C], // 117 'u'
-    [0x1C,0x20,0x40,0x20,0x1C], // 118 'v'
-    [0x3C,0x40,0x30,0x40,0x3C], // 119 'w'
-    [0x44,0x28,0x10,0x28,0x44], // 120 'x'
-    [0x0C,0x50,0x50,0x50,0x3C], // 121 'y'
-    [0x44,0x64,0x54,0x4C,0x44], // 122 'z'
-    [0x00,0x08,0x36,0x41,0x00], // 123 '{'
-    [0x00,0x00,0x7F,0x00,0x00], // 124 '|'
-    [0x00,0x41,0x36,0x08,0x00], // 125 '}'
-    [0x08,0x08,0x2A,0x1C,0x08], // 126 '~'
-    [0x08,0x1C,0x2A,0x08,0x08], // 127 DEL
-];

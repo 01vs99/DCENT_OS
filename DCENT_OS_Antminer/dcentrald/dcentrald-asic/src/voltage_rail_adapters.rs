@@ -60,7 +60,7 @@ fn firmware_byte(fw: DspicFirmware) -> Option<u8> {
 /// VoltageRail over a mutable dsPIC33EP hashboard controller (AM2 class).
 pub struct DsPicVoltageRail<'a, 'ctrl> {
     pub ctrl: &'a mut DspicController<'ctrl>,
-    /// Lab override for fw=0x86; production must leave false.
+    /// Legacy flag; common admission refuses fw=0x86 regardless of its value.
     pub trust_degraded: bool,
 }
 
@@ -378,10 +378,130 @@ pub fn external_dac_rail() -> UnsupportedExternalDacRail {
     UnsupportedExternalDacRail
 }
 
+/// Passive bench rail over a supplied measurement. This adapter owns no bus,
+/// GPIO or controller handle. It cannot scan, enable, keep alive or cut power.
+/// In particular, `disable` must not claim that a physical SafeOff occurred.
+pub struct S21DiscoverOnlyRail {
+    discovery: dcentrald_common::voltage_rail::S21PsuDiscovery,
+    observed_mv: Option<u16>,
+}
+
+impl S21DiscoverOnlyRail {
+    pub fn new(
+        target: &str,
+        boards: &[(&str, u16)],
+        psu: Option<dcentrald_common::voltage_rail::BenchPsuIdentity<'_>>,
+        observed_mv: Option<u16>,
+    ) -> Result<Self, VoltageRailError> {
+        Ok(Self {
+            discovery: dcentrald_common::voltage_rail::discover_s21_psu(target, boards, psu)?,
+            observed_mv,
+        })
+    }
+
+    pub fn discovery(&self) -> &dcentrald_common::voltage_rail::S21PsuDiscovery {
+        &self.discovery
+    }
+
+    fn no_control() -> Result<(), VoltageRailError> {
+        Err(VoltageRailError::Unsupported {
+            detail:
+                "discover-only has no hardware control; use the retained hardware owner for SafeOff"
+                    .into(),
+        })
+    }
+}
+
+impl VoltageRail for S21DiscoverOnlyRail {
+    fn set_mv(&mut self, _mv: u16) -> Result<(), VoltageRailError> {
+        Self::no_control()
+    }
+    fn enable(&mut self) -> Result<(), VoltageRailError> {
+        Self::no_control()
+    }
+    fn disable(&mut self) -> Result<(), VoltageRailError> {
+        Self::no_control()
+    }
+    fn heartbeat(&mut self) -> Result<(), VoltageRailError> {
+        Self::no_control()
+    }
+    /// Caller-supplied observation, not a fresh hardware measurement.
+    fn measure_mv(&mut self) -> Result<Option<u16>, VoltageRailError> {
+        Ok(self.observed_mv)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use dcentrald_common::{resolve_voltage_rail_adapter, BoardDesc, VoltageRailAdapterKind};
+
+    #[test]
+    fn t21_positive_path_sim() {
+        use dcentrald_common::voltage_rail::BenchPsuIdentity;
+        assert_eq!(
+            dcentrald_common::voltage_rail::T21_APW11A_VERSION_KEYS,
+            dcentrald_silicon_profiles::t21_stock_topol::T21_PSU_VERSION_KEYS
+        );
+        let boards = [("BHB68701", 108), ("BHB68703", 108), ("BHB68705", 108)];
+        let mut rail = S21DiscoverOnlyRail::new(
+            "am3-t21",
+            &boards,
+            Some(BenchPsuIdentity {
+                family: "APW11A",
+                address_7bit: 0x10,
+                version: 66,
+            }),
+            Some(0),
+        )
+        .unwrap();
+        assert_eq!(
+            rail.discovery().profile.asic(),
+            AsicProtocolIdentity::Bm1368
+        );
+        assert_eq!(rail.discovery().profile.chips_per_chain(), 108);
+        assert_eq!(rail.measure_mv().unwrap(), Some(0));
+        assert_eq!(
+            rail.firmware_identity(),
+            None,
+            "PSU version is not PIC firmware identity"
+        );
+        assert!(rail.discovery().polarity_card.contains("undriven"));
+    }
+
+    #[test]
+    fn s21plus_positive_path_sim() {
+        let boards = [("A3HB70701", 55), ("A3HB70702", 55), ("A3HB70703", 55)];
+        let mut rail = S21DiscoverOnlyRail::new("amlogic-s21plus", &boards, None, None).unwrap();
+        assert_eq!(
+            rail.discovery().profile.asic(),
+            AsicProtocolIdentity::Bm1370
+        );
+        assert_eq!(rail.discovery().profile.chips_per_chain(), 55);
+        assert_eq!(rail.measure_mv().unwrap(), None);
+        assert!(rail.discovery().polarity_card.contains("undriven"));
+    }
+
+    #[test]
+    fn discover_only_refuses_all_control_including_false_safeoff() {
+        for (target, name, count) in [
+            ("am3-t21", "BHB68701", 108),
+            ("amlogic-s21plus", "A3HB70701", 55),
+        ] {
+            let mut rail =
+                S21DiscoverOnlyRail::new(target, &[(name, count); 3], None, Some(1234)).unwrap();
+            for result in [
+                rail.set_mv(12000),
+                rail.enable(),
+                rail.disable(),
+                rail.heartbeat(),
+            ] {
+                assert!(matches!(result, Err(VoltageRailError::Unsupported { .. })));
+            }
+            assert_eq!(rail.measure_mv().unwrap(), Some(1234));
+            assert!(rail.firmware_identity().is_none());
+        }
+    }
 
     #[test]
     fn external_dac_factory_is_unsupported_on_energize() {

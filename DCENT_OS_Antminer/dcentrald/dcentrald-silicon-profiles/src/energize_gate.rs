@@ -449,20 +449,19 @@ pub fn gate_chains_for_energize_with_opts(
     Ok((bindings, refusal))
 }
 
-/// Helper: is `DCENT_AM2_STRICT_SKU_REFUSE=1` set?
+/// Refuse unclassified and mixed-SKU hardware by default.
 ///
-/// Default OFF for first-deploy rollout. Operator flips this on AFTER
-/// `a lab unit` confirms no false-positive refusal is logged.
+/// Only a compiled lab build can explicitly disable this gate.
 pub fn strict_sku_refuse_enabled() -> bool {
-    std::env::var("DCENT_AM2_STRICT_SKU_REFUSE")
+    dcentrald_common::lab_env::var("DCENT_AM2_STRICT_SKU_REFUSE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// Helper: is `DCENT_AM2_ACCEPT_DEGRADED_HARDWARE=1` set? Lab override
 /// that lets strict-mode proceed anyway. Mirrors the toolbox flag.
 pub fn accept_degraded_hardware_enabled() -> bool {
-    std::env::var("DCENT_AM2_ACCEPT_DEGRADED_HARDWARE")
+    dcentrald_common::lab_env::var("DCENT_AM2_ACCEPT_DEGRADED_HARDWARE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -913,11 +912,11 @@ mod tests {
     }
 
     #[test]
-    fn env_strict_refuse_default_off() {
+    fn env_strict_refuse_default_on() {
         let _g = env_guard();
-        // The first-deploy rollout requires this to default OFF.
+        // Release admission always requires an exact supported SKU.
         std::env::remove_var("DCENT_AM2_STRICT_SKU_REFUSE");
-        assert!(!strict_sku_refuse_enabled());
+        assert!(strict_sku_refuse_enabled());
     }
 
     #[test]
@@ -939,7 +938,38 @@ mod tests {
     fn env_accept_degraded_recognizes_1() {
         let _g = env_guard();
         std::env::set_var("DCENT_AM2_ACCEPT_DEGRADED_HARDWARE", "1");
-        assert!(accept_degraded_hardware_enabled());
+        assert_eq!(
+            accept_degraded_hardware_enabled(),
+            dcentrald_common::lab_env::compiled()
+        );
         std::env::remove_var("DCENT_AM2_ACCEPT_DEGRADED_HARDWARE");
+    }
+
+    #[test]
+    fn release_sku_gate_ignores_disable_and_degraded_overrides() {
+        let _g = env_guard();
+        std::env::set_var("DCENT_AM2_STRICT_SKU_REFUSE", "0");
+        std::env::set_var("DCENT_AM2_ACCEPT_DEGRADED_HARDWARE", "true");
+        let strict = strict_sku_refuse_enabled();
+        let degraded = accept_degraded_hardware_enabled();
+        std::env::remove_var("DCENT_AM2_STRICT_SKU_REFUSE");
+        std::env::remove_var("DCENT_AM2_ACCEPT_DEGRADED_HARDWARE");
+        assert_eq!(strict, !dcentrald_common::lab_env::compiled());
+        assert_eq!(degraded, dcentrald_common::lab_env::compiled());
+
+        let malformed = [ChainProbe::MalformedPreamble {
+            chain_id: 0,
+            preamble: [0xde, 0xad],
+        }];
+        let mixed = [
+            classified(0, Hashboard::Bhb42601, [0x04, 0x11]),
+            classified(1, Hashboard::Bhb56902, [0x05, 0x11]),
+        ];
+        for probes in [&malformed[..], &mixed[..]] {
+            assert_eq!(
+                gate_chains_for_energize(probes, strict).is_err(),
+                !dcentrald_common::lab_env::compiled()
+            );
+        }
     }
 }

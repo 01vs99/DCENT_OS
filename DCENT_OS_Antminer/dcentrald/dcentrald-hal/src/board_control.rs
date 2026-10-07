@@ -214,7 +214,7 @@ pub const AM2_HB_RESET_SET_TRI_ENV: &str = "DCENT_AM2_HB_RESET_SET_TRI";
 /// env gates so operator launchers behave consistently.
 fn am2_hb_reset_set_tri_enabled() -> bool {
     matches!(
-        std::env::var(AM2_HB_RESET_SET_TRI_ENV).as_deref(),
+        dcentrald_common::lab_env::var(AM2_HB_RESET_SET_TRI_ENV).as_deref(),
         Ok("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
     )
 }
@@ -257,7 +257,7 @@ pub const AM2_HB_RESET_REPOINT_ENV: &str = "DCENT_AM2_HB_RESET_REPOINT";
 /// launchers behave consistently.
 fn am2_hb_reset_repoint_enabled() -> bool {
     matches!(
-        std::env::var(AM2_HB_RESET_REPOINT_ENV).as_deref(),
+        dcentrald_common::lab_env::var(AM2_HB_RESET_REPOINT_ENV).as_deref(),
         Ok("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
     )
 }
@@ -1738,7 +1738,7 @@ mod tests {
         std::env::remove_var(AM2_HB_RESET_SET_TRI_ENV);
         assert!(!am2_hb_reset_set_tri_enabled());
         std::env::set_var(AM2_HB_RESET_SET_TRI_ENV, "1");
-        assert!(am2_hb_reset_set_tri_enabled());
+        assert_eq!(am2_hb_reset_set_tri_enabled(), dcentrald_common::lab_env::compiled());
         std::env::set_var(AM2_HB_RESET_SET_TRI_ENV, "0");
         assert!(!am2_hb_reset_set_tri_enabled());
         std::env::remove_var(AM2_HB_RESET_SET_TRI_ENV);
@@ -1755,7 +1755,7 @@ mod tests {
         std::env::remove_var(AM2_HB_RESET_REPOINT_ENV);
         assert!(!am2_hb_reset_repoint_enabled());
         std::env::set_var(AM2_HB_RESET_REPOINT_ENV, "1");
-        assert!(am2_hb_reset_repoint_enabled());
+        assert_eq!(am2_hb_reset_repoint_enabled(), dcentrald_common::lab_env::compiled());
         std::env::set_var(AM2_HB_RESET_REPOINT_ENV, "0");
         assert!(!am2_hb_reset_repoint_enabled());
         std::env::remove_var(AM2_HB_RESET_REPOINT_ENV);

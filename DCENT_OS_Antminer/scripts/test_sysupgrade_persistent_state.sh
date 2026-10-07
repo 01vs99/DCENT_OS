@@ -78,7 +78,8 @@ new_fixture()
     DESTINATION=$WORK_ROOT/$_fixture/destination
     unset SEED_ENTROPY_TEST_READINESS SEED_ENTROPY_TEST_BOOT_ID
     mkdir -p "$SOURCE/keys/dropbear" "$SOURCE/config/nested" \
-        "$SOURCE/profiles" "$SOURCE/dcent" "$DESTINATION"
+        "$SOURCE/profiles" "$SOURCE/dcent/ota-native/update" "$DESTINATION" \
+        "$SOURCE/network" "$SOURCE/vendor-first-install"
 
     chmod 700 "$SOURCE/dcent"
     printf 'host-private-key\n' >"$SOURCE/keys/dropbear/dropbear_ed25519_host_key"
@@ -90,6 +91,10 @@ new_fixture()
         >"$SOURCE/keys/.random-seed.born"
     printf '{"password_hash":"secret"}\n' >"$SOURCE/dcent/auth.json"
     printf 'ssh-ed25519 dashboard\n' >"$SOURCE/dcent/authorized_keys"
+    printf 'IP=192.0.2.10\nMASK=255.255.255.0\n' >"$SOURCE/network/static"
+    printf 'complete-stock-backup-receipt\n' >"$SOURCE/vendor-first-install/receipt.json"
+    printf 'native-ota-complete-boot-tuple\n' >"$SOURCE/dcent/ota-native/update/env.rollback"
+    chmod 600 "$SOURCE/dcent/ota-native/update/env.rollback"
     chmod 600 "$SOURCE/keys/random-seed" "$SOURCE/keys/.random-seed.born" \
         "$SOURCE/keys/dropbear/dropbear_ed25519_host_key" \
         "$SOURCE/keys/dropbear/authorized_keys" "$SOURCE/dcent/auth.json" \
@@ -155,6 +160,13 @@ expect_success "stage copies the complete persistent contract" \
     dcent_persist_stage "$SOURCE" "$DESTINATION"
 expect_success "read-only verifier accepts the staged contract" \
     dcent_persist_verify "$SOURCE" "$DESTINATION"
+expect_success "static network survives slot migration" \
+    cmp "$SOURCE/network/static" "$DESTINATION/network/static"
+expect_success "first-install recovery custody survives slot migration" \
+    cmp "$SOURCE/vendor-first-install/receipt.json" "$DESTINATION/vendor-first-install/receipt.json"
+expect_success "complete native OTA rollback custody survives slot migration" \
+    sh -c 'cmp "$1" "$2" && [ "$(stat -c %a "$2")" = 600 ]' sh \
+        "$SOURCE/dcent/ota-native/update/env.rollback" "$DESTINATION/dcent/ota-native/update/env.rollback"
 expect_success "dotfiles survive exact replacement" \
     test -f "$DESTINATION/config/.hidden"
 expect_success "symlink targets are preserved without dereference" \

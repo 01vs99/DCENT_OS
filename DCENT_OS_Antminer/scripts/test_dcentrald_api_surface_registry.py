@@ -26,6 +26,12 @@ REGISTRY_PATH = (
     / "dcentrald_api_surface_registry.json"
 )
 
+LAB_FEATURE_PROFILE = {
+    "profile": "lab",
+    "features": ["lab"],
+    "authority": "Compile-time laboratory hardware readers forward to the common capability; signed Beta/Stable runtime admission refuses this feature union, and it grants no independent hardware ownership.",
+}
+
 TEST_ATTRIBUTE_RE = re.compile(
     r"^\s*#\[(?:tokio::)?test(?:\([^\]]*\))?\]", re.MULTILINE
 )
@@ -245,6 +251,11 @@ class DcentraldApiSurfaceRegistryTests(unittest.TestCase):
             toml_string_array_map(toml_section(manifest, "features")),
             expected["features"],
         )
+        profiles = {row["profile"]: row for row in self.registry["feature_profiles"]}
+        self.assertEqual(set(profiles), set(expected["features"]) | {"default"})
+        self.assertEqual(profiles["lab"], LAB_FEATURE_PROFILE)
+        self.assertIn("dcentrald-common/lab", expected["features"]["lab"])
+        self.assertEqual(expected["features"]["recovery-tool"], ["dcentrald-common/lab"])
         self.assertEqual(
             toml_string_map(toml_section(manifest, "lints.clippy")),
             expected["clippy_lints"],
@@ -360,7 +371,7 @@ class DcentraldApiSurfaceRegistryTests(unittest.TestCase):
             )
         self.assertEqual(actual, self.registry["lexical_effect_file_census"])
 
-    def test_unsafe_surface_is_only_the_two_statvfs_wrappers(self) -> None:
+    def test_unsafe_surface_keeps_statvfs_and_exact_ssh_owner_boundaries(self) -> None:
         actual = {
             registry_source(path): len(
                 re.findall(r"\bunsafe\s*\{", self.sources[relative_source(path)])
@@ -370,16 +381,45 @@ class DcentraldApiSurfaceRegistryTests(unittest.TestCase):
             if re.search(r"\bunsafe\s*\{", text)
         }
         self.assertEqual(actual, self.registry["unsafe_surface"]["files"])
+        self.assertEqual(actual, {
+            "DCENT_OS_Antminer/dcentrald/dcentrald-api/src/channel_download.rs": 4,
+            "DCENT_OS_Antminer/dcentrald/dcentrald-api/src/diagnostics.rs": 1,
+            "DCENT_OS_Antminer/dcentrald/dcentrald-api/src/rest/late.rs": 2,
+            "DCENT_OS_Antminer/dcentrald/dcentrald-api/src/routes/restore_to_stock.rs": 2,
+            "DCENT_OS_Antminer/dcentrald/dcentrald-api/src/routes/ssh_keys.rs": 9,
+            "DCENT_OS_Antminer/dcentrald/dcentrald-api/src/routes/ssh_keys_tests.rs": 1,
+        })
         self.assertNotRegex(
             "\n".join(self.sources.values()), r"\b(?:pub\s+)?unsafe\s+fn\b"
         )
         self.assertIn("#![deny(unsafe_op_in_unsafe_fn)]", self.lib)
-        for source in actual:
-            text = self.sources[
-                (REPO_ROOT / source).relative_to(CRATE_ROOT).as_posix()
-            ]
+        for source in ("src/rest/late.rs", "src/routes/restore_to_stock.rs"):
+            text = self.sources[source]
             self.assertEqual(text.count("unsafe { libc::statvfs"), 1)
             self.assertEqual(text.count("unsafe { stat.assume_init() }"), 1)
+        # These new read-only libc boundaries observe the process owner and
+        # available filesystem space; neither grants mutation authority.
+        download = self.sources["src/channel_download.rs"]
+        self.assertEqual(download.count("unsafe { libc::geteuid() }"), 2)
+        self.assertEqual(download.count("unsafe { libc::statvfs("), 1)
+        self.assertEqual(download.count("unsafe { info.assume_init() }"), 1)
+        self.assertEqual(self.sources["src/diagnostics.rs"].count("unsafe { libc::geteuid() }"), 1)
+        ssh = self.sources["src/routes/ssh_keys.rs"]
+        # Exact existing descriptor-owner implementation; no generic unsafe
+        # exemption and no additional filesystem or hardware authority.
+        for call, count in {
+            "libc::openat(": 1, "File::from_raw_fd(": 1,
+            "libc::fstatat(": 2, "libc::readlinkat(": 1,
+            "libc::unlinkat(": 1, "libc::renameat(": 1,
+        }.items():
+            self.assertEqual(ssh.count(call), count, call)
+        for token in ("libc::O_NOFOLLOW", "libc::O_CLOEXEC", "libc::AT_SYMLINK_NOFOLLOW"):
+            self.assertIn(token, ssh)
+        self.assertIn('#[cfg(test)]\n#[path = "ssh_keys_tests.rs"]\nmod tests;', ssh)
+        self.assertIn(
+            "unsafe { libc::mkfifo(name.as_ptr(), 0o600) }",
+            self.sources["src/routes/ssh_keys_tests.rs"],
+        )
 
     def test_wave511_auth_cors_and_persistence_hardening_is_wired(self) -> None:
         for token in [
@@ -442,6 +482,12 @@ def update_source_snapshot() -> None:
     """Refresh only the mechanically derived source census in the registry."""
 
     registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    manifest = MANIFEST_PATH.read_text(encoding="utf-8")
+    registry["package"]["features"] = toml_string_array_map(toml_section(manifest, "features"))
+    registry["package"]["dependencies"] = toml_keys(toml_section(manifest, "dependencies"))
+    registry["feature_profiles"] = [
+        row for row in registry["feature_profiles"] if row["profile"] != "lab"
+    ] + [LAB_FEATURE_PROFILE]
     files = source_files()
     source_bytes = {relative_source(path): path.read_bytes() for path in files}
     modules = [
@@ -458,9 +504,47 @@ def update_source_snapshot() -> None:
         "public_items": sum(int(row["public_items"]) for row in modules),
         "tree_sha256": source_tree_sha256(files, source_bytes),
     }
+    texts = {source: raw.decode("utf-8") for source, raw in source_bytes.items()}
+    registry["root_public_modules"] = sorted(
+        re.findall(r"^pub mod ([A-Za-z0-9_]+);", texts["src/lib.rs"], re.M)
+    )
+    registry["route_public_modules"] = sorted(
+        re.findall(r"^pub mod ([A-Za-z0-9_]+);", texts["src/routes/mod.rs"], re.M)
+    )
+    routes = sorted({route for text in texts.values() for route in ROUTE_RE.findall(text)} - TEST_ONLY_ROUTES)
+    families: dict[str, int] = {}
+    for route in routes:
+        family = route_family(route)
+        families[family] = families.get(family, 0) + 1
+    registry["literal_route_surface"].update({
+        "production_routes": len(routes),
+        "canonical_path_sha256": sha256_bytes("\n".join(routes).encode()),
+        "families": dict(sorted(families.items())),
+    })
+    registry["lexical_effect_file_census"] = {
+        category: sorted(registry_source(path) for path in files
+                         if pattern.search(texts[relative_source(path)]))
+        for category, pattern in EFFECT_PATTERNS.items()
+    }
+    registry["unsafe_surface"]["files"] = {
+        registry_source(path): len(re.findall(r"\bunsafe\s*\{", texts[relative_source(path)]))
+        for path in files if re.search(r"\bunsafe\s*\{", texts[relative_source(path)])
+    }
+    registry["unsafe_surface"]["call_family"] = (
+        "Three checked statvfs wrappers and three pointer-free geteuid observations; "
+        "exact retained-directory SSH-key openat/"
+        "fstatat/readlinkat/renameat/unlinkat and descriptor ownership; one "
+        "private cfg(test) mkfifo refusal fixture. Lexical inventory is not execution."
+    )
+    registry["test_totals"]["unit_test_attributes"] = registry["source_totals"]["unit_test_attributes"]
+    registry["test_totals"]["total_test_attributes"] = (
+        registry["test_totals"]["unit_test_attributes"]
+        + registry["test_totals"]["integration_test_attributes"]
+    )
     REGISTRY_PATH.write_text(
         json.dumps(registry, indent=2, ensure_ascii=True) + "\n",
         encoding="ascii",
+        newline="\n",
     )
 
 

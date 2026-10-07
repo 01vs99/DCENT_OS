@@ -13,8 +13,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
+import struct
+import subprocess
 import sys
+import zlib
 from pathlib import Path
 
 import pytest
@@ -40,17 +44,95 @@ from dcent_toolbox.core.am2_xil_first_install import (  # noqa: E402
 HAS_OPENSSL = shutil.which("openssl") is not None
 
 
+@pytest.fixture(scope="module")
+def actual_runtime_root(tmp_path_factory):
+    from test_runtime_image_manifest import fixture
+    import runtime_image_manifest as runtime
+    directory = tmp_path_factory.mktemp("first-install-runtime")
+    key, public, daemon = fixture(directory / "identity")
+    root = directory / "root"
+    for name in ("etc/dcentos", "usr/local/bin", "usr/share/dcentos"):
+        (root / name).mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(daemon, root / runtime.DAEMON)
+    (root / runtime.SETTINGS_DEFAULT).write_bytes(b"[mining]\nenabled=false\n")
+    runtime.prepare(root, "am2-s19j", "beta", "1.2.3", key, public)
+    squashfs = directory / "rootfs"
+    result = subprocess.run(["mksquashfs", str(root), str(squashfs), "-noappend", "-all-root",
+        "-no-xattrs", "-no-exports", "-comp", "xz", "-processors", "1", "-mkfs-time", "0"],
+        capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return key, public, squashfs
+
+
+@pytest.mark.skipif(not HAS_OPENSSL, reason="exact release signer requires openssl")
+def test_dual_payload_pair_embeds_callable_canonical_executor(tmp_path, capsys, actual_runtime_root, monkeypatch):
+    from dcent_toolbox.core import am2_first_install_executor as executor
+    from dcent_toolbox.core.am2_first_install_executor import executable_capsule_members, STAGE1_PATH
+    key_pem, pub_pem, actual_rootfs = actual_runtime_root
+    data = b"fixture ARM Linux kernel"
+    header = bytearray(struct.pack(">7I4B32s", 0x27051956, 0, 0, len(data),
+                                  0x8000, 0x8000, zlib.crc32(data), 5, 2, 2, 0, b"fixture"))
+    struct.pack_into(">I", header, 4, zlib.crc32(header))
+    kernel = tmp_path / "kernel"
+    kernel.write_bytes(bytes(header) + data)
+    rootfs = tmp_path / "rootfs"
+    rootfs.write_bytes(actual_rootfs.read_bytes())
+    # This case closes signer/packager/consumer composition; the consumer's
+    # independent FIT tests bind real structural validation and donor digest.
+    fpga = tmp_path / "am2-fabric.itb"
+    fpga.write_bytes(b"test-only admitted FPGA")
+    def admit_fixture(raw):
+        assert raw == fpga.read_bytes()
+    monkeypatch.setattr(executor, "validate_fpga_image", admit_fixture)
+    writer = tmp_path / "am2-nand-window-armv7"
+    elf = bytearray(84)
+    elf[:7] = b"\x7fELF\x01\x01\x01"
+    struct.pack_into("<HH", elf, 16, 2, 40)
+    struct.pack_into("<I", elf, 28, 52)
+    struct.pack_into("<HH", elf, 42, 32, 1)
+    struct.pack_into("<I", elf, 52, 1)
+    writer.write_bytes(elf)
+    output = tmp_path / "dual.tar.gz"
+    source = "braiins-dual-ubi-mtd7-mtd8"
+    args = ["--board-target", "am2-s19jpro-zynq", "--source-layout", source,
+            "--version", "1.2.3", "--post-install-artifact", "X.tar",
+            "--migration-scope", "vendor archive and explicit mining config",
+            "--dual-ubi-kernel", str(kernel), "--dual-ubi-rootfs", str(rootfs),
+            "--dual-ubi-fpga", str(fpga), "--dual-ubi-writer", str(writer),
+            "--key", str(key_pem), "--pubkey", str(pub_pem), "--output", str(output), "--json"]
+    assert MODULE.main(args) == 0
+    capsys.readouterr()
+    monkeypatch.setenv("DCENT_RELEASE_PUBKEY_FILE", str(pub_pem))
+    members, _ = executable_capsule_members(output, "am2-s19jpro-zynq", source)
+    assert members["stage1.sh"] == STAGE1_PATH.read_bytes()
+    assert members["kernel"] == kernel.read_bytes()
+    assert members["rootfs"] == rootfs.read_bytes()
+    assert members["am2-fabric.itb"] == fpga.read_bytes()
+    assert json.loads(members["bootenv2.json"])["dcent_native_slot"] == "2"
+    # Even a valid outer signing key cannot qualify plausible header-only
+    # root bytes; the builder executes the same actual runtime parser first.
+    invalid_output = tmp_path / "header-only.tar.gz"
+    args[args.index("--output") + 1] = str(invalid_output)
+    rootfs.write_bytes(struct.pack("<5I6H8Q", 0x73717368, 1, 0, 131072, 0,
+                                  4, 17, 0, 1, 4, 0, 0, 100, *([0] * 6)) + bytes(4))
+    assert MODULE.main(args) == 2
+    assert not invalid_output.exists()
+
+
 @pytest.fixture()
 def dev_authority(tmp_path: Path):
     key = Ed25519PrivateKey.generate()
     key_pem = tmp_path / "key.pem"
-    key_pem.write_bytes(
-        key.private_bytes(
+    descriptor = os.open(key_pem, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        if os.name == "nt":
+            from dcent_toolbox.cli.commands._secret_output import _harden_windows_secret_acl
+            _harden_windows_secret_acl(key_pem)
+        handle.write(key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.PKCS8,
             serialization.NoEncryption(),
-        )
-    )
+        ))
     pub_pem = tmp_path / "pub.pem"
     pub_pem.write_bytes(
         key.public_key().public_bytes(

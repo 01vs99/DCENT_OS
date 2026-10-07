@@ -22,6 +22,27 @@ if ! command -v dcent_release_provenance_init >/dev/null 2>&1; then
     . "$dcent_release_envelope_lib"
 fi
 
+# Canonical image-posture resolution (WS-A4): RELEASE is the default posture;
+# DCENT_DEV_IMAGE=1 is the DEV/LAB opt-out. release_envelope.sh sources this
+# helper too; resolve it here explicitly so this lib never depends on that
+# ordering.
+if ! command -v dcent_release_posture_is_release >/dev/null 2>&1; then
+    dcent_release_posture_lib=""
+    if [ -n "${PROJECT_ROOT:-}" ] && [ -f "${PROJECT_ROOT}/scripts/lib/release_posture.sh" ]; then
+        dcent_release_posture_lib="${PROJECT_ROOT}/scripts/lib/release_posture.sh"
+    elif [ -n "${BR2_EXTERNAL_DCENTOS_PATH:-}" ] &&
+         [ -f "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/release_posture.sh" ]; then
+        dcent_release_posture_lib="${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/release_posture.sh"
+    elif [ -f "scripts/lib/release_posture.sh" ]; then
+        dcent_release_posture_lib="scripts/lib/release_posture.sh"
+    fi
+    [ -n "$dcent_release_posture_lib" ] || {
+        echo "ERROR: cannot locate scripts/lib/release_posture.sh" >&2
+        exit 1
+    }
+    . "$dcent_release_posture_lib"
+fi
+
 dcent_is_truthy() {
     case "${1:-}" in
         1|true|TRUE|yes|YES|y|Y) return 0 ;;
@@ -47,10 +68,12 @@ dcent_require_release_image_hardening() {
         && ! dcent_is_truthy "${DCENT_CUSTOMER_IMAGE:-0}"; then
         return 0
     fi
-    if ! dcent_is_truthy "${DCENT_RELEASE_IMAGE:-0}"; then
+    if ! dcent_release_posture_is_release; then
         echo "ERROR: DCENT_PACKAGE_STATUS='${package_status}' (release-status) requires DCENT_RELEASE_IMAGE=1" >&2
         echo "       (defconfig root-lock + /etc/dcentos/release-image marker)." >&2
         echo "       Release-root signatures are reserved for fully hardened release profiles." >&2
+        echo "       RELEASE is the default image posture (WS-A4); DCENT_DEV_IMAGE=1 is the" >&2
+        echo "       DEV/LAB opt-out and cannot carry release-status signatures." >&2
         exit 1
     fi
     if [ -n "${TARGET_DIR:-}" ] && [ ! -f "${TARGET_DIR}/etc/dcentos/release-image" ]; then
@@ -117,7 +140,7 @@ dcent_require_s19k_unsigned_release_intermediate() {
         echo "ERROR: S19k unsigned release intermediate requires release status" >&2
         exit 1
     }
-    [ "${DCENT_RELEASE_IMAGE:-0}" = "1" ] || {
+    dcent_release_posture_is_release || {
         echo "ERROR: S19k unsigned release intermediate requires DCENT_RELEASE_IMAGE=1" >&2
         exit 1
     }
@@ -231,6 +254,15 @@ dcent_toolbox_command_has_token() {
     esac
 }
 
+# first_install_only (AM1-A Drop-1 route scoping; owner adjudication
+#
+# Option A, ratified 2026-09-15): the Zynq package windows are the
+# live-sysupgrade (self-update) volume plan. A package whose payload exceeds
+# that window may still serve the stock first-install route, but its contract
+# must deny self-update explicitly: install_command stays the target-bound
+# first-install rail and update_command MUST be empty (JSON null). The mode
+# value itself is the machine-checkable denial; an omitted field is not.
+
 dcent_require_toolbox_install_contract() {
     _dcent_toolbox_command=$1
     _dcent_toolbox_install_mode=$2
@@ -284,6 +316,15 @@ dcent_require_toolbox_install_contract() {
                     ;;
             esac
             ;;
+        first_install_only)
+            # The stock first-install rail: the target-bound dcent install
+            # command shape checked above is the whole contract. The
+            # self-update denial for this mode is enforced by
+            # dcent_require_toolbox_update_contract (update_command must be
+            # empty). No inactive-slot gate applies: the standing
+            # stock-installer transaction owns its own self-validating write
+            # path on the stock NAND layout.
+            ;;
         *)
             echo "ERROR: unsupported toolbox install mode: $_dcent_toolbox_install_mode" >&2
             return 1
@@ -299,6 +340,14 @@ dcent_require_toolbox_update_contract() {
     if [ "$_dcent_toolbox_install_mode" = "package_only_denied" ]; then
         if [ -n "$_dcent_toolbox_command" ]; then
             echo "ERROR: package-only denied metadata must not advertise an update command" >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    if [ "$_dcent_toolbox_install_mode" = "first_install_only" ]; then
+        if [ -n "$_dcent_toolbox_command" ]; then
+            echo "ERROR: first-install-only metadata must not advertise an update command (self-update is explicitly denied by this contract)" >&2
             return 1
         fi
         return 0

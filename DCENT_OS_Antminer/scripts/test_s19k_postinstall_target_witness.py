@@ -497,7 +497,7 @@ def test_symlinked_private_key_is_refused(tmp_path: Path) -> None:
     assert fixture.runner.sign_calls == 0
 
 
-def test_image_wires_s49_before_exact_s50_and_removes_unsigned_s46() -> None:
+def test_image_wires_persistent_owner_and_operator_ssh_without_historical_witness() -> None:
     board = (
         ROOT
         / "br2_external_dcentos"
@@ -516,13 +516,12 @@ def test_image_wires_s49_before_exact_s50_and_removes_unsigned_s46() -> None:
     assert "S38s19k-data" in post_image
     assert "S49s19k-postinstall-witness" in post_image
     assert "dcent-s19k-postinstall-witness.py" in post_image
-    assert "verify-ssh-gate" in s50
-    assert 'enabled-by-postinstall-witness' in s50
-    exact_branch = s50.split('if [ "$STATE" = enabled-by-postinstall-witness ]', 1)[1]
-    exact_branch = exact_branch.split("# Development images", 1)[0]
-    assert " -R" not in exact_branch
-    assert '-s -r "$WITNESS_HOST_KEY"' in exact_branch
-    assert "firstboot" in s49
+    assert "verify-ssh-gate" not in s50
+    assert "dcent-s19k-postinstall-witness.py" not in s49 + s50
+    assert "enabled-by-keys" in s50 and "enabled-by-wizard" in s50
+    assert "locked-release-image" in s50 and "locked-data-owner" in s50
+    assert 'rm -f "${TARGET_DIR}/usr/sbin/dcent-s19k-postinstall-witness.py"' in post_build
+    assert "reject_rootfs_pattern '(^|/)dcent-s19k-postinstall-witness.py$'" in post_image
     assert 'rm -f "${TARGET_DIR}/etc/init.d/S46post-install"' in post_build
     assert "reject_rootfs_pattern '(^|/)S46post-install$'" in post_image
 

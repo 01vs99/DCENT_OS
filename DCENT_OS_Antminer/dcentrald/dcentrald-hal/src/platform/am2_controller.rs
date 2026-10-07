@@ -322,14 +322,19 @@ fn observe_supported_firmware(i2c: &I2cServiceHandle, address: u8) -> Result<u8>
         ("framed", &GET_VERSION_FRAMED, 1),
         ("short", &GET_VERSION_SHORT, 1),
     ];
-    let use_strace_first = std::env::var("DCENT_AM2_GET_VERSION_FRAMED_4B")
+    let use_strace_first = dcentrald_common::lab_env::var("DCENT_AM2_GET_VERSION_FRAMED_4B")
         .map(|value| {
             matches!(
                 value.as_str(),
                 "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
             )
         })
-        .unwrap_or(false);
+        .unwrap_or_else(|error| {
+            matches!(error, std::env::VarError::NotPresent)
+                && dcentrald_common::runtime_hardware_recipe::am2_default(
+                    dcentrald_common::runtime_hardware_recipe::Am2HardwareFlag::FramedGetVersion
+                )
+        });
     let probes: &[(&str, &[u8], usize)] = if use_strace_first {
         &probes_strace_first
     } else {

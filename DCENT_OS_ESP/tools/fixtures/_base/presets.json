@@ -1,0 +1,36 @@
+{
+ "model": "HexSupra",
+ "presets": [
+  {
+   "description": "Quietest and coolest option for experimentation, sleep-friendly rooms, or weak power supplies.",
+   "expectedHashrate": 2400,
+   "expectedPower": 30,
+   "frequency": 350,
+   "name": "Low Power",
+   "recommended": false,
+   "requiresOverclock": false,
+   "voltage": 1100
+  },
+  {
+   "description": "Factory-style baseline for normal daily mining.",
+   "expectedHashrate": 3600,
+   "expectedPower": 48,
+   "frequency": 490,
+   "name": "Default",
+   "recommended": true,
+   "requiresOverclock": true,
+   "voltage": 1166
+  },
+  {
+   "description": "Experimental overclock territory. Monitor power, temps, and hardware stability closely.",
+   "expectedHashrate": 3600,
+   "expectedPower": 48,
+   "frequency": 490,
+   "name": "Max (OC)",
+   "recommended": false,
+   "requiresOverclock": true,
+   "voltage": 1350
+  }
+ ],
+ "recommendedPreset": "Default"
+}

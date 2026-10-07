@@ -4,7 +4,7 @@
 #
 # Runs at the end of first boot (after S82dcentrald + S81mcp + S50dropbear),
 # executes the V1..V14 cold-boot proof matrix from
-#  (Q2), and emits a deterministic
+# internal engineering notes (Q2), and emits a deterministic
 # JSON contract to /tmp/s99verify.json for the host-side toolbox post-flash
 # poller and the dashboard event log.
 #
@@ -25,12 +25,9 @@
 #                                (proves stable ownership during this window).
 #   V5  psu-engaged            : per-family rail-enable GPIO observed
 #                                (report-only; S99verify never drives the pin).
-#                                gpio437 polarity is BOARD_TARGET SCOPED:
-#                                  am3-s19k / am3-s19kpro / am3-aml-s19kpro
-#                                    : software 0=ON, 1=OFF
-#                                  S21-class NoPic (am3-s21 / am3-s21pro /
-#                                    am3-s21xp / am3-s19jpro-aml)
-#                                    : software 1=ON / SafeOff=0
+#                                GPIO437 raw levels come only from the generated
+#                                exact-board authority. Unqualified rows are
+#                                unproven; an input is never an OFF readback.
 #                                Never one Amlogic pin polarity. Do not claim
 #                                VerifiedRailCut. Software SafeOff-on-stop
 #                                remains receipt=None.
@@ -102,7 +99,7 @@ MIN_DAEMON_AGE_S=${MIN_DAEMON_AGE_S:-30}
 # signatures, rail GPIO numbers, fan/thermal specifics) belongs in ONE
 # place per variant -- a sourced include shipped by that variant's overlay
 # at $S99VERIFY_LOCAL_INCLUDE -- instead of hand-editing 4 copies of this
-# file (which guarantees drift
+# file (which guarantees drift, per internal engineering notes
 # finding C-08). The include is sourced AFTER all helpers + check_* are
 # defined and AFTER platform detection (so $PLATFORM / $BOARD_FAMILY are
 # resolved), but BEFORE any check runs -- so an override may redefine any
@@ -477,37 +474,40 @@ check_dcentrald_running() {
     emit_check V4 true "dcentrald PID $pid alive (age unknown)"
 }
 
-# gpio437 polarity is BOARD_TARGET SCOPED. Observe-only: never write sysfs.
-# Prints: s19k-0on | s21-1on | unknown
+# Generated GPIO437 policy is shared with the boot and retained runtime owners.
+GPIO437_POLICY_HELPER=/usr/share/dcentos/amlogic-gpio437.sh
+
 gpio437_polarity_scope() {
-    bt=$1
-    case "$bt" in
-        am3-s19k|am3-s19kpro|am3-aml-s19kpro) echo "s19k-0on" ;;
-        am3-s21|am3-s21pro|am3-s21xp|am3-s19jpro-aml) echo "s21-1on" ;;
-        *) echo "unknown" ;;
-    esac
+    [ -r "$GPIO437_POLICY_HELPER" ] || { echo unknown; return; }
+    . "$GPIO437_POLICY_HELPER" || { echo unknown; return; }
+    dcent_gpio437_policy_state "$1" || echo unknown
 }
 
-# Map an observed 0/1 to software engaged|safeoff|unknown for one board_target.
+# Input pull/readback never establishes an OFF command, even on a known board.
 gpio437_software_state() {
     bt=$1
     val=$2
+    direction=${3:-unknown}
+    active_low=${4:-unknown}
+    [ "$active_low" = 0 ] || { echo unknown; return; }
     scope=$(gpio437_polarity_scope "$bt")
     case "$scope" in
-        s19k-0on)
-            if [ "$val" = "0" ]; then echo engaged
-            elif [ "$val" = "1" ]; then echo safeoff
-            else echo unknown
-            fi
-            ;;
-        s21-1on)
-            if [ "$val" = "1" ]; then echo engaged
-            elif [ "$val" = "0" ]; then echo safeoff
-            else echo unknown
-            fi
-            ;;
-        *) echo unknown ;;
+        undriven) echo unproven; return ;;
+        qualified-software) ;;
+        *) echo unknown; return ;;
     esac
+    case "$direction" in
+        in) echo undriven; return ;;
+        out) ;;
+        *) echo unknown; return ;;
+    esac
+    . "$GPIO437_POLICY_HELPER" || { echo unknown; return; }
+    levels=$(dcent_gpio437_drive_levels "$bt") || { echo unknown; return; }
+    set -- $levels
+    if [ "$val" = "$1" ]; then echo engaged
+    elif [ "$val" = "$2" ]; then echo safeoff
+    else echo unknown
+    fi
 }
 
 # Report-only software SafeOff-on-stop. Does not drive gpio437.
@@ -519,7 +519,9 @@ report_software_safeoff_on_stop() {
     if [ -r /sys/class/gpio/gpio437/value ]; then
         observed=$(cat /sys/class/gpio/gpio437/value 2>/dev/null | tr -dc '01')
     fi
-    state=$(gpio437_software_state "$bt" "$observed")
+    direction=$(cat /sys/class/gpio/gpio437/direction 2>/dev/null || echo unknown)
+    active_low=$(cat /sys/class/gpio/gpio437/active_low 2>/dev/null || echo unknown)
+    state=$(gpio437_software_state "$bt" "$observed" "$direction" "$active_low")
     scope=$(gpio437_polarity_scope "$bt")
     STOP_JSON=/tmp/s99verify-stop.json
     cat > "$STOP_JSON" <<EOF
@@ -564,7 +566,9 @@ check_rail_gpio() {
     bt=${board_target:-unknown}
     if [ "$PLATFORM" = "am3-aml" ]; then
         scope=$(gpio437_polarity_scope "$bt")
-        state=$(gpio437_software_state "$bt" "$val")
+        direction=$(cat /sys/class/gpio/gpio437/direction 2>/dev/null || echo unknown)
+        active_low=$(cat /sys/class/gpio/gpio437/active_low 2>/dev/null || echo unknown)
+        state=$(gpio437_software_state "$bt" "$val" "$direction" "$active_low")
         if [ "$scope" = "unknown" ]; then
             emit_check V5 false "gpio437 polarity unknown for board_target=$bt; refuse universal Amlogic polarity; observed=${val:-unread} (not VerifiedRailCut)"
             return
@@ -595,20 +599,27 @@ check_rail_gpio() {
 check_pic_fw() {
     case "$PLATFORM" in
         am3-aml)
-            # Not every am3-aml board is TAS5782M. S21-class NoPic uses the
-            # audio DAC; S19k-class is NoPic via gpio437 0=ON. Unknown
-            # board_target must not inherit either skip.
+            # NoPic is an exact runtime route classification, never inferred
+            # from a GPIO437 polarity or an unrelated audio-DAC backend.
             bt=${board_target:-unknown}
-            scope=$(gpio437_polarity_scope "$bt")
-            case "$scope" in
-                s21-1on)
-                    emit_check V6 true "NoPic platform (board_target=$bt: TAS5782M audio DAC voltage) - V6 skipped"
-                    ;;
-                s19k-0on)
-                    emit_check V6 true "NoPic platform (board_target=$bt: S19k-class, not TAS5782M) - V6 skipped"
+            if [ "$bt" = "am3-s19jpro-aml" ]; then
+                # Read the retained fw89 owner's current observation. Never open
+                # the PIC bus here or inherit a NoPic skip from GPIO polarity.
+                if detail=$(python3 /usr/libexec/dcentos/verify-classic-aml-proof.py 2>&1); then
+                    emit_check V6 true "$detail"
+                else
+                    emit_check V6 false "Classic AML application proof refused: $detail"
+                fi
+                return
+            fi
+            # Voltage-controller classification is independent of rail polarity.
+            # Classic PIC handling above always requires its retained owner proof.
+            case "$bt" in
+                am3-s19k|am3-s19kpro|am3-aml-s19kpro|am3-s21|am3-s21pro|am3-s21xp|am3-s19xp|am3-s19jxp|am3-s19jproa|am3-s19jproplus)
+                    emit_check V6 true "Declared native NoPic route (board_target=$bt); V6 is not GPIO437 admission"
                     ;;
                 *)
-                    emit_check V6 false "am3-aml V6 refused: board_target=$bt is not a TAS5782M or S19k NoPic identity (not all am3-aml = TAS5782M)"
+                    emit_check V6 false "am3-aml V6 refused: board_target=$bt has no exact native NoPic identity"
                     ;;
             esac
             return

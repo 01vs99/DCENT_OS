@@ -54,6 +54,24 @@ ZYNQ_GEOMETRY_DST="${TARGET_DIR}/usr/libexec/dcentos/sysupgrade-zynq-geometry.sh
 cp "$ZYNQ_GEOMETRY_SRC" "$ZYNQ_GEOMETRY_DST"
 chmod 0644 "$ZYNQ_GEOMETRY_DST"
 
+# 2026-09-15 rootfs-window triage: strip python stdlib fat a miner target
+# never uses. ensurepip is the pip bootstrap (bundled wheels); zoneinfo is
+# the named-timezone database (target runs TZ=UTC via libc). ~3 MB
+# uncompressed off every Zynq image, before the runtime-image manifest
+# capture so exports and image stay consistent.
+PY_STDLIB_DIR="${TARGET_DIR}/usr/lib/python3.13"
+if [ -d "$PY_STDLIB_DIR" ]; then
+    rm -rf "${PY_STDLIB_DIR}/ensurepip" "${PY_STDLIB_DIR}/zoneinfo"
+    # Round 2 (run 2l3kz7zb: 884 KiB over after round 1): modules a miner
+    # target never imports — demos, XML-RPC/WSGI servers, the unittest
+    # framework, pydoc data. Nothing in the dashboard server, toolbox
+    # shims, or init services imports any of these.
+    rm -rf "${PY_STDLIB_DIR}/turtledemo" "${PY_STDLIB_DIR}/xmlrpc"         "${PY_STDLIB_DIR}/wsgiref" "${PY_STDLIB_DIR}/unittest"         "${PY_STDLIB_DIR}/pydoc_data" "${PY_STDLIB_DIR}/idlelib"         "${PY_STDLIB_DIR}/tkinter" "${PY_STDLIB_DIR}/lib2to3"
+else
+    echo "DCENTos post-build (zynq): ERROR: python3.13 stdlib not found at $PY_STDLIB_DIR" >&2
+    exit 1
+fi
+
 # W1.5 (2026-05-07): pre-create /data/dcent/ with tight perms so the auth
 # file (/data/dcent/auth.json) lands in a 0700 root:root directory on first
 # boot. dcentrald-api::auth::save_auth() will also tighten on every write,
@@ -266,9 +284,13 @@ else
 fi
 
 # Production-readiness matrix §7 #1 (public-image trust boundary): stamp the
-# release-image marker + tighten first-boot SSH posture when DCENT_RELEASE_IMAGE=1.
-# NO-OP on DEV/LAB builds (root:dcentral + passwordless opt-out preserved).
+# release-image marker + tighten first-boot SSH posture on the RELEASE
+# posture — the DEFAULT since WS-A4 (2026-09-01; canonical resolution in
+# scripts/lib/release_posture.sh).
+# NO-OP on an explicit DEV/LAB opt-out (DCENT_DEV_IMAGE=1; root:dcentral +
+# passwordless opt-out preserved).
 . "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/release_image_provision.sh"
+python3 "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/provision_runtime_policy.py" "$TARGET_DIR"
 dcent_provision_release_image "$TARGET_DIR" "zynq"
 
 strip_sysupgrade_offline_harness() {

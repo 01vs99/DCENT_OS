@@ -25,7 +25,7 @@ use crate::platform::{
 };
 use crate::{HalError, Result};
 
-pub use chain::{SimBm1397PlusBackend, SimChain, SimNoncePolicy, SimPic16Operation, TraceEvent};
+pub use chain::{SimBm1397PlusBackend, SimBm1398WireFault, SimChain, SimChainObserver, SimNoncePolicy, SimPic16Operation, TraceEvent};
 pub use model_state::SimSiliconState;
 pub use psu_dspic::{SimControllerKind, SimI2cBackend, SimPic16Fault, SimPic16Snapshot};
 

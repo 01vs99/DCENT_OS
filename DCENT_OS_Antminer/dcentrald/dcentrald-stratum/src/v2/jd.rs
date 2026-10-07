@@ -1194,20 +1194,16 @@ impl JdConn {
             .await
             .map_err(|e| format!("{}: send Noise act1 failed: {}", label, e))?;
 
-        let mut hs_buf = vec![0u8; 512];
-        let hs_len =
-            tokio::time::timeout(std::time::Duration::from_secs(15), stream.read(&mut hs_buf))
-                .await
-                .map_err(|_| format!("{}: Noise handshake timeout", label))?
-                .map_err(|e| format!("{}: read Noise response failed: {}", label, e))?;
-        if hs_len == 0 {
-            return Err(format!(
-                "{}: server closed connection during Noise handshake",
-                label
-            ));
-        }
+        let mut hs_buf = [0u8; super::noise::MIN_SERVER_RESPONSE];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            stream.read_exact(&mut hs_buf),
+        )
+        .await
+        .map_err(|_| format!("{}: Noise handshake timeout", label))?
+        .map_err(|e| format!("{}: read complete Noise response failed: {}", label, e))?;
         noise
-            .initiator_handshake_finish(&hs_buf[..hs_len])
+            .initiator_handshake_finish(&hs_buf)
             .map_err(|e| format!("{}: Noise handshake finish failed: {}", label, e))?;
         info!(
             endpoint = label,

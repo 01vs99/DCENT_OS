@@ -236,6 +236,22 @@ pub const PRIMARY_ARTIFACT_PRODUCERS: &[PrimaryArtifactProducer] = &[
         artifact_filename: "dcentos-sysupgrade-am3-s19jxp.tar",
         install_contract: ArtifactInstallContract::PackageOnlyDenied,
     },
+    // 2026-09-12 (drift13 #6a adjudication, R10 board join): the A126 lane
+    // ships a real package surface — its overlay post-image execs the shared
+    // am3-bm1362-nopic builder (05124af24) and emits the exact model-named
+    // archive with package_only_denied metadata. The BoardDesc row was
+    // promoted to AMLOGIC_PACKAGE_ONLY_ENABLEMENT in the same change-set;
+    // install admission stays Denied — this claim makes the defconfig a
+    // first-class build lane, NOT an install tier promotion.
+    PrimaryArtifactProducer {
+        board_target: "am3-s19jproa",
+        build_target: "am3-s19jproa",
+        defconfig: "dcentos_am3_s19jproa_defconfig",
+        overlay: "board/amlogic/am3-s19jproa",
+        package_validated: true,
+        artifact_filename: "dcentos-sysupgrade-am3-s19jproa.tar",
+        install_contract: ArtifactInstallContract::PackageOnlyDenied,
+    },
     PrimaryArtifactProducer {
         board_target: "am3-s19jproplus",
         build_target: "am3-s19jproplus",
@@ -250,9 +266,12 @@ pub const PRIMARY_ARTIFACT_PRODUCERS: &[PrimaryArtifactProducer] = &[
         build_target: "am3-s19jpro-aml",
         defconfig: "dcentos_am3_s19jpro_aml_defconfig",
         overlay: "board/amlogic/am3-s19jpro-aml",
+        // L12 retirement (2026-09-15): Classic has no compatible persistent
+        // writer (mtd5=config, mtd6=nvdata); its post-image emits the full
+        // package_only_denied metadata set, so the producer contract follows.
         package_validated: true,
         artifact_filename: "dcentos-sysupgrade-am3-s19jpro-aml.tar",
-        install_contract: ArtifactInstallContract::GuardedAmlogicRootfsWindow,
+        install_contract: ArtifactInstallContract::PackageOnlyDenied,
     },
 ];
 
@@ -497,11 +516,29 @@ mod tests {
             let source = std::fs::read_to_string(&post_image)
                 .unwrap_or_else(|error| panic!("read {}: {error}", post_image.display()));
             let shared_amlogic =
-                include_str!("../../../br2_external_dcentos/board/amlogic/am3-s21/post-image.sh");
+                include_str!("../../../br2_external_dcentos/board/amlogic/post-image-family.sh");
+            // 05124af24 moved the exact A126/Plus120 package build onto the
+            // shared am3-bm1362-nopic builder; follow that exec wrapper too.
+            let shared_bm1362_nopic = include_str!(
+                "../../../br2_external_dcentos/board/amlogic/am3-bm1362-nopic/post-image.sh"
+            );
+            let shared_zynq17 =
+                include_str!("../../../br2_external_dcentos/board/zynq/post-image-17-family.sh");
             let metadata_source = if source.lines().any(|line| {
-                line.trim_start().starts_with("exec ") && line.contains("am3-s21/post-image.sh")
+                line.trim_start().starts_with("exec ")
+                    && (line.contains("am3-s21/post-image.sh")
+                        || line.contains("post-image-family.sh"))
             }) {
                 shared_amlogic
+            } else if source.lines().any(|line| {
+                line.trim_start().starts_with("exec ")
+                    && line.contains("am3-bm1362-nopic/post-image.sh")
+            }) {
+                shared_bm1362_nopic
+            } else if source.lines().any(|line| {
+                line.trim_start().starts_with("exec ") && line.contains("post-image-17-family.sh")
+            }) {
+                shared_zynq17
             } else {
                 source.as_str()
             };
@@ -544,10 +581,11 @@ mod tests {
                         producer.board_target
                     )
                 });
-            let shared_dynamic = matches!(
-                producer.board_target,
-                "am3-s21" | "am3-s19jproplus"
-            )
+            let shared_dynamic = (metadata_source == shared_amlogic
+                || metadata_source == shared_bm1362_nopic)
+                && metadata_source.contains("OUTPUT_BASENAME=\"dcentos-sysupgrade-${BOARD_NAME}.tar\"")
+                && producer.artifact_filename
+                    == format!("dcentos-sysupgrade-{}.tar", producer.board_target)
                 && actual
                     == "DCENT_TOOLBOX_INSTALL_COMMAND=\"dcent install <ip> -f ${OUTPUT_BASENAME} --artifact-dir <restore_verified_dir>\"";
             assert!(

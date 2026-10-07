@@ -49,10 +49,10 @@ for required in "$CANONICAL" "$LEGACY" "$POST_BUILD"; do
     fi
 done
 
-require_fixed "$CANONICAL" 'S9 stock restore is disabled' \
-    'canonical entry point reports explicit containment'
-require_fixed "$CANONICAL" 'exit 1' \
-    'canonical entry point returns failure'
+require_fixed "$CANONICAL" 'exec python3 -m dcent_toolbox.cli.stock_revert "$@" --require-board-target am1-s9' \
+    'canonical entry invokes the real source-bound host transaction with exact S9 constraint'
+require_fixed "$CANONICAL" 'exit 2' \
+    'canonical entry refuses obsolete direct-image arguments'
 
 # The containment file must not retain a dead copy of the invalidated engine.
 # Search the whole file (including comments): stale recipes are unsafe operator
@@ -116,8 +116,8 @@ run_refusal() {
     else
         fail "$label invoked mutation command(s): $(tr '\n' ' ' < "$SENTINEL")"
     fi
-    if grep -Fq 'S9 stock restore is disabled' "$TMP_ROOT/stderr"; then
-        pass "$label reaches explicit containment response"
+    if grep -Fq 'Usage: revert_to_stock_s9.sh' "$TMP_ROOT/stderr"; then
+        pass "$label reports the retained-source host contract"
     else
         fail "$label did not report explicit containment"
     fi
@@ -131,6 +131,21 @@ run_refusal "$LEGACY" 'legacy default invocation'
 run_refusal "$LEGACY" 'legacy direct-image invocation' \
     /tmp/operator-provided-stock.tar.gz \
     aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+# Accepted dispatch is tested with an inert interpreter, never a remote host.
+cat > "$FAKE_BIN/python3" <<'PYTHON'
+#!/bin/sh
+printf '%s\n' "$@" > "$DCENT_S9_SENTINEL"
+exit 23
+PYTHON
+chmod 0755 "$FAKE_BIN/python3"
+status=0
+PATH="$FAKE_BIN:$PATH" DCENT_S9_SENTINEL="$SENTINEL" \
+    /bin/sh "$CANONICAL" execute --source '/offline/source path' --workspace /offline/transaction --yes || status=$?
+[ "$status" = 23 ] && pass 'host executor exit status propagates' || fail 'host executor status hidden'
+require_fixed "$SENTINEL" 'dcent_toolbox.cli.stock_revert' 'real transaction module selected'
+require_fixed "$SENTINEL" '/offline/source path' 'source path remains one literal argument'
+require_fixed "$SENTINEL" 'am1-s9' 'host executor receives exact S9 requirement'
 
 if [ "$failures" -ne 0 ]; then
     printf '\nS9 restore containment failed: %s assertion(s), %s passed\n' \

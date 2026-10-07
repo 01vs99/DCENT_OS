@@ -9,10 +9,10 @@
 # release authority.
 #
 # Evidence for the AM2 production profile:
-#
-#
-#
-# The live .139 probe recorded a 23/179/210 volume plan and 126976-byte LEBs.
+#   held reference corpus
+#   held reference corpus
+#   held reference corpus
+# The live lab-unit probe recorded a 23/179/210 volume plan and 126976-byte LEBs.
 # AM2 S19 Pro and S17 Pro currently reuse the same conservative byte windows,
 # but that does not promote their independent hardware-validation maturity.
 

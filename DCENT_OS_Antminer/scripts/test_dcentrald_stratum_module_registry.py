@@ -54,15 +54,16 @@ MODULE_SPECS = [
     ("router", "router.rs", None, "runtime_router", 37),
     ("scrypt", "scrypt.rs", None, "algorithm_contract", 2),
     ("share_pipeline", "share_pipeline.rs", None, "work_validation", 2),
-    ("types", "types.rs", None, "dto_catalog", 34),
+    ("types", "types.rs", None, "dto_catalog", 35),
     ("url_validator", "url_validator.rs", None, "parser_policy", 37),
     ("v1", "v1/mod.rs", None, "namespace", 0),
-    ("v1.client", "v1/client.rs", None, "network_runtime", 135),
+    ("v1.client", "v1/client.rs", None, "network_runtime", 142),
     ("v1.codec", "v1/codec.rs", None, "codec_parser", 18),
-    ("v1.connection", "v1/connection.rs", None, "network_transport", 27),
+    ("v1.connection", "v1/connection.rs", None, "network_transport", 28),
     ("v1.difficulty", "v1/difficulty.rs", None, "pure_derivation", 23),
     ("v1.job", "v1/job.rs", None, "work_builder", 26),
     ("v1.messages", "v1/messages.rs", None, "codec_parser", 63),
+    ("v1.policy", "v1/policy.rs", None, "parser_policy", 2),
     ("v1.mock_pool", "v1/mock_pool.rs", "mock-pool", "test_harness", 2),
     ("v2", "v2/mod.rs", None, "namespace", 0),
     ("v2.adapter", "v2/adapter.rs", "sv2", "work_adapter", 44),
@@ -82,24 +83,26 @@ MODULE_SPECS = [
     ("v2.test_server", "v2/test_server.rs", "mock-pool", "test_harness", 0),
     ("v2.types", "v2/types.rs", "sv2", "dto_catalog", 17),
     ("version_mask", "version_mask.rs", None, "work_validation", 4),
-    ("work", "work.rs", None, "work_validation", 33),
+    ("work", "work.rs", None, "work_validation", 34),
     ("work_domain", "work_domain.rs", None, "allocator_state", 5),
 ]
 
 PROFILE_SPECS = [
-    ("v1_only", [], 21, 530, 1, 1, 532),
-    ("sv2_only", ["sv2"], 29, 790, 1, 1, 792),
-    ("default", ["sv2", "jd"], 30, 817, 1, 1, 819),
-    ("scrypt_l7", ["sv2", "jd", "scrypt-l7"], 31, 822, 1, 1, 824),
-    ("mock_default", ["sv2", "jd", "mock-pool"], 32, 819, 10, 1, 830),
+    # One new work.rs regression is feature-independent. These remain source
+    # expectations; this registry update does not claim a new Cargo execution.
+    ("v1_only", [], 22, 542, 1, 1, 544),
+    ("sv2_only", ["sv2"], 30, 802, 1, 1, 804),
+    ("default", ["sv2", "jd"], 31, 829, 1, 1, 831),
+    ("scrypt_l7", ["sv2", "jd", "scrypt-l7"], 32, 834, 1, 1, 837),
+    ("mock_default", ["sv2", "jd", "mock-pool"], 33, 831, 10, 1, 842),
     (
         "all_features",
         ["sv2", "jd", "scrypt-l7", "mock-pool"],
-        33,
-        824,
+        34,
+        836,
         10,
         1,
-        835,
+        847,
     ),
 ]
 
@@ -281,7 +284,7 @@ def build_registry() -> dict[str, object]:
     all_source = "\n".join(texts)
     return {
         "schema_version": 1,
-        "generated": "2026-08-20",
+        "generated": "2026-09-07",
         "crate": "dcentrald-stratum",
         "crate_root": "DCENT_OS_Antminer/dcentrald/dcentrald-stratum/src/lib.rs",
         "authority_ceiling": (
@@ -359,10 +362,10 @@ class DcentraldStratumModuleRegistryTests(unittest.TestCase):
 
     def test_registry_is_exact_and_complete(self) -> None:
         self.assertEqual(self.registry, self.expected)
-        self.assertEqual(len(self.registry["modules"]), 33)
-        self.assertEqual(self.registry["source_policy"]["rust_source_files"], 34)
-        self.assertEqual(self.registry["all_feature_library_tests"], 824)
-        self.assertEqual(sum(self.registry["public_definition_totals"].values()), 439)
+        self.assertEqual(len(self.registry["modules"]), 34)
+        self.assertEqual(self.registry["source_policy"]["rust_source_files"], 35)
+        self.assertEqual(self.registry["all_feature_library_tests"], 836)
+        self.assertEqual(sum(self.registry["public_definition_totals"].values()), 446)
 
     def test_module_source_and_test_bijection_is_exact(self) -> None:
         registered = {Path(row["source"]).relative_to(
@@ -376,7 +379,7 @@ class DcentraldStratumModuleRegistryTests(unittest.TestCase):
         self.assertEqual(registered, discovered)
         self.assertEqual(
             sum(row["tests_all_features"] for row in self.registry["modules"]),
-            824,
+            836,
         )
 
     def test_profiles_features_and_dependencies_are_exact(self) -> None:
@@ -384,12 +387,12 @@ class DcentraldStratumModuleRegistryTests(unittest.TestCase):
         self.assertEqual(
             {name: row["library_tests"] for name, row in profiles.items()},
             {
-                "v1_only": 530,
-                "sv2_only": 790,
-                "default": 817,
-                "scrypt_l7": 822,
-                "mock_default": 819,
-                "all_features": 824,
+                "v1_only": 542,
+                "sv2_only": 802,
+                "default": 829,
+                "scrypt_l7": 834,
+                "mock_default": 831,
+                "all_features": 836,
             },
         )
         self.assertEqual(
@@ -480,9 +483,8 @@ def main() -> int:
     parser.add_argument("--write-registry", action="store_true")
     arguments, remaining = parser.parse_known_args()
     if arguments.write_registry:
-        REGISTRY_PATH.write_text(
-            json.dumps(build_registry(), indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+        REGISTRY_PATH.write_bytes(
+            (json.dumps(build_registry(), indent=2, sort_keys=True) + "\n").encode("utf-8"),
         )
         print(REGISTRY_PATH)
         return 0

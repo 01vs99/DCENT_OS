@@ -39,11 +39,19 @@ dcent_amlogic_require_digest() {
 
 dcent_require_exact_amlogic_build_inputs() {
     dcent_build_target=$1
+    # Reset per-call so a prior arm's donor generation cannot leak into a
+    # later invocation within the same shell.
+    unset dcent_expected_build_name dcent_expected_fw_version
     case "$dcent_build_target" in
         am3-s19jpro-aml)
             dcent_expected_model=s19jpro
             dcent_expected_fw_info_sha256=f1c495fb5d70e619602eefc1764aface200fd53c29e92f4b23ffd4b003eb018e
             dcent_expected_fw_info_size=278
+            ;;
+        am3-s19jproa)
+            dcent_expected_model=s19jpro-a
+            dcent_expected_fw_info_sha256=3625d6f454aa398e3d8855791e32a6adcddca5d986d3151865095cb9b19dbe92
+            dcent_expected_fw_info_size=282
             ;;
         am3-s19jproplus)
             dcent_expected_model=s19jpro-plus
@@ -64,6 +72,16 @@ dcent_require_exact_amlogic_build_inputs() {
             dcent_expected_model=s19kpro
             dcent_expected_fw_info_sha256=2c2aca134728f17e853701ad860956de933f96a0ada5b0eeae42d6e338af8710
             dcent_expected_fw_info_size=278
+            ;;
+        am3-s19kpro-nopic)
+            # Exact S19k Pro NoPic image lane. Distinct vnish 1.2.7 NAND donor
+            # identity (build_name vnishfirmwarecom); sibling-model and the
+            # legacy vnishfarm 1.2.6-rc5 s19kpro identity are both refused.
+            dcent_expected_model=s19kpro
+            dcent_expected_fw_info_sha256=e9a976cef48abced73e240afbd70d7c15310f7fe65c1d83b9910d1545b0bec0a
+            dcent_expected_fw_info_size=299
+            dcent_expected_build_name=vnishfirmwarecom
+            dcent_expected_fw_version=1.2.7
             ;;
         am3-s21)
             dcent_expected_model=s21
@@ -111,21 +129,28 @@ dcent_require_exact_amlogic_build_inputs() {
         "$DCENT_AM3_AML_FW_INFO" "$dcent_expected_fw_info_size" \
         "$dcent_expected_fw_info_sha256" "Amlogic fw-info identity input" || return 1
 
-    python3 - "$DCENT_AM3_AML_FW_INFO" "$dcent_expected_model" <<'PY'
+    # Arms may pin a distinct donor generation; the retained vnishfarm
+    # 1.2.6-rc5 identity stays the default so earlier arms are unchanged.
+    : "${dcent_expected_build_name:=vnishfarm}"
+    : "${dcent_expected_fw_version:=1.2.6-rc5}"
+    python3 - "$DCENT_AM3_AML_FW_INFO" "$dcent_expected_model" \
+        "$dcent_expected_build_name" "$dcent_expected_fw_version" <<'PY'
 import json
 import pathlib
 import sys
 
 path = pathlib.Path(sys.argv[1])
 expected_model = sys.argv[2]
+expected_build_name = sys.argv[3]
+expected_fw_version = sys.argv[4]
 try:
     identity = json.loads(path.read_text(encoding="utf-8"))
 except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
     raise SystemExit(f"invalid exact Amlogic fw-info: {error}")
 
 expected = {
-    "build_name": "vnishfarm",
-    "fw_version": "1.2.6-rc5",
+    "build_name": expected_build_name,
+    "fw_version": expected_fw_version,
     "install_type": "nand",
     "model": expected_model,
     "platform": "aml",

@@ -451,15 +451,16 @@ fn run_sg1_wiring_child(mode: &str) {
 /// Rank 24 flag contract: with `DCENT_SG1_CORRECTED_NONCE_CORES` unset (or
 /// set to anything but exactly `"1"`), every effective slot count and every
 /// `expected_nps` prediction is byte-identical to the declared values
-/// (default-OFF); with it set to `"1"`, the corrected values flow through
-/// the PRODUCTION accessors, not just the pure test path. Flag-on/odd-value
+/// (default-OFF); with it set to `"1"` in a compiled lab build, the corrected
+/// values flow through the accessors. Production builds ignore hardware
+/// environment overrides, including this flag. Flag-on/odd-value
 /// modes run in child processes per the dcentrald-asic env source contract.
 #[test]
 fn sg1_flag_default_off_then_env_wires_production_path() {
     use dcentrald_asic::drivers::SG1_CORRECTED_NONCE_CORES_ENV;
 
     match std::env::var(SG1_WIRING_CHILD_ENV) {
-        Ok(mode) if mode == "flag-1" => assert_sg1_effective(true),
+        Ok(mode) if mode == "flag-1" => assert_sg1_effective(dcentrald_common::lab_env::compiled()),
         Ok(mode) if mode == "flag-unset" || mode == "flag-true" => assert_sg1_effective(false),
         Ok(other) => panic!("unknown SG-1 wiring mode: {other}"),
         Err(_) => {

@@ -8,20 +8,30 @@
 //!   1. Check for UIO devices (/dev/uio0) -> Zynq
 //!   2. Check for /dev/ttyO1 -> BeagleBone
 //!   3. Check for STM32MP15 / ttySTM* -> Braiins BCB100
-//!   4. Check for uart_trans kernel module -> CVitek
-//!   5. Check for /dev/ttyS1 + Amlogic DTS -> Amlogic
+//!   Unsupported CV1835 identities refuse before hardware construction.
+//!   4. Check for /dev/ttyS1 + Amlogic DTS -> Amlogic
 
+pub mod am2_bm1398;
 pub mod am2_controller;
 pub mod amlogic;
+pub(crate) mod bb_bus0_diagnostic;
+pub(crate) mod bb_factory_acquisition;
+pub(crate) mod bb_selected_inventory;
 pub mod beaglebone;
 pub mod beaglebone_cold_boot;
+pub mod beaglebone_psu;
+pub mod c43_bm1393;
 pub mod config;
-pub(crate) mod cvitek;
-pub(crate) mod cvitek_cold_boot;
-pub(crate) mod cvitek_pinmux;
+pub(crate) mod cv1835_retirement;
+// R16 held stock fixtures and ABI inventory survive runtime retirement.
+// Test-only: the evidence adapter never constructs a hardware owner.
+#[cfg(test)]
+mod cvitek_stock_evidence;
 #[cfg(feature = "sim-hal")]
 pub mod sim;
 pub mod stm32mp15;
+pub mod stock_bm1391;
+pub mod stock_bm1396;
 pub mod subtype;
 pub mod zynq;
 
@@ -1148,6 +1158,16 @@ pub fn detect_platform() -> Result<Box<dyn Platform>> {
     // It never gates detection — see `finalize_detection`/`warn_if_soc_contradicts`.
     let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
     let compatible = read_soc_compatible();
+    let model = std::fs::read_to_string("/proc/device-tree/model").unwrap_or_default();
+    cv1835_retirement::require_supported_controller(
+        &cpuinfo,
+        &compatible,
+        &model,
+        std::path::Path::new("/sys/module/uart_trans").exists(),
+        cv1835_retirement::cv1835_child_identity(std::path::Path::new(
+            "/sys/firmware/devicetree/base",
+        )),
+    )?;
 
     // 1. Zynq — UIO devices (covers both S9 and S19/am2-s17)
     if std::path::Path::new("/dev/uio0").exists() {
@@ -1193,25 +1213,12 @@ pub fn detect_platform() -> Result<Box<dyn Platform>> {
         );
     }
 
-    // 4. CVitek uart_trans kernel module (CV1835 SoC, NOT BeagleBone).
-    //
-    // Fail-closed by default. `CViTekPlatform::new()` itself enforces the
-    // operator-authorized opt-in (`DCENT_CV1835_EXPERIMENTAL_RUNTIME=1`,
-    // 2026-08-05): unset => the same typed refusal as before (propagated via
-    // `?`); set => the Experimental lane is admitted. Construction does no
-    // hardware I/O; the mining lifecycle enforces the fail-safe envelope.
-    if std::path::Path::new("/sys/module/uart_trans").exists() {
-        return finalize_detection(
-            Box::new(cvitek::CViTekPlatform::new()?),
-            &cpuinfo,
-            &compatible,
-        );
-    }
-
-    // 4. Amlogic UART (must come after CVitek — both may have /dev/ttyS).
-    if ["/dev/ttyS1", "/dev/ttyS2", "/dev/ttyS3"]
-        .iter()
-        .any(|path| std::path::Path::new(path).exists())
+    // 4. Amlogic UART. Unsupported/unknown uart_trans identities were refused
+    // before any constructor above; module presence alone never chooses a SoC.
+    if classify_soc_evidence(&cpuinfo, &compatible) == Some(BoardType::Amlogic)
+        && ["/dev/ttyS1", "/dev/ttyS2", "/dev/ttyS3"]
+            .iter()
+            .any(|path| std::path::Path::new(path).exists())
     {
         return finalize_detection(
             Box::new(amlogic::AmlogicPlatform::new()?),

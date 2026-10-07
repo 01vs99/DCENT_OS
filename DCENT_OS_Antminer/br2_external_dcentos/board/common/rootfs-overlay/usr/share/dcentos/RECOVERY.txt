@@ -1,0 +1,41 @@
+DCENT_OS settings recovery
+
+No reset-button GPIO/timing is qualified for this image. Holding a button for
+15 seconds is not a supported password reset.
+
+With an administrator session, open System > Danger zone > Reset DCENT_OS
+settings. The image must contain a signed mining-off reset default. The reset
+worker first obtains exclusive deployment admission and checks mining shutdown.
+It restores DCENT settings, clears dashboard credentials and uploaded SSH keys,
+and requests a normal reboot. Vendor partitions, factory EEPROM, entropy, SSH
+host keys and hardware safety journals are preserved.
+
+No-UART recovery on qualified external SD media:
+1. Shut down and disconnect miner power. Remove the DCENT SD card.
+2. On a Linux computer, mount that card's DCENT data partition (the partition
+   mounted as /data on the miner). Do not edit vendor NAND or boot selectors.
+3. In dcent/reset-settings, write exactly this line including its newline:
+   RESET DCENT_OS SETTINGS
+   The dcent directory and marker must be owned by root and must not be group
+   or world writable; use mode 0700 on dcent and 0600 on the marker.
+4. Unmount cleanly, reinstall the card, and boot. The exact marker is consumed
+   only after the signed image default and previous hardware session pass.
+   Reconnect at the existing DHCP address and complete first-time setup.
+   Mining stays disabled until an operator explicitly starts it.
+
+This marker resets only the DCENT data partition on that card. It is not a
+NAND recovery installer. A restricted volatile-data rescue image cannot erase
+settings on a separate persistent partition. Use that board's qualified media
+recovery procedure; no generic flash or reset-button sequence is promised.
+
+If shutdown, default verification, writing or reboot fails, mining remains
+fenced. Do not remove crash/session journals to force a reset. After resolving
+the reported cause, an administrator with an existing SSH key can deliberately
+retry: /usr/bin/python3 /usr/libexec/dcentos/dcentos-reset-settings.py schedule
+The worker reacquires the kernel lock and repeats every check. On external SD,
+the offline marker above provides the same deliberate retry after reboot.
+
+Logs, System and About offer a redacted support download including build
+metadata and /var/log/dcentos/last-panic.json. Review the download before sharing
+it with support. The device never uploads it. Crash records survive daemon
+restart; retention across power loss depends on the image's /var/log storage.

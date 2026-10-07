@@ -102,7 +102,14 @@ class ControllerDiagnosticBoundary(unittest.TestCase):
         members = self.package_names(self.metadata["workspace_members"])
         defaults = self.package_names(self.metadata["workspace_default_members"])
         self.assertIn("pic-recovery", members)
-        self.assertEqual(members - defaults, {"pic-recovery"})
+        # s19k-stage1-authorizer (the live stage1 authorizer) is a second opt-in,
+        # non-default workspace member (present in `members`, absent from
+        # `default-members`) — the same fail-closed "not shipped by default" posture
+        # as pic-recovery. Added to this pin 2026-09-01; both are the only non-default
+        # members, and each is separately depth-checked by the tests below.
+        self.assertEqual(
+            members - defaults, {"pic-recovery", "s19k-stage1-authorizer"}
+        )
 
         build_commands = read(BUILD_DRIVER)
         self.assertIsNone(

@@ -25,7 +25,7 @@
 #
 # PROVENANCE of the recorded hashes (2026-07-09, RC rc-beta20260709):
 #   - All values computed directly from the operator's canonical main
-#     checkout ( Claude Code\DCENT Projects) on
+#     checkout (the release workstation) on
 #     2026-07-09.
 #   - The Amlogic values were rechecked on 2026-08-09 against eight distinct,
 #     exact-model VNishFarm 1.2.6-rc5 AML NAND archives. Each archive contains
@@ -76,6 +76,20 @@
 # =============================================================================
 
 e3d6cb69890118e75b34cf069ee9fd32d0671e192535f6cf83775e69935ea35c  
+4004015bba6ff3d64c7626d3be2e24bf4486fe4bad1261be7b880ca6ef693e1c  
+496a1e8a505ee929c7a5fdb3260d83c73396387deaf2ebb919faa02ee0d49a01  
+e7353cb4a4b06434f3fc36b203fb0c794c54dc70491d319c23b0df3bfdaab222  
+85f7da5f8205a684acb057ce7268d2e395bc4f39e5ae4c088bbf4ede1fcb638f  
+10a0199be8a638c4bf319a623362a89b6bee38f732ab00204df499a2f25ad2ea  
+# MSKMINERS 1.2.2 SD ZIP bin/ resident inputs; exact existing native BM1391 pins.
+# Top-level recovery BOOT.bin has a different FPGA and is not admitted.
+e6b85d66e226856203588794afb56da458716129852848c2c6069cb0ba84ab32  
+85f7da5f8205a684acb057ce7268d2e395bc4f39e5ae4c088bbf4ede1fcb638f  
+10a0199be8a638c4bf319a623362a89b6bee38f732ab00204df499a2f25ad2ea  
+# Exact unsupported NoPic analysis recipe; adding inputs does not promote its channel.
+d5013ac9f545df3b0792ea2cd8902b51e323bbb6f73ff0fea17bbee9f6157fe6  
+540c1770543d9620e106ea4287c2a534f5efd85c912e97d6be6295930506b257  
+e9a976cef48abced73e240afbd70d7c15310f7fe65c1d83b9910d1545b0bec0a  
 c500204acdf9bc53b0062276f9bc25b5ccd6d568d032419979af89426a11fea7  
 b2bf659de0fcb33ec7541bf5a62201d2e95bc52e8e1c497ab9229d7cf350b253  
 f9317611efc031705af33d1b595db20c62802f7aa45a3afc64cedbb62527d005  
@@ -86,6 +100,9 @@ f1c495fb5d70e619602eefc1764aface200fd53c29e92f4b23ffd4b003eb018e
 d5013ac9f545df3b0792ea2cd8902b51e323bbb6f73ff0fea17bbee9f6157fe6  
 540c1770543d9620e106ea4287c2a534f5efd85c912e97d6be6295930506b257  
 853eab52798c2e564e6c8edb47967bbbafae54e83328a33d31ddd0ae0ff0ed15  
+d5013ac9f545df3b0792ea2cd8902b51e323bbb6f73ff0fea17bbee9f6157fe6  
+540c1770543d9620e106ea4287c2a534f5efd85c912e97d6be6295930506b257  
+3625d6f454aa398e3d8855791e32a6adcddca5d986d3151865095cb9b19dbe92  
 d5013ac9f545df3b0792ea2cd8902b51e323bbb6f73ff0fea17bbee9f6157fe6  
 540c1770543d9620e106ea4287c2a534f5efd85c912e97d6be6295930506b257  
 d2b87592ccf14a7d934c61db4a214b519ed991088663ecaadc0e70b5e12c6c79  
@@ -108,3 +125,19 @@ d5013ac9f545df3b0792ea2cd8902b51e323bbb6f73ff0fea17bbee9f6157fe6
 540c1770543d9620e106ea4287c2a534f5efd85c912e97d6be6295930506b257  
 24699f1a8a3b279d22853d173dd8803fdd93dd2dc1cf1f3a0ec403c717189ece  
 cee0087b1f1205b73996651b99acd3a926d136e71047048f1758ffcec69b1ca2  DCENT_OS_Antminer/buildroot/dl/toolchain-external-custom/gcc-linaro-7.2.1-2017.11-x86_64_arm-linux-gnueabihf.tar.xz
+8ddf0498b19949fcf52cb186c5e31dfb27c06e410817c9193424a44604736648  
+85f7da5f8205a684acb057ce7268d2e395bc4f39e5ae4c088bbf4ede1fcb638f  
+10a0199be8a638c4bf319a623362a89b6bee38f732ab00204df499a2f25ad2ea  
+
+# Exact S17e source provenance; shared bytes do not alias target identity.
+8ddf0498b19949fcf52cb186c5e31dfb27c06e410817c9193424a44604736648  
+85f7da5f8205a684acb057ce7268d2e395bc4f39e5ae4c088bbf4ede1fcb638f  
+10a0199be8a638c4bf319a623362a89b6bee38f732ab00204df499a2f25ad2ea  
+
+# Pinned u-boot mkimage for the native AM2 fabric FIT pin (authority chain:
+# AM2_BOOT_PINS == the hardware-validated intermediate card's bytes, built
+# 2026-04-14 by u-boot commit 5a998ab00758; FIT serialization differs across
+# mkimage releases —
+# and scripts/prepare_release_am2_boot.py). Staged out-of-tree so the release
+# capsule mounts it read-only via DCENT_TOOLCHAIN_LOCAL_DIR.
+998314bbd994aa5a8d37f089975f727e6500bce207dfda1322da0877c9b4c99d  toolchain-cache/u-boot-2026.04-mkimage/mkimage

@@ -29,8 +29,9 @@ pub struct Bm1396DomainAdcRawLanes {
     pub lanes: [u16; BM1396_DOMAIN_ADC_LANE_COUNT],
 }
 
-/// Decode the four 12-bit lanes returned by ASIC registers B4/B8. Top bytes
-/// and all non-lane bits are ignored by the exact callback.
+/// Decode the four12-bit lanes returned by ASIC registers B4/B8. Original
+/// S17e7e508/7e53c and T17e7f370/7f3a0 extract the second lane at bit16.
+/// Reserved bits12..15 and28..31 are ignored; see384 original callback replays.
 pub const fn bm1396_decode_domain_adc_registers(
     register_b4: u32,
     register_b8: u32,
@@ -38,9 +39,9 @@ pub const fn bm1396_decode_domain_adc_registers(
     Bm1396DomainAdcRawLanes {
         lanes: [
             (register_b4 & BM1396_DOMAIN_ADC_RAW_MASK as u32) as u16,
-            ((register_b4 >> 12) & BM1396_DOMAIN_ADC_RAW_MASK as u32) as u16,
+            ((register_b4 >> 16) & BM1396_DOMAIN_ADC_RAW_MASK as u32) as u16,
             (register_b8 & BM1396_DOMAIN_ADC_RAW_MASK as u32) as u16,
-            ((register_b8 >> 12) & BM1396_DOMAIN_ADC_RAW_MASK as u32) as u16,
+            ((register_b8 >> 16) & BM1396_DOMAIN_ADC_RAW_MASK as u32) as u16,
         ],
     }
 }
@@ -432,9 +433,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn complete_original_adc_callback_vectors_preserve_reserved_gap_and_index() {
+        let mut count = 0;
+        for line in include_str!("bm1396_domain_adc_callback_vectors.csv")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+        {
+            let fields: Vec<u32> = line
+                .split(',')
+                .map(|field| field.parse().unwrap())
+                .collect();
+            assert_eq!(fields.len(), 10);
+            let model = if fields[0] == 0 {
+                Bm1396Model::S17e
+            } else {
+                Bm1396Model::T17e
+            };
+            assert_eq!(
+                bm1396_domain_adc_sample_index(model, fields[1] as u8, fields[2] as u8).unwrap(),
+                fields[5] as usize
+            );
+            let b4 = fields[3] == 0xb4;
+            let actual = bm1396_decode_domain_adc_registers(
+                if b4 { fields[4] } else { 0 },
+                if b4 { 0 } else { fields[4] },
+            );
+            let offset = if b4 { 0 } else { 2 };
+            assert_eq!(actual.lanes[offset], fields[6 + offset] as u16);
+            assert_eq!(actual.lanes[offset + 1], fields[7 + offset] as u16);
+            count += 1;
+        }
+        assert_eq!(count, 384);
+    }
+
+    #[test]
     fn adc_register_decode_scale_and_model_index_are_exact() {
         assert_eq!(
-            bm1396_decode_domain_adc_registers(0xffab_c123, 0x55de_f456),
+            bm1396_decode_domain_adc_registers(0xfabc_f123, 0x5def_a456),
             Bm1396DomainAdcRawLanes {
                 lanes: [0x123, 0xabc, 0x456, 0xdef],
             }

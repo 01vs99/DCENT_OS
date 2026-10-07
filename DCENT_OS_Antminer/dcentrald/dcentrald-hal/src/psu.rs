@@ -1203,9 +1203,14 @@ impl Apw121215a {
     /// commit after operator-confirmed live success on `a lab unit`. Failure
     /// to open the mmap backend falls back to sysfs with a WARN log.
     pub fn open_gpio_bitbang_at(addr: u8) -> Result<Self> {
-        let use_mmap = std::env::var("DCENT_AM2_PSU_BITBANG_USE_MMAP")
+        let use_mmap = dcentrald_common::lab_env::var("DCENT_AM2_PSU_BITBANG_USE_MMAP")
             .map(|v| v.trim() == "1")
-            .unwrap_or(false);
+            .unwrap_or_else(|error| {
+            matches!(error, std::env::VarError::NotPresent)
+                && dcentrald_common::runtime_hardware_recipe::am2_default(
+                    dcentrald_common::runtime_hardware_recipe::Am2HardwareFlag::MmapPsuBitbang
+                )
+        });
         let gpio = if use_mmap {
             match GpioBitBangI2c::new_mmap_am2() {
                 Ok(g) => {
@@ -1254,10 +1259,10 @@ impl Apw121215a {
         // path — preventing accidental "I just set the env to see what
         // happens" Loki bricks. Loud `tracing::error!` if the Loki gate
         // is set without the paired ack.
-        let loki_per_byte_mode_requested = std::env::var("DCENT_AM2_PSU_LOKI_REGISTER_POINTER")
+        let loki_per_byte_mode_requested = dcentrald_common::lab_env::var("DCENT_AM2_PSU_LOKI_REGISTER_POINTER")
             .map(|v| v.trim() == "1")
             .unwrap_or(false);
-        let loki_brick_ack = std::env::var("DCENT_AM2_PSU_LOKI_OK_TO_BRICK_SPOOF")
+        let loki_brick_ack = dcentrald_common::lab_env::var("DCENT_AM2_PSU_LOKI_OK_TO_BRICK_SPOOF")
             .map(|v| v.trim() == "1")
             .unwrap_or(false);
         let loki_per_byte_mode = if loki_per_byte_mode_requested && !loki_brick_ack {
@@ -2526,7 +2531,7 @@ impl Apw121215a {
     /// gate + `self.fw_byte` and logs when the per-version path is taken.
     /// See [`Self::PER_VERSION_DAC_ENV`].
     fn voltage_to_dac_gated(&self, v: f64) -> u8 {
-        let gate_on = std::env::var(Self::PER_VERSION_DAC_ENV).as_deref() == Ok("1");
+        let gate_on = dcentrald_common::lab_env::var(Self::PER_VERSION_DAC_ENV).as_deref() == Ok("1");
         let dac = Self::select_set_voltage_dac(gate_on, self.fw_byte, v);
         if gate_on && dac != Self::voltage_to_dac_linear(v) {
             tracing::info!(
@@ -3265,7 +3270,7 @@ impl Apw121215a {
                                                // imply the empirical-success gap is >>2 s. Operators can now
                                                // set GAP_MS=7600 to match wave50's measured 7.6 s cadence or
                                                // higher (up to 60 s, covering one full spoof watchdog window).
-        let cycle_gap_ms: u64 = std::env::var("DCENT_AM2_PSU_LOKI_COLD_WAKE_GAP_MS")
+        let cycle_gap_ms: u64 = dcentrald_common::lab_env::var("DCENT_AM2_PSU_LOKI_COLD_WAKE_GAP_MS")
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
             .filter(|n| *n <= 60000)
@@ -3435,7 +3440,7 @@ impl Apw121215a {
         // (60-120 s) even started. Lift the clamp to 128 so operators
         // can match bosminer's cadence; default stays 8 to preserve
         // existing fleet behaviour.
-        let iterations = std::env::var("DCENT_AM2_PSU_LOKI_COLD_WAKE_ITERATIONS")
+        let iterations = dcentrald_common::lab_env::var("DCENT_AM2_PSU_LOKI_COLD_WAKE_ITERATIONS")
             .ok()
             .and_then(|s| s.trim().parse::<usize>().ok())
             .filter(|n| (1..=128).contains(n))
@@ -3478,7 +3483,7 @@ impl Apw121215a {
         // doesn't set the env). The `wave55c_crc_diagnostic` log path
         // already in place gives byte-level audit of what we send vs what
         // Loki ACKs.
-        let standalone_re_fix_enabled = std::env::var("DCENT_AM2_STANDALONE_RE_FIX")
+        let standalone_re_fix_enabled = dcentrald_common::lab_env::var("DCENT_AM2_STANDALONE_RE_FIX")
             .map(|v| v.trim() == "1")
             .unwrap_or(false);
         if standalone_re_fix_enabled {

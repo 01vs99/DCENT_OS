@@ -270,10 +270,10 @@ expect_failure missing-manifest-claim python3 "$GENERATOR" verify \
 # regenerate it after Buildroot, re-inspect it while still in the build volume,
 # bind the inventory in the signed source-closure receipt, and publish its name.
 grep -Fq 'rm -rf buildroot/output/legal-info' "$SCRIPT_DIR/build_in_docker.sh"
-grep -Fq 'BR2_EXTERNAL=/build/dcentos/br2_external_dcentos legal-info' \
+grep -Fq 'BR2_EXTERNAL=/build/DCENT_OS_Antminer/br2_external_dcentos legal-info' \
     "$SCRIPT_DIR/build_in_docker.sh"
 grep -Fq 'buildroot_legal_inventory.py generate' "$SCRIPT_DIR/build_in_docker.sh"
-grep -Fq -- '--legal-info-dir /build/dcentos/buildroot/output/legal-info' \
+grep -Fq -- '--legal-info-dir /build/DCENT_OS_Antminer/buildroot/output/legal-info' \
     "$SCRIPT_DIR/build_in_docker.sh"
 grep -Fq -- '--artifact "$BUILDROOT_LEGAL_INVENTORY_PATH"' \
     "$SCRIPT_DIR/build_in_docker.sh"

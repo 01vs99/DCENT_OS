@@ -1,32 +1,179 @@
-//! S19k BM1366 Wire Gaps B pack (B1–B5) — host-testable pins for G7–G11.
+//! S19k BM1366 native wire parameters and read-only UART ownership probe.
 //!
-//! Source:  § Gaps B
-//! + `AML_REFUSE_MATRIX.md` (runtime engine try refuse while DESK_PENDING)
-//! + § Desk pass 2026-08-11g (AML `asic_addr_interval` = **2** for BHB5690x).
+//! Native execution uses the kernel device/driver join under the fabric lease,
+//! fresh response coverage after every baud transition, and the retained
+//! cooling, watchdog and power owners. Historical Bench GO and desk-pending
+//! policy is archived under `office-bench/s19k/`; it is not compiled.
 //!
-//! This module is **policy + CMD template pins only**. It does not open UART,
-//! energize rails, construct a mining engine, or claim mining. Desk 11d/11e
-//! closed am3 UART framing + work-frame bytes; MS8 fan-out is CLOSED. Desk 11g
-//! pinned AML addr_interval=2 (refuse public floor=3). Runtime-try stays
-//! fail-closed while `/dev/uart_trans` transport is unowned (stock) **or**
-//! while `braiins_ttys_bench_go` is false (Braiins Track-1).
-//!
-//! Wire CLEAR_BRAIINS_TTY: Braiins raw ports are `/dev/ttyS1`+`/dev/ttyS2`
-//! (required) and `/dev/ttyS3` (discover; `a lab unit` dmesg wakes all three)
-//! @ 3_000_000 8N1 (never ttyS0 console).
-//! Userspace writes full CLOSED frames (`pack_set_address_uart_trans`,
-//! `pack_uart_trans_job`). Runtime-try on BraiinsRawTtyS still requires
-//! explicit Bench GO (`braiins_ttys_bench_go=true`); CURRENT defaults false.
-//! Runtime override: [`current_with_runtime_bench_go`] via env
-//! `DCENT_BRAIINS_TTYS_BENCH_GO=1` or file `/etc/dcentos/braiins_ttys_bench_go`.
-//!
-//! Live am3 set_address stream capture remains DESK_PENDING (templates only) —
-//! that note does **not** block pinning the interval constant (desk 11g).
+//! This module constructs command plans only; it never opens a UART or enables
+//! power. The native executor retains the response barriers and terminal cut.
 
 use crate::chain_transport::{
     bitmain_jig_addr_interval, bm1397plus_addr_interval, linear_chip_addresses,
 };
 use crate::stock_fpga_policy::stock_bitmain_crc5;
+
+/// Native AML uses the kernel's Meson UART owner. This read-only probe binds
+/// each configured endpoint to its actual platform device and driver; a
+/// `/dev/uart_trans` name or a loaded module is not transport identity.
+///
+/// The caller must already hold the fabric lease, and must retain the existing
+/// exclusive UART executor for I/O. This observation grants no power or work
+/// capability. A ttyS2 endpoint still needs fresh complete RX evidence after
+/// every initialization/baud transition; an owner match cannot prove live RX.
+pub fn probe_native_amlogic_uart_owner(serial_devices: &str) -> Result<(), String> {
+    probe_native_amlogic_uart_owner_at(std::path::Path::new("/sys"), serial_devices)
+}
+
+fn probe_native_amlogic_uart_owner_at(
+    sysfs: &std::path::Path,
+    serial_devices: &str,
+) -> Result<(), String> {
+    use std::{collections::BTreeSet, fs};
+    let platform_devices = fs::canonicalize(sysfs.join("devices"))
+        .map_err(|error| format!("native AML UART sysfs devices unavailable: {error}"))?;
+    let expected_driver = fs::canonicalize(sysfs.join("bus/platform/drivers/meson_uart"))
+        .map_err(|error| format!("native AML UART kernel meson_uart owner unavailable: {error}"))?;
+    let mut seen = BTreeSet::new();
+    for path in serial_devices.split(',') {
+        // These are the source-pinned native Meson endpoint/register pairs,
+        // not logical hashboard mappings. Physical population admission owns
+        // the separate tty-to-EEPROM/plug/reset join.
+        let (tty, controller) = match path {
+            "/dev/ttyS1" => ("ttyS1", "ffd24000.serial"),
+            "/dev/ttyS2" => ("ttyS2", "ffd23000.serial"),
+            "/dev/ttyS3" => ("ttyS3", "ff804000.serial"),
+            _ => {
+                return Err(format!(
+                    "native AML UART refuses non-native endpoint {path:?}"
+                ))
+            }
+        };
+        if !seen.insert(tty) {
+            return Err(format!("native AML UART duplicate endpoint {path}"));
+        }
+        let device =
+            fs::canonicalize(sysfs.join(format!("class/tty/{tty}/device"))).map_err(|error| {
+                format!("native AML UART {path} has no kernel device owner: {error}")
+            })?;
+        if !device.starts_with(&platform_devices)
+            || device.file_name().and_then(|name| name.to_str()) != Some(controller)
+        {
+            return Err(format!(
+                "native AML UART {path} controller differs from {controller}: {}",
+                device.display()
+            ));
+        }
+        let driver = fs::canonicalize(device.join("driver"))
+            .map_err(|error| format!("native AML UART {path} driver is unavailable: {error}"))?;
+        if driver != expected_driver {
+            return Err(format!(
+                "native AML UART {path} is owned by {}, expected meson_uart",
+                driver.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod native_uart_owner_tests {
+    use super::*;
+    use std::{
+        fs,
+        os::unix::fs::symlink,
+        path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    struct SysfsFixture(PathBuf);
+    impl SysfsFixture {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "dcent-native-uart-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&root).unwrap();
+            for driver in ["meson_uart", "uart_trans", "of_serial"] {
+                fs::create_dir_all(root.join(format!("bus/platform/drivers/{driver}"))).unwrap();
+            }
+            for (tty, controller) in [
+                ("ttyS1", "ffd24000.serial"),
+                ("ttyS2", "ffd23000.serial"),
+                ("ttyS3", "ff804000.serial"),
+            ] {
+                let device = root.join(format!("devices/platform/{controller}"));
+                let class = root.join(format!("class/tty/{tty}"));
+                fs::create_dir_all(&device).unwrap();
+                fs::create_dir_all(&class).unwrap();
+                symlink(&device, class.join("device")).unwrap();
+                symlink(
+                    root.join("bus/platform/drivers/meson_uart"),
+                    device.join("driver"),
+                )
+                .unwrap();
+            }
+            Self(root)
+        }
+    }
+    impl Drop for SysfsFixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn exact_live_kernel_bindings_admit_without_module_or_process_names() {
+        let fixture = SysfsFixture::new();
+        // An unrelated loaded uart_trans module cannot reclassify AML as CV.
+        fs::create_dir_all(fixture.0.join("module/uart_trans")).unwrap();
+        for paths in [
+            "/dev/ttyS2",
+            "/dev/ttyS1,/dev/ttyS2",
+            "/dev/ttyS3,/dev/ttyS2,/dev/ttyS1",
+        ] {
+            probe_native_amlogic_uart_owner_at(&fixture.0, paths).unwrap();
+        }
+    }
+
+    #[test]
+    fn wrong_missing_and_rebound_kernel_owners_refuse() {
+        let fixture = SysfsFixture::new();
+        for path in [
+            "",
+            "/dev/uart_trans",
+            "/dev/ttyS0",
+            "/dev/ttyS4",
+            "/dev/ttyS2,/dev/ttyS2",
+            " /dev/ttyS2",
+            "/dev/ttyS2,",
+        ] {
+            assert!(
+                probe_native_amlogic_uart_owner_at(&fixture.0, path).is_err(),
+                "{path:?}"
+            );
+        }
+        let driver = fixture.0.join("devices/platform/ffd23000.serial/driver");
+        fs::remove_file(&driver).unwrap();
+        assert!(probe_native_amlogic_uart_owner_at(&fixture.0, "/dev/ttyS2").is_err());
+        for wrong in ["uart_trans", "of_serial"] {
+            symlink(
+                fixture.0.join(format!("bus/platform/drivers/{wrong}")),
+                &driver,
+            )
+            .unwrap();
+            assert!(probe_native_amlogic_uart_owner_at(&fixture.0, "/dev/ttyS2").is_err());
+            fs::remove_file(&driver).unwrap();
+        }
+        symlink(fixture.0.join("bus/platform/drivers/meson_uart"), &driver).unwrap();
+        let class = fixture.0.join("class/tty/ttyS2/device");
+        fs::remove_file(&class).unwrap();
+        symlink(fixture.0.join("devices/platform/ffd24000.serial"), &class).unwrap();
+        assert!(probe_native_amlogic_uart_owner_at(&fixture.0, "/dev/ttyS2").is_err());
+    }
+}
 
 /// HashSource / Lead geometry for S19k BM1366 (same as checklist A).
 pub const S19K_WIRE_ASIC_NUM: u8 = 77;
@@ -77,6 +224,106 @@ pub const PLL_RAMP_START_MHZ: u32 = 50;
 pub const PUBLIC_FASTUART_REG: u8 = 0x28;
 pub const PUBLIC_FASTUART_VALUE: u32 = 0x1130_0200; // 1 Mbps class
 pub const JIG_CONFIG_BAUD_HZ: u32 = 12_000_000;
+
+/// Minimum dwell after EACH native SetAddress, including the final address.
+/// The held BM1366 jig chain-init sequence also uses 10 ms per ladder entry.
+/// Grouping 16 writes behind a 2 ms pause does not meet this wire requirement.
+pub const S19K_ADDRESS_DWELL_MS: u64 = 10;
+
+/// BHB56902/03 maximum in held Bitmain s19k-pro-merge-20240409
+/// `01_Antminer_S19k_Pro_zynq7007_BHB56XXX/components/minerfs.image.gz.tree/etc/levels.json`.
+/// BHB56901's 695 MHz row is a different board/PSU combination.
+pub const S19K_NATIVE_MAX_FREQUENCY_MHZ: u16 = 670;
+
+/// Resolve with the shared BM1366 solver, then check the actual divider ratio
+/// against the envelope (rounded integer MHz can hide an overshoot). If the
+/// nearest result crosses the ceiling, try lower requests within the native
+/// executor's existing 2 MHz error allowance. No register formula is forked.
+pub fn bm1366_pll_in_envelope(
+    target_mhz: u16,
+    minimum_mhz: u16,
+    maximum_mhz: u16,
+) -> Result<(u32, u16), &'static str> {
+    if minimum_mhz == 0 || !(minimum_mhz..=maximum_mhz).contains(&target_mhz) {
+        return Err("BM1366 PLL request lies outside the frequency envelope");
+    }
+    let lowest_request = target_mhz.saturating_sub(2).max(minimum_mhz);
+    for request in (lowest_request..=target_mhz).rev() {
+        let (register, actual) = crate::bm1366_pll_reg_and_actual(request);
+        let div = crate::pll_model::crystal25_pll_decode_dividers(register);
+        let numerator = 25 * u64::from(div.fb_div);
+        let denominator =
+            u64::from(div.ref_div) * u64::from(div.post_div1) * u64::from(div.post_div2);
+        if denominator != 0
+            && numerator >= u64::from(minimum_mhz) * denominator
+            && numerator <= u64::from(maximum_mhz) * denominator
+            && numerator.abs_diff(u64::from(target_mhz) * denominator) <= 2 * denominator
+        {
+            return Ok((register, actual));
+        }
+    }
+    Err("BM1366 PLL has no solution within the envelope and 2 MHz error allowance")
+}
+
+/// Native command plan for the existing BHB56902/03 owner. Underclocking is
+/// allowed from 100 MHz (native driver policy); 50 MHz is only a ramp start.
+/// This is not a voltage or cooling grant. The executor must still acquire
+/// fresh post-baud coverage before touching the post-baud or final sections.
+pub fn s19k_bm1366_native_execution_program(
+    expected_chip_count: u8,
+    target_frequency_mhz: u16,
+) -> Result<crate::s19k_bm1366_init_seq::S19kBm1366NativeExecutionProgram, &'static str> {
+    use crate::s19k_bm1366_init_seq::S19kBm1366NativeCommandOp;
+    if !(100..=S19K_NATIVE_MAX_FREQUENCY_MHZ).contains(&target_frequency_mhz) {
+        return Err("native BHB56902/03 PLL target must be within 100..=670 MHz");
+    }
+    let (pll_register, actual_frequency_mhz) =
+        bm1366_pll_in_envelope(target_frequency_mhz, 100, S19K_NATIVE_MAX_FREQUENCY_MHZ)?;
+    let mut program = crate::s19k_bm1366_init_seq::s19k_bm1366_native_execution_program(
+        expected_chip_count,
+        target_frequency_mhz,
+    )?;
+    let pll_command = program.final_commands.iter_mut().find(|command| {
+        matches!(command.op, S19kBm1366NativeCommandOp::WriteRegister(write) if write.reg == REG_PLL0)
+    }).ok_or("native S19k plan lost its final PLL0 command")?;
+    if let S19kBm1366NativeCommandOp::WriteRegister(write) = &mut pll_command.op {
+        write.value = pll_register;
+    }
+    program.actual_frequency_mhz = actual_frequency_mhz;
+    for command in &mut program.pre_baud_commands {
+        if matches!(command.op, S19kBm1366NativeCommandOp::SetAddress { .. }) {
+            command.dwell_after_ms = command.dwell_after_ms.max(S19K_ADDRESS_DWELL_MS);
+        }
+    }
+    Ok(program)
+}
+
+/// Physical mtd5 geometry; preceding partition sizes omit a 6 MiB gap.
+/// `/proc/mtd` supplies lengths, so summing it incorrectly gives 0x06100000.
+pub const S19K_MTD5_BASE: u32 = 0x0670_0000;
+pub const S19K_MTD5_SIZE: u32 = 0x0990_0000;
+
+/// Translate a nonempty physical span using observed partition geometry.
+/// This is address arithmetic only. Persistent writes additionally require
+/// the installer's full backup/readback, signature and write/readback checks.
+pub fn s19k_mtd5_local_span(
+    observed_base: u32,
+    observed_size: u32,
+    physical_offset: u32,
+    length: u32,
+) -> Result<std::ops::Range<u32>, &'static str> {
+    if observed_base != S19K_MTD5_BASE || observed_size != S19K_MTD5_SIZE {
+        return Err("S19k mtd5 requires physical base 0x06700000 and size 0x09900000");
+    }
+    let start = physical_offset
+        .checked_sub(observed_base)
+        .ok_or("physical span starts before S19k mtd5")?;
+    let end = start.checked_add(length).ok_or("S19k mtd5 span overflow")?;
+    if length == 0 || end > observed_size {
+        return Err("physical span lies outside S19k mtd5");
+    }
+    Ok(start..end)
+}
 
 // --- B3 ticket / hw_error ---
 pub const REG_TICKET_MASK: u8 = 0x14;
@@ -165,68 +412,6 @@ pub fn cmd_uart_relay_chip0() -> [u8; 9] {
     cmd_set_config(false, 0, REG_UART_RELAY, UART_RELAY_CHIP0_PUBLIC)
 }
 
-/// AML refuse-matrix hard gates (R1–R10) as host-testable labels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum S19kAmlRefuseGate {
-    R1Identity,
-    R2NoPicClass,
-    R3S21Fuse,
-    R4Lm75BeforeProbe,
-    R5Watchdog,
-    R6BaudDialect,
-    R7RailEnable,
-    R8MiningDefault,
-    R9EngineConstruct,
-    R10PublicClaim,
-}
-
-/// Evaluate hard refuse triggers from claimed inputs (desk/host only).
-pub fn aml_hard_refuse(
-    board_name_ok: bool,
-    chip_id_ok: bool,
-    offers_pic_owner: bool,
-    s21_fuse: bool,
-    lm75_before_probe: bool,
-    watchdog_ok: bool,
-    baud_dialects_merged: bool,
-    rail_enable_before_gates: bool,
-    mining_default_enabled: bool,
-    engine_construct_while_pending: bool,
-    public_mining_achieved_claim: bool,
-) -> Option<S19kAmlRefuseGate> {
-    if !board_name_ok || !chip_id_ok {
-        return Some(S19kAmlRefuseGate::R1Identity);
-    }
-    if offers_pic_owner {
-        return Some(S19kAmlRefuseGate::R2NoPicClass);
-    }
-    if s21_fuse {
-        return Some(S19kAmlRefuseGate::R3S21Fuse);
-    }
-    if !lm75_before_probe {
-        return Some(S19kAmlRefuseGate::R4Lm75BeforeProbe);
-    }
-    if !watchdog_ok {
-        return Some(S19kAmlRefuseGate::R5Watchdog);
-    }
-    if baud_dialects_merged {
-        return Some(S19kAmlRefuseGate::R6BaudDialect);
-    }
-    if rail_enable_before_gates {
-        return Some(S19kAmlRefuseGate::R7RailEnable);
-    }
-    if mining_default_enabled {
-        return Some(S19kAmlRefuseGate::R8MiningDefault);
-    }
-    if engine_construct_while_pending {
-        return Some(S19kAmlRefuseGate::R9EngineConstruct);
-    }
-    if public_mining_achieved_claim {
-        return Some(S19kAmlRefuseGate::R10PublicClaim);
-    }
-    None
-}
-
 /// B1 stage_2 ordered steps (EVIDENCED `set_asic_register_stage_2` / `sub_5F848`).
 /// Host-testable order only — does not claim am3 ttyS framing closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -278,175 +463,8 @@ pub const fn s19k_requires_uart_relay() -> bool {
     S19K_VOLTAGE_DOMAINS > 9
 }
 
-/// Track-1 transport select for runtime-try admit (Wire CLEAR_BRAIINS_TTY).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum S19kTrack1TransportKind {
-    /// Stock AML `/dev/uart_trans` mmap/ioctl path (Track 2 / stock image).
-    StockUartTrans,
-    /// Braiins raw `/dev/ttyS1`+`/dev/ttyS2` @ 3M 8N1 (Track-1 opt-in).
-    BraiinsRawTtyS,
-}
-
-/// Soft DESK_PENDING / ownership gates that keep runtime engine try refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct S19kWireDeskPending {
-    /// am3 UART framing vs jig CMD — CLOSED desk 11d/11e → false.
-    pub am3_uart_framing_unconfirmed: bool,
-    /// jig/AML interval-2 vs public floor-3 — **reconciled desk 11g** (prefer 2) → false.
-    /// Live am3 set_address capture stays DESK_PENDING in comments only; does not re-open this flag.
-    pub addr_interval_unreconciled: bool,
-    /// work-frame bytes / uart_trans pack — CLOSED desk 11d/11e/11f → false.
-    pub work_frame_bytes_unpinned: bool,
-    /// Stock `/dev/uart_trans` runtime ownership not claimed by Lead — stock path refuse.
-    /// Refuse reason is **stock uart_trans unowned**, NOT open MS8 fan-out (CLOSED Wire 11e).
-    /// BraiinsRawTtyS path **ignores** this flag (uses `braiins_ttys_bench_go` instead).
-    pub uart_trans_runtime_unowned: bool,
-    /// Braiins Track-1 Bench GO. DEFAULT false — fail-closed until explicit Bench GO.
-    /// When false, `admit_s19k_bm1366_wire_runtime_try(..., BraiinsRawTtyS, ...)` refuses
-    /// with [`S19kWireRuntimeTryError::BraiinsTtyBenchGoRequired`].
-    pub braiins_ttys_bench_go: bool,
-}
-
-impl S19kWireDeskPending {
-    /// Current honest desk state for S19k Wire B pack (post desk 11d/11e/11f/11g + CLEAR_BRAIINS_TTY).
-    /// `addr_interval_unreconciled` cleared desk 11g (AML preferred=2). Lead does **not**
-    /// auto-clear `uart_trans_runtime_unowned` (stock) or `braiins_ttys_bench_go` (Braiins).
-    pub const CURRENT: Self = Self {
-        am3_uart_framing_unconfirmed: false,
-        addr_interval_unreconciled: false, // CLOSED desk 11g — AML addr_interval=2
-        work_frame_bytes_unpinned: false,
-        uart_trans_runtime_unowned: true, // stock still blocked
-        braiins_ttys_bench_go: false,     // Braiins fail-closed until Bench GO
-    };
-
-    /// Legacy helper: true while **stock** uart_trans path soft-gates still block.
-    pub const fn blocks_runtime_engine_try(self) -> bool {
-        self.blocks_runtime_engine_try_for(S19kTrack1TransportKind::StockUartTrans)
-    }
-
-    /// Transport-aware soft-gate block (framing/work_frame/addr + ownership/GO).
-    pub const fn blocks_runtime_engine_try_for(self, transport: S19kTrack1TransportKind) -> bool {
-        let soft = self.am3_uart_framing_unconfirmed
-            || self.addr_interval_unreconciled
-            || self.work_frame_bytes_unpinned;
-        match transport {
-            S19kTrack1TransportKind::StockUartTrans => soft || self.uart_trans_runtime_unowned,
-            S19kTrack1TransportKind::BraiinsRawTtyS => soft || !self.braiins_ttys_bench_go,
-        }
-    }
-}
-
-/// Env knob for Braiins Track-1 Bench GO (runtime override; does not mutate CURRENT).
-pub const BRAIINS_TTYS_BENCH_GO_ENV: &str = "DCENT_BRAIINS_TTYS_BENCH_GO";
-/// File knob for Braiins Track-1 Bench GO (regular non-symlink file, any content / empty OK).
-pub const BRAIINS_TTYS_BENCH_GO_FILE: &str = "/etc/dcentos/braiins_ttys_bench_go";
-
-/// True if env `DCENT_BRAIINS_TTYS_BENCH_GO` is `"1"` or `"true"` (case-insensitive)
-/// **or** if `/etc/dcentos/braiins_ttys_bench_go` is a regular non-symlink file
-/// (any content / empty OK). Else false. Fail-closed on errors and special
-/// objects. Does **not** mutate [`S19kWireDeskPending::CURRENT`].
-pub fn braiins_ttys_bench_go_from_runtime() -> bool {
-    braiins_ttys_bench_go_from_runtime_parts(
-        std::env::var_os(BRAIINS_TTYS_BENCH_GO_ENV),
-        BRAIINS_TTYS_BENCH_GO_FILE,
-    )
-}
-
-/// Testable core for [`braiins_ttys_bench_go_from_runtime`].
-pub fn braiins_ttys_bench_go_from_runtime_parts(
-    env_val: Option<std::ffi::OsString>,
-    file_path: &str,
-) -> bool {
-    if let Some(v) = env_val {
-        let s = v.to_string_lossy();
-        let t = s.trim();
-        if t.eq_ignore_ascii_case("1") || t.eq_ignore_ascii_case("true") {
-            return true;
-        }
-    }
-    std::fs::symlink_metadata(file_path)
-        .map(|metadata| metadata.file_type().is_file() && !metadata.file_type().is_symlink())
-        .unwrap_or(false)
-}
-
-/// Copy of [`S19kWireDeskPending::CURRENT`] with `braiins_ttys_bench_go` taken from
-/// [`braiins_ttys_bench_go_from_runtime`]. CURRENT itself stays false.
-pub fn current_with_runtime_bench_go() -> S19kWireDeskPending {
-    let mut p = S19kWireDeskPending::CURRENT;
-    p.braiins_ttys_bench_go = braiins_ttys_bench_go_from_runtime();
-    p
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum S19kWireRuntimeTryError {
-    Am3UartFramingDeskPending,
-    AddrIntervalUnreconciled {
-        public: u8,
-        jig: u8,
-    },
-    WorkFrameBytesDeskPending,
-    /// Stock `/dev/uart_trans` transport unowned — NOT MS8 fan-out (fan-out CLOSED Wire 11e).
-    UartTransRuntimeUnowned,
-    /// Braiins raw ttyS path requires explicit Bench GO (`braiins_ttys_bench_go`).
-    BraiinsTtyBenchGoRequired,
-    MidstateSixteenForbidden,
-    BaudDialectMergeForbidden,
-    PicOwnerForbidden,
-}
-
-/// Fail-closed gate for **runtime engine try** (AML refuse matrix R9 / soft gates).
-/// Install-route lab_only / checklist A may still ship; this refuses GetAddress/work dispatch
-/// claims while the selected transport soft-gate remains closed.
-/// - StockUartTrans: refuse while `uart_trans_runtime_unowned` (Track 2 ownership).
-/// - BraiinsRawTtyS: **ignore** stock unowned; refuse while `!braiins_ttys_bench_go`.
-/// Cleared framing / work_frame / addr_interval flags do **not** refuse; MS8 fan-out is CLOSED
-/// (Wire 11e); addr_interval pinned desk 11g. Lead does **not** auto-clear ownership / Bench GO.
-pub fn admit_s19k_bm1366_wire_runtime_try(
-    pending: S19kWireDeskPending,
-    transport: S19kTrack1TransportKind,
-    midstate_number: u8,
-    merge_jig_12m_with_public_1m: bool,
-    offers_pic_owner: bool,
-) -> Result<(), S19kWireRuntimeTryError> {
-    if offers_pic_owner {
-        return Err(S19kWireRuntimeTryError::PicOwnerForbidden);
-    }
-    if midstate_number != S19K_WIRE_MIDSTATE_NUMBER {
-        return Err(S19kWireRuntimeTryError::MidstateSixteenForbidden);
-    }
-    if merge_jig_12m_with_public_1m {
-        return Err(S19kWireRuntimeTryError::BaudDialectMergeForbidden);
-    }
-    match transport {
-        S19kTrack1TransportKind::StockUartTrans => {
-            if pending.uart_trans_runtime_unowned {
-                return Err(S19kWireRuntimeTryError::UartTransRuntimeUnowned);
-            }
-        }
-        S19kTrack1TransportKind::BraiinsRawTtyS => {
-            // Ignore stock uart_trans unowned — Braiins gated on Bench GO only.
-            if !pending.braiins_ttys_bench_go {
-                return Err(S19kWireRuntimeTryError::BraiinsTtyBenchGoRequired);
-            }
-        }
-    }
-    if pending.am3_uart_framing_unconfirmed {
-        return Err(S19kWireRuntimeTryError::Am3UartFramingDeskPending);
-    }
-    if pending.addr_interval_unreconciled {
-        return Err(S19kWireRuntimeTryError::AddrIntervalUnreconciled {
-            public: S19K_PUBLIC_ADDR_INTERVAL,
-            jig: S19K_JIG_ADDR_INTERVAL,
-        });
-    }
-    if pending.work_frame_bytes_unpinned {
-        return Err(S19kWireRuntimeTryError::WorkFrameBytesDeskPending);
-    }
-    Ok(())
-}
-
-/// Public floor helper (`bm1397plus_addr_interval(77)` → 3). Documented only —
-/// **do not** bind as S19k AML SoT; call [`refuse_s19k_public_floor_as_aml_interval`].
+/// Generic public address interval; do not bind it as the S19k AML interval.
+/// Call [`refuse_s19k_public_floor_as_aml_interval`] before using an input interval.
 pub fn s19k_public_floor_addr_interval() -> u8 {
     let public = bm1397plus_addr_interval(S19K_WIRE_ASIC_NUM);
     debug_assert_eq!(public, S19K_PUBLIC_ADDR_INTERVAL);
@@ -583,6 +601,105 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_ladder_paces_every_address_and_retains_baud_barriers() {
+        use crate::s19k_bm1366_init_seq::S19kBm1366NativeCommandOp;
+        let program = s19k_bm1366_native_execution_program(77, 400).unwrap();
+        let legacy =
+            crate::s19k_bm1366_init_seq::s19k_bm1366_native_execution_program(77, 400).unwrap();
+        let mut addresses = Vec::new();
+        for (command, old) in program
+            .pre_baud_commands
+            .iter()
+            .zip(&legacy.pre_baud_commands)
+        {
+            assert_eq!(command.op, old.op);
+            if let S19kBm1366NativeCommandOp::SetAddress { address } = command.op {
+                assert_eq!(command.dwell_after_ms, 10, "address {address}");
+                addresses.push(address);
+            } else {
+                assert_eq!(command, old);
+            }
+        }
+        assert_eq!(addresses, (0..77).map(|i| i * 2).collect::<Vec<u8>>());
+        assert_eq!(program.fast_uart_command, legacy.fast_uart_command);
+        assert_eq!(program.fast_host_baud, 3_000_000);
+        assert_eq!(program.post_baud_commands, legacy.post_baud_commands);
+        assert_eq!(program.final_commands, legacy.final_commands);
+    }
+
+    #[test]
+    fn native_pll_refuses_sibling_ceiling_ramp_start_and_invalid_geometry() {
+        for frequency in [0, 50, 99, 671, 695, u16::MAX] {
+            assert!(
+                s19k_bm1366_native_execution_program(77, frequency).is_err(),
+                "{frequency}"
+            );
+        }
+        for frequency in [100, 200, 400, 540, 669, 670] {
+            let program = s19k_bm1366_native_execution_program(77, frequency).unwrap();
+            assert!((100..=670).contains(&program.actual_frequency_mhz));
+        }
+        for count in [0, 76, 78, 110, 128] {
+            assert!(s19k_bm1366_native_execution_program(count, 400).is_err());
+        }
+    }
+
+    #[test]
+    fn pll_ceiling_checks_fractional_wire_frequency_and_updates_the_command() {
+        use crate::s19k_bm1366_init_seq::S19kBm1366NativeCommandOp;
+        for (target, minimum, maximum) in [(670, 100, 670), (485, 400, 485), (515, 300, 515)] {
+            let (register, actual) = bm1366_pll_in_envelope(target, minimum, maximum).unwrap();
+            let div = crate::pll_model::crystal25_pll_decode_dividers(register);
+            let denominator =
+                u32::from(div.ref_div) * u32::from(div.post_div1) * u32::from(div.post_div2);
+            assert!(25 * u32::from(div.fb_div) <= u32::from(maximum) * denominator);
+            assert!(25 * u32::from(div.fb_div) >= u32::from(minimum) * denominator);
+            assert!(actual.abs_diff(target) <= 2);
+        }
+        let program = s19k_bm1366_native_execution_program(77, 670).unwrap();
+        assert_eq!(program.actual_frequency_mhz, 669);
+        let safe = bm1366_pll_in_envelope(670, 100, 670).unwrap();
+        assert!(program.final_commands.iter().any(
+            |command| matches!(command.op, S19kBm1366NativeCommandOp::WriteRegister(write)
+                if write.reg == REG_PLL0 && write.value == safe.0)
+        ));
+        // 670 MHz has no exact divider solution; rounded labels must not admit it.
+        assert!(bm1366_pll_in_envelope(485, 485, 485).is_ok());
+        for (target, minimum, maximum) in [
+            (670, 670, 670),
+            (0, 0, 670),
+            (671, 100, 670),
+            (99, 100, 670),
+            (400, 500, 100),
+        ] {
+            assert!(bm1366_pll_in_envelope(target, minimum, maximum).is_err());
+        }
+    }
+
+    #[test]
+    fn physical_mtd5_translation_refuses_the_size_sum_trap_and_overflow() {
+        let local = |base, offset, length| s19k_mtd5_local_span(base, 0x0990_0000, offset, length);
+        assert_eq!(
+            local(0x0670_0000, 0x0B80_0000, 0x0010_0000),
+            Ok(0x0510_0000..0x0520_0000)
+        );
+        assert_eq!(
+            local(0x0670_0000, 0x0B40_0000, 1),
+            Ok(0x04D0_0000..0x04D0_0001)
+        );
+        assert!(local(0x0610_0000, 0x0B80_0000, 0x0010_0000).is_err());
+        assert!(s19k_mtd5_local_span(0x0670_0000, 0x09F0_0000, 0x0B80_0000, 1).is_err());
+        assert!(local(0x0670_0000, 0x066F_FFFF, 1).is_err());
+        assert!(local(0x0670_0000, 0x1000_0000, 1).is_err());
+        assert!(local(0x0670_0000, 0x0670_0000, 0).is_err());
+        assert!(local(0x0670_0000, u32::MAX, u32::MAX).is_err());
+        assert_eq!(
+            local(0x0670_0000, 0x0FFF_FFFF, 1),
+            Ok(0x098F_FFFF..0x0990_0000)
+        );
+    }
+
+    #[test]
     fn b1_cmd_templates_match_wire_desk_crc5() {
         assert_eq!(cmd_get_address_bcast(), [0x52, 0x05, 0x00, 0x00, 0x0a]);
         assert_eq!(cmd_read_register_bcast(0x00), cmd_get_address_bcast());
@@ -632,7 +749,6 @@ mod tests {
         assert_eq!(addrs[0], 0);
         assert_eq!(addrs[1], 2);
         assert_eq!(addrs[76], 152); // (77-1)*2
-        assert!(!S19kWireDeskPending::CURRENT.addr_interval_unreconciled);
     }
 
     #[test]
@@ -665,22 +781,6 @@ mod tests {
         assert_eq!(PLL_RAMP_START_MHZ, 50);
         assert_eq!(PUBLIC_FASTUART_VALUE, 0x1130_0200);
         assert_eq!(JIG_CONFIG_BAUD_HZ, 12_000_000);
-        assert!(matches!(
-            admit_s19k_bm1366_wire_runtime_try(
-                S19kWireDeskPending {
-                    am3_uart_framing_unconfirmed: false,
-                    addr_interval_unreconciled: false,
-                    work_frame_bytes_unpinned: false,
-                    uart_trans_runtime_unowned: false,
-                    braiins_ttys_bench_go: false,
-                },
-                S19kTrack1TransportKind::StockUartTrans,
-                8,
-                true,
-                false,
-            ),
-            Err(S19kWireRuntimeTryError::BaudDialectMergeForbidden)
-        ));
     }
 
     #[test]
@@ -708,18 +808,6 @@ mod tests {
         assert_eq!(S19K_WIRE_HASH_COUNTING, 0x0000_115A);
         assert_eq!(next_job_id(0), 8);
         assert_eq!(next_job_id(120), 0);
-        assert!(matches!(
-            admit_s19k_bm1366_wire_runtime_try(
-                S19kWireDeskPending::CURRENT,
-                S19kTrack1TransportKind::StockUartTrans,
-                16,
-                false,
-                false
-            ),
-            Err(S19kWireRuntimeTryError::MidstateSixteenForbidden)
-        ));
-        assert!(!S19kWireDeskPending::CURRENT.work_frame_bytes_unpinned);
-        assert!(S19kWireDeskPending::CURRENT.uart_trans_runtime_unowned);
     }
 
     #[test]
@@ -729,76 +817,6 @@ mod tests {
         assert_eq!(CORE_REG_HASH_CLOCK, 0x8000_8540); // Clk_Sel=0
         assert_eq!(ANALOG_MUX_DIODE_VDD_SEL, 3);
         // Pulse_Mode=1 bit placement remains DESK_PENDING — we do not invent packing here.
-    }
-
-    #[test]
-    fn runtime_try_refused_while_desk_pending() {
-        assert!(S19kWireDeskPending::CURRENT.blocks_runtime_engine_try());
-        assert!(S19kWireDeskPending::CURRENT.uart_trans_runtime_unowned);
-        assert!(!S19kWireDeskPending::CURRENT.braiins_ttys_bench_go);
-        assert!(!S19kWireDeskPending::CURRENT.am3_uart_framing_unconfirmed);
-        assert!(!S19kWireDeskPending::CURRENT.work_frame_bytes_unpinned);
-        assert!(!S19kWireDeskPending::CURRENT.addr_interval_unreconciled); // cleared desk 11g
-                                                                           // CURRENT refuse is transport unowned only — NOT addr_interval (CLOSED 11g),
-                                                                           // NOT framing, NOT MS8 fan-out (CLOSED Wire 11e). Lead does not auto-clear ownership.
-        assert!(matches!(
-            admit_s19k_bm1366_wire_runtime_try(
-                S19kWireDeskPending::CURRENT,
-                S19kTrack1TransportKind::StockUartTrans,
-                8,
-                false,
-                false
-            ),
-            Err(S19kWireRuntimeTryError::UartTransRuntimeUnowned)
-        ));
-        assert!(matches!(
-            admit_s19k_bm1366_wire_runtime_try(
-                S19kWireDeskPending {
-                    am3_uart_framing_unconfirmed: false,
-                    addr_interval_unreconciled: true,
-                    work_frame_bytes_unpinned: false,
-                    uart_trans_runtime_unowned: false,
-                    braiins_ttys_bench_go: false,
-                },
-                S19kTrack1TransportKind::StockUartTrans,
-                8,
-                false,
-                false,
-            ),
-            Err(S19kWireRuntimeTryError::AddrIntervalUnreconciled { public: 3, jig: 2 })
-        ));
-        assert!(matches!(
-            admit_s19k_bm1366_wire_runtime_try(
-                S19kWireDeskPending {
-                    am3_uart_framing_unconfirmed: false,
-                    addr_interval_unreconciled: false,
-                    work_frame_bytes_unpinned: true,
-                    uart_trans_runtime_unowned: false,
-                    braiins_ttys_bench_go: false,
-                },
-                S19kTrack1TransportKind::StockUartTrans,
-                8,
-                false,
-                false,
-            ),
-            Err(S19kWireRuntimeTryError::WorkFrameBytesDeskPending)
-        ));
-        assert!(matches!(
-            admit_s19k_bm1366_wire_runtime_try(
-                S19kWireDeskPending {
-                    am3_uart_framing_unconfirmed: false,
-                    addr_interval_unreconciled: false,
-                    work_frame_bytes_unpinned: false,
-                    uart_trans_runtime_unowned: false,
-                    braiins_ttys_bench_go: false,
-                },
-                S19kTrack1TransportKind::StockUartTrans,
-                8,
-                false,
-                true,
-            ),
-            Err(S19kWireRuntimeTryError::PicOwnerForbidden)
-        ));
     }
 
     #[test]
@@ -832,63 +850,6 @@ mod tests {
         expect[..8].copy_from_slice(&body);
         expect[8] = stock_bitmain_crc5(&body, 64);
         assert_eq!(cmd_hash_counting_s19k_bcast(), expect);
-    }
-
-    #[test]
-    fn aml_refuse_matrix_r1_through_r10() {
-        assert_eq!(
-            aml_hard_refuse(
-                true, true, false, false, true, true, false, false, false, false, false
-            ),
-            None
-        );
-        assert_eq!(
-            aml_hard_refuse(
-                false, true, false, false, true, true, false, false, false, false, false
-            ),
-            Some(S19kAmlRefuseGate::R1Identity)
-        );
-        assert_eq!(
-            aml_hard_refuse(true, true, true, false, true, true, false, false, false, false, false),
-            Some(S19kAmlRefuseGate::R2NoPicClass)
-        );
-        assert_eq!(
-            aml_hard_refuse(true, true, false, true, true, true, false, false, false, false, false),
-            Some(S19kAmlRefuseGate::R3S21Fuse)
-        );
-        assert_eq!(
-            aml_hard_refuse(
-                true, true, false, false, false, true, false, false, false, false, false
-            ),
-            Some(S19kAmlRefuseGate::R4Lm75BeforeProbe)
-        );
-        assert_eq!(
-            aml_hard_refuse(
-                true, true, false, false, true, false, false, false, false, false, false
-            ),
-            Some(S19kAmlRefuseGate::R5Watchdog)
-        );
-        assert_eq!(
-            aml_hard_refuse(true, true, false, false, true, true, true, false, false, false, false),
-            Some(S19kAmlRefuseGate::R6BaudDialect)
-        );
-        assert_eq!(
-            aml_hard_refuse(true, true, false, false, true, true, false, true, false, false, false),
-            Some(S19kAmlRefuseGate::R7RailEnable)
-        );
-        assert_eq!(
-            aml_hard_refuse(true, true, false, false, true, true, false, false, true, false, false),
-            Some(S19kAmlRefuseGate::R8MiningDefault)
-        );
-        assert_eq!(
-            aml_hard_refuse(true, true, false, false, true, true, false, false, false, true, false),
-            Some(S19kAmlRefuseGate::R9EngineConstruct)
-        );
-        assert_eq!(
-            aml_hard_refuse(true, true, false, false, true, true, false, false, false, false, true),
-            Some(S19kAmlRefuseGate::R10PublicClaim)
-        );
-        assert!(S19kWireDeskPending::CURRENT.blocks_runtime_engine_try());
     }
 
     #[test]
@@ -926,65 +887,6 @@ mod tests {
     }
 
     #[test]
-    fn clear_braiins_ttys_runtime_try_gated_on_bench_go() {
-        // CURRENT + BraiinsRawTtyS → BenchGoRequired (not silent Ok; ignores stock unowned)
-        assert!(matches!(
-            admit_s19k_bm1366_wire_runtime_try(
-                S19kWireDeskPending::CURRENT,
-                S19kTrack1TransportKind::BraiinsRawTtyS,
-                8,
-                false,
-                false,
-            ),
-            Err(S19kWireRuntimeTryError::BraiinsTtyBenchGoRequired)
-        ));
-        // CURRENT + StockUartTrans → UartTransRuntimeUnowned
-        assert!(matches!(
-            admit_s19k_bm1366_wire_runtime_try(
-                S19kWireDeskPending::CURRENT,
-                S19kTrack1TransportKind::StockUartTrans,
-                8,
-                false,
-                false,
-            ),
-            Err(S19kWireRuntimeTryError::UartTransRuntimeUnowned)
-        ));
-        // Bench GO + Braiins + midstate 8 → Ok (stock unowned ignored)
-        let go = S19kWireDeskPending {
-            am3_uart_framing_unconfirmed: false,
-            addr_interval_unreconciled: false,
-            work_frame_bytes_unpinned: false,
-            uart_trans_runtime_unowned: true, // still true — Braiins ignores
-            braiins_ttys_bench_go: true,
-        };
-        assert_eq!(
-            admit_s19k_bm1366_wire_runtime_try(
-                go,
-                S19kTrack1TransportKind::BraiinsRawTtyS,
-                8,
-                false,
-                false,
-            ),
-            Ok(())
-        );
-        // midstate 16 still hard-forbid under Braiins GO
-        assert!(matches!(
-            admit_s19k_bm1366_wire_runtime_try(
-                go,
-                S19kTrack1TransportKind::BraiinsRawTtyS,
-                16,
-                false,
-                false,
-            ),
-            Err(S19kWireRuntimeTryError::MidstateSixteenForbidden)
-        ));
-        assert!(go.blocks_runtime_engine_try_for(S19kTrack1TransportKind::StockUartTrans));
-        assert!(!go.blocks_runtime_engine_try_for(S19kTrack1TransportKind::BraiinsRawTtyS));
-        assert!(S19kWireDeskPending::CURRENT
-            .blocks_runtime_engine_try_for(S19kTrack1TransportKind::BraiinsRawTtyS));
-    }
-
-    #[test]
     fn clear_braiins_ttys_pins_baud_3m_never_ttys0() {
         use crate::s19k_uart_trans_job::{
             admit_braiins_job_tx_path, admit_job_tx_path, admit_job_tx_path_for_transport,
@@ -1004,109 +906,5 @@ mod tests {
         assert!(admit_job_tx_path("/dev/ttyS1").is_err()); // stock unchanged
         assert!(admit_job_tx_path_for_transport(false, "/dev/ttyS1").is_ok());
         assert!(admit_job_tx_path_for_transport(false, "/dev/ttyS3").is_ok());
-    }
-
-    #[test]
-    fn runtime_bench_go_override_env_and_current_stays_false() {
-        assert!(!S19kWireDeskPending::CURRENT.braiins_ttys_bench_go);
-        // Explicit parts: no env, missing file → false (fail-closed)
-        assert!(!braiins_ttys_bench_go_from_runtime_parts(
-            None,
-            "/no/such/braiins_ttys_bench_go_zzz"
-        ));
-        assert!(!braiins_ttys_bench_go_from_runtime_parts(
-            Some(std::ffi::OsString::from("0")),
-            "/no/such/braiins_ttys_bench_go_zzz",
-        ));
-        assert!(!braiins_ttys_bench_go_from_runtime_parts(
-            Some(std::ffi::OsString::from("yes")),
-            "/no/such/braiins_ttys_bench_go_zzz",
-        ));
-        assert!(braiins_ttys_bench_go_from_runtime_parts(
-            Some(std::ffi::OsString::from("1")),
-            "/no/such/braiins_ttys_bench_go_zzz",
-        ));
-        assert!(braiins_ttys_bench_go_from_runtime_parts(
-            Some(std::ffi::OsString::from("TRUE")),
-            "/no/such/braiins_ttys_bench_go_zzz",
-        ));
-        assert!(braiins_ttys_bench_go_from_runtime_parts(
-            Some(std::ffi::OsString::from(" true ")),
-            "/no/such/braiins_ttys_bench_go_zzz",
-        ));
-        // Regular-file presence (temp) → true even without env.
-        let dir = std::env::temp_dir();
-        let path = dir.join("dcent_braiins_ttys_bench_go_unit");
-        let _ = std::fs::remove_file(&path);
-        std::fs::write(&path, b"").expect("temp marker");
-        assert!(braiins_ttys_bench_go_from_runtime_parts(
-            None,
-            path.to_str().expect("utf8 temp path"),
-        ));
-        let _ = std::fs::remove_file(&path);
-        assert!(!braiins_ttys_bench_go_from_runtime_parts(
-            None,
-            dir.to_str().expect("utf8 temp directory"),
-        ));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::symlink;
-
-            let target = dir.join("dcent_braiins_ttys_bench_go_target_unit");
-            let link = dir.join("dcent_braiins_ttys_bench_go_symlink_unit");
-            let _ = std::fs::remove_file(&target);
-            let _ = std::fs::remove_file(&link);
-            std::fs::write(&target, b"").expect("temp marker target");
-            symlink(&target, &link).expect("temp marker symlink");
-            assert!(!braiins_ttys_bench_go_from_runtime_parts(
-                None,
-                link.to_str().expect("utf8 temp symlink"),
-            ));
-            let _ = std::fs::remove_file(&link);
-            let _ = std::fs::remove_file(&target);
-        }
-        // CURRENT must remain false after helpers
-        assert!(!S19kWireDeskPending::CURRENT.braiins_ttys_bench_go);
-        // current_with_runtime_bench_go mirrors CURRENT except bench_go from runtime env/file.
-        // Under default host env (no knob) → false; with env parts we already proved true.
-        let pending_false = {
-            let mut p = S19kWireDeskPending::CURRENT;
-            p.braiins_ttys_bench_go = braiins_ttys_bench_go_from_runtime_parts(
-                None,
-                "/no/such/braiins_ttys_bench_go_zzz",
-            );
-            p
-        };
-        assert!(!pending_false.braiins_ttys_bench_go);
-        assert!(matches!(
-            admit_s19k_bm1366_wire_runtime_try(
-                pending_false,
-                S19kTrack1TransportKind::BraiinsRawTtyS,
-                8,
-                false,
-                false,
-            ),
-            Err(S19kWireRuntimeTryError::BraiinsTtyBenchGoRequired)
-        ));
-        let pending_true = {
-            let mut p = S19kWireDeskPending::CURRENT;
-            p.braiins_ttys_bench_go = braiins_ttys_bench_go_from_runtime_parts(
-                Some(std::ffi::OsString::from("1")),
-                "/no/such/braiins_ttys_bench_go_zzz",
-            );
-            p
-        };
-        assert!(pending_true.braiins_ttys_bench_go);
-        assert_eq!(
-            admit_s19k_bm1366_wire_runtime_try(
-                pending_true,
-                S19kTrack1TransportKind::BraiinsRawTtyS,
-                8,
-                false,
-                false,
-            ),
-            Ok(())
-        );
-        assert!(!S19kWireDeskPending::CURRENT.braiins_ttys_bench_go);
     }
 }

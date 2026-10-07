@@ -1,0 +1,17 @@
+#!/bin/sh
+# Exact fabric observation precedes reset/PIC off and quiet parking and ordinary services.
+set -eu
+case "${1:-}" in
+    start)
+        rm -f /run/dcentos/c43-boot-cut-ready
+        . /usr/libexec/dcentos/c43-fabric-identity.sh
+        dcent_c43_fabric_identity /etc/dcentos/board_target /etc/dcentos/c43-bitstream.sha256 \
+            /proc/cmdline /proc/sys/kernel/random/boot_id \
+            /sys/class/xdevcfg/xdevcfg/device/prog_done /run/dcentos
+        /usr/bin/dcentrald --c43-boot-cut-only
+        cat /proc/sys/kernel/random/boot_id > /run/dcentos/c43-boot-cut-ready
+        ;;
+    stop) ;;
+    restart) "$0" start ;;
+    *) exit 1 ;;
+esac

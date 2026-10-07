@@ -1,3 +1,4 @@
+import { DCENT_DOCS_URL } from '../../utils/links';
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useMinerStore } from '../../store/miner';
 import { api } from '../../api/client';
@@ -968,6 +969,10 @@ function AdvancedDashboardInner() {
                 {`No tools match "${navQuery.trim()}"`}
               </div>
             )}
+            <a href={DCENT_DOCS_URL} target="_blank" rel="noopener noreferrer"
+              className="hacker-nav-item" aria-label="Help and installation guide">
+              Help
+            </a>
           </nav>
 
           <div className="hacker-sidebar-foot">

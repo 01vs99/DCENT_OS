@@ -1129,51 +1129,13 @@ fn test_free_space_bytes_returns_nonzero_for_tmp() {
     assert!(free > 0, "free space at /tmp should be > 0");
 }
 
-/// R3-CRITICAL-2 — recovery hint in the on-miner shell script must
-/// reference mtd4 / mtd7 / mtd8 and not mtd0 / mtd1 / mtd2.
+/// The shipped recovery profile backs up the environment and both firmware
+/// slots. The auxiliary wave8 script is outside the sparse lane checkout.
 #[test]
-fn test_shell_script_recovery_hint_uses_correct_mtds() {
-    let candidates = [
-        "scripts/wave8_dcentos_nand_backup.sh",
-        "../../scripts/wave8_dcentos_nand_backup.sh",
-        "../../../../scripts/wave8_dcentos_nand_backup.sh",
-        "../../../../../scripts/wave8_dcentos_nand_backup.sh",
-    ];
-    let mut script: Option<String> = None;
-    for c in &candidates {
-        if let Ok(s) = std::fs::read_to_string(c) {
-            script = Some(s);
-            break;
-        }
-    }
-    let script = script.expect(
-        "locate scripts/wave8_dcentos_nand_backup.sh — must be reachable from the test cwd",
-    );
-
-    // Positive: the script's recovery instructions reference the new mtds.
-    for needle in &["/dev/mtd4", "/dev/mtd7", "/dev/mtd8"] {
-        assert!(
-            script.contains(needle),
-            "wave8_dcentos_nand_backup.sh must reference {needle} for backup + recovery (R3-CRITICAL-2)"
-        );
-    }
-
-    // Negative: the old wrong-partition recovery commands are gone.
-    // We allow the words "mtd0/1/2" in comments explaining the old bug,
-    // but `nandwrite -p /dev/mtd1 mtd1.img` style command lines must
-    // not appear because they restore the wrong partition.
-    let bad_command_strings = [
-        "nandwrite -p /dev/mtd0 mtd0.img",
-        "nandwrite -p /dev/mtd1 mtd1.img",
-        "nandwrite -p /dev/mtd2 mtd2.img",
-    ];
-    for bad in &bad_command_strings {
-        assert!(
-            !script.contains(bad),
-            "wave8_dcentos_nand_backup.sh must NOT contain `{bad}` — that's the wrong \
-             partition for S9 firmware recovery (R3-CRITICAL-2)"
-        );
-    }
+fn test_s9_recovery_profile_uses_correct_backup_mtds() {
+    let profile = dcentrald_api::routes::restore_to_stock::profile_for("zynq-am1-bm1387")
+        .expect("S9 recovery profile");
+    assert_eq!(profile.nand_backup_mtds, ["/dev/mtd4", "/dev/mtd7", "/dev/mtd8"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -3930,23 +3892,8 @@ fn test_nand_backup_uses_profile_mtds_not_global_const() {
 /// are present in the parsed JSON.
 #[tokio::test]
 async fn test_manifest_lookup_now_filters_by_platform_signature() {
-    // Locate the manifest in-tree (same pattern as
-    // test_sweep_orphan_partial_backups_wired_into_handler).
-    let candidates = [
-        "../../../",
-        "",
-        "../../",
-        "../../../../",
-    ];
-    let mut text = None;
-    for c in &candidates {
-        if let Ok(s) = std::fs::read_to_string(c) {
-            text = Some(s);
-            break;
-        }
-    }
-    let text =
-        text.expect("locate stock-bitmain-manifest.json — required for W12-B fleet expansion test");
+    // Exercise the same packaged manifest as the shipped API.
+    let text = include_str!("../assets/stock-bitmain-manifest.json");
 
     // Manifest still parses as JSON.
     let v: serde_json::Value = serde_json::from_str(&text).expect("manifest must be valid JSON");

@@ -29,22 +29,27 @@ require_post_install_authority() {
     # S19k must not read, erase, extract, or execute it until an authenticated
     # post-install envelope and safe extractor exist.
     case "$platform:$target" in
-        am3-aml-s19k:*|*:am3-s19k|*:am3-s19kpro|*:am3-aml-s19kpro)
+        am3-aml-s19jproa:*|*:am3-s19jproa|am3-aml-s19jproplus:*|*:am3-s19jproplus)
+            log "A126/Plus120 legacy unsigned NAND post-install payloads are disabled"
+            return 1
+            ;;
+        am3-aml-s19jpro:*|*:am3-s19jpro-aml)
+            log "classic AML legacy unsigned NAND post-install payloads are disabled"
+            return 1
+            ;;
+        am3-aml-s19k:*|*:am3-s19k|am3-aml-s19kpro:*|*:am3-s19kpro|*:am3-aml-s19kpro)
             log "unsigned S19k NAND post-install payloads are disabled"
             return 1
             ;;
     esac
 
-    if [ -e "$policy_file" ]; then
-        policy=$(read_trimmed "$policy_file") || {
-            log "unreadable mutation_policy; refusing post-install mutation"
-            return 1
-        }
-        [ "$policy" = hardware-enabled ] || {
-            log "mutation_policy=$policy; refusing post-install mutation"
-            return 1
-        }
-    fi
+    policy_helper=/usr/libexec/dcentos/mutation-policy.sh
+    [ -r "$policy_helper" ] || return 1
+    . "$policy_helper"
+    dcent_mutation_policy_has "$policy_file" ota-storage || {
+        log "ota-storage capability is missing or insecure; refusing post-install mutation"
+        return 1
+    }
 
     case "$platform:$target" in
         am3-aml-t21:*|*:am3-t21|am3-aml-s21xp:*|*:am3-s21xp|\

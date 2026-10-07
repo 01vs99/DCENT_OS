@@ -345,6 +345,7 @@ const BOARD_TARGET_MODEL_LABELS: &[(&str, &str)] = &[
     ("am1-t15", "Antminer T15"),
     ("am1-t9plus", "Antminer T9+"),
     ("am2-s19j", "Antminer S19j Pro"),
+    ("am2-s19", "Antminer S19"),
     ("am2-s19pro", "Antminer S19 Pro"),
     ("am2-s17p", "Antminer S17 / S17 Pro"),
     ("am2-s17plus", "Antminer S17+"),
@@ -362,6 +363,7 @@ const BOARD_TARGET_MODEL_LABELS: &[(&str, &str)] = &[
     ("am3-s19xp", "Antminer S19 XP"),
     ("am3-s19jxp", "Antminer S19j XP"),
     ("am3-s19jproplus", "Antminer S19j Pro+"),
+    ("am3-s19jproa", "Antminer S19j Pro A"),
     ("am3-s19jpro-aml", "Antminer S19j Pro"),
     ("cv1835-s19jpro", "Antminer S19j Pro"),
     ("bcb100-s19jpro", "Antminer S19j Pro"),
@@ -369,7 +371,10 @@ const BOARD_TARGET_MODEL_LABELS: &[(&str, &str)] = &[
 
 const EXACT_MODEL_TOKEN_LABELS: &[(&str, &str)] = &[
     ("s9", "Antminer S9"),
-    ("s19j", "Antminer S19j Pro"),
+    // Gauntlet B5b (2026-09-02): `s19j` is the CLASSIC S19j (BHB42701,
+    // BM1362 108/chain per Bitmain's own stock topol) — previously mislabeled
+    // "Antminer S19j Pro"; the Pro's tokens below are unchanged.
+    ("s19j", "Antminer S19j"),
     ("s19jpro", "Antminer S19j Pro"),
     ("s19j-pro", "Antminer S19j Pro"),
     ("s19jpro-bb", "Antminer S19j Pro"),
@@ -771,7 +776,8 @@ mod tests {
             "Antminer S19j Pro"
         );
         assert_eq!(model_from_platform_token("am1-s9se"), "Antminer S9 SE");
-        assert_eq!(model_from_platform_token("am2-s19"), "Antminer S19 Pro");
+        assert_eq!(model_from_platform_token("am2-s19"), "Antminer S19");
+        assert_eq!(model_from_platform_token("am2-s19pro"), "Antminer S19 Pro");
         assert_eq!(model_from_platform_token("am3-s19jxp"), "Antminer S19j XP");
     }
 
@@ -796,6 +802,8 @@ mod tests {
             "am1-s9se-unknown-revision",
             "s19j-lab-carrier",
             "am3-aml",
+            "am3-aml-s19jproa",
+            "am3-aml-s19jproplus",
             "amlogic-a113d",
             "zynq-bm3-am2",
             "unknown-s21-like-board",

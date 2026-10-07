@@ -121,6 +121,7 @@ struct SimChainState {
     /// FpgaChain API writes each FIFO word separately, so the simulator joins
     /// them here without changing the raw ordered command trace.
     pending_register_write: Option<(Option<u8>, u8)>,
+    bm1398_native: Option<SimBm1398Wire>,
     responses: VecDeque<Vec<u8>>,
     nonces: VecDeque<Vec<u8>>,
     trace: Vec<TraceEvent>,
@@ -134,7 +135,24 @@ pub struct SimChain {
     state: Arc<Mutex<SimChainState>>,
 }
 
+/// Read-only observation of an existing simulator owner; cannot send commands,
+/// submit work, or construct a new transport. This module is absent in firmware.
+pub struct SimChainObserver {
+    chain: SimChain,
+}
+
+impl SimChainObserver {
+    pub fn drain_trace(&self) -> Result<Vec<TraceEvent>> {
+        self.chain.drain_trace()
+    }
+}
+
 impl SimChain {
+    pub fn observer(&self) -> SimChainObserver {
+        SimChainObserver {
+            chain: self.clone(),
+        }
+    }
     pub fn new(chain_id: u8, profile: SimBoardProfile) -> Self {
         Self {
             chain_id,
@@ -144,6 +162,7 @@ impl SimChain {
                 response_body_len: profile.response_length.saturating_sub(2),
                 registers: HashMap::new(),
                 pending_register_write: None,
+                bm1398_native: None,
                 responses: VecDeque::new(),
                 nonces: VecDeque::new(),
                 trace: Vec::new(),
@@ -228,6 +247,11 @@ impl ChainAccess for SimChain {
             bytes: data.to_vec(),
         });
 
+        let SimChainState { bm1398_native, registers, responses, .. } = &mut *state;
+        if let Some(native) = bm1398_native {
+            return native.command(data, registers, responses);
+        }
+
         // Concrete FpgaChain BM1387/BM1397+ register traffic arrives as raw four-byte
         // FIFO words. Track the same sparse register state used by the typed
         // backend so production-driver readback succeeds instead of timing out.
@@ -267,7 +291,24 @@ impl ChainAccess for SimChain {
                         // driver unpacks word 0 LSB-first into the register's
                         // big-endian byte value; word 1 contains metadata/CRC.
                         state.responses.push_back(value.to_be_bytes().to_vec());
-                        state.responses.push_back(0_u32.to_le_bytes().to_vec());
+                        if legacy_bm1387 {
+                            state.responses.push_back(0_u32.to_le_bytes().to_vec());
+                        } else {
+                            // Independently synthesize the complete command
+                            // response, not a zero metadata word that would
+                            // hide missing chip/register correlation. CRC5's
+                            // full-response residue is zero; the production
+                            // parser checks the distinct response transition.
+                            let mut response = value.to_be_bytes().to_vec();
+                            response.extend([chip_addr, reg, 0]);
+                            let crc = (0..32_u8)
+                                .find(|candidate| {
+                                    response[6] = *candidate;
+                                    dcentrald_common::bm1396_command_crc5(&response) == 0
+                                })
+                                .expect("five-bit response checksum has one solution");
+                            state.responses.push_back(vec![chip_addr, reg, 0, crc]);
+                        }
                     }
                     _ => {}
                 }
@@ -332,6 +373,8 @@ impl ChainAccess for SimChain {
         Ok(())
     }
 }
+
+include!("bm1398_native.rs");
 
 pub struct SimBm1397PlusBackend {
     chain: SimChain,
@@ -487,6 +530,28 @@ mod tests {
     }
 
     #[test]
+    fn observer_retains_the_same_fifo_state_when_the_transport_owner_moves() {
+        let owner = crate::fpga_chain::FpgaChain::open_sim_for_model(6, SimModel::S9).unwrap();
+        let observed = owner.sim_chain_observer().unwrap();
+        owner.write_work(&[0, 1, 2, 3]);
+        assert_eq!(
+            observed.drain_trace().unwrap(),
+            vec![TraceEvent::Work {
+                chain_id: 6,
+                bytes: [0u32, 1, 2, 3]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect(),
+            }]
+        );
+        let moved_owner = Box::new(owner);
+        moved_owner.write_cmd(0x0000_0055);
+        assert!(matches!(observed.drain_trace().unwrap().as_slice(),
+            [TraceEvent::Command { chain_id: 6, bytes }] if bytes == &[0x55, 0, 0, 0]));
+        assert!(moved_owner.drain_sim_trace().unwrap().is_empty());
+    }
+
+    #[test]
     fn s17_enumeration_matches_held_saleae_identity_frame() {
         let chain = SimChain::new(0, SimBoardProfile::for_model(SimModel::S17));
         let backend = SimBm1397PlusBackend::new(chain);
@@ -520,22 +585,39 @@ mod tests {
 
     #[test]
     fn concrete_fpga_fifo_register_write_then_read_round_trips() {
-        let chain = SimChain::new(0, SimBoardProfile::for_model(SimModel::S19Pro));
-        chain
-            .send_command(&[0x51, 0x09, 0x00, 0x08])
-            .expect("write header");
-        chain
-            .send_command(&0x4068_0221_u32.to_be_bytes())
-            .expect("write value");
-        chain
-            .send_command(&[0x42, 0x05, 0x00, 0x08])
-            .expect("read command");
-        let mut first = [0_u8; 4];
-        let mut second = [0_u8; 4];
-        assert_eq!(chain.read_response(&mut first).unwrap(), 4);
-        assert_eq!(chain.read_response(&mut second).unwrap(), 4);
-        assert_eq!(first, 0x4068_0221_u32.to_be_bytes());
-        assert_eq!(second, [0; 4]);
+        let chain = crate::fpga_chain::FpgaChain::open_sim_for_model(0, SimModel::S19Pro)
+            .expect("memory-backed FPGA");
+        assert_eq!(chain.read_cmd_response(), None);
+        chain.write_cmd(0x0800_0951); // broadcast write, FIFO bytes 51 09 00 08
+        chain.write_cmd(0x2102_6840); // register value 0x40680221, MSB first
+        assert_eq!(chain.read_cmd_response(), None);
+        chain.write_cmd(0x0800_0542);
+        assert!(chain.cmd_rx_has_data());
+        assert_eq!(chain.read_cmd_response(), Some(0x2102_6840));
+        // The second word is chip/register metadata with a five-bit response
+        // checksum, not a status word. Literal 07 is independently obtained
+        // by polynomial division of 40 68 02 21 00 08 07 by x^5+x^2+1,
+        // initial remainder 1f; the complete seven-byte residue is zero.
+        assert_eq!(chain.read_cmd_response(), Some(0x0700_0800));
+        assert!(!chain.cmd_rx_has_data());
+        assert_eq!(chain.read_cmd_response(), None);
+    }
+
+    #[test]
+    fn concrete_fpga_fifo_keeps_targeted_registers_and_response_words_in_order() {
+        let chain = crate::fpga_chain::FpgaChain::open_sim_for_model(0, SimModel::S19Pro)
+            .expect("memory-backed FPGA");
+        chain.write_cmd(0x0804_0941); // chip 4, register 08
+        chain.write_cmd(0x7856_3412);
+        chain.write_cmd(0x1808_0941); // chip 8, register 18
+        chain.write_cmd(0x4030_2010);
+        chain.write_cmd(0x1808_0542);
+        chain.write_cmd(0x0804_0542);
+        // Independent polynomial-division checksum literals: 07 and 12.
+        for expected in [0x4030_2010, 0x0700_1808, 0x7856_3412, 0x1200_0804] {
+            assert_eq!(chain.read_cmd_response(), Some(expected));
+        }
+        assert_eq!(chain.read_cmd_response(), None);
     }
 
     #[test]

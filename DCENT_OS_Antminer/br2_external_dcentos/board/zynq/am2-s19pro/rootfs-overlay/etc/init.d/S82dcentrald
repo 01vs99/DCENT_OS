@@ -11,7 +11,7 @@
 #      stamps may inject --s19j-hybrid and its serial work recipe.
 #   3. Scrubs inherited BM1362/lab environment before the explicit persistent
 #      operator override in /data/dcentrald-env.
-#   4. Leaves I2C ownership to dcentrald. The production .139 path can use
+#   4. Leaves I2C ownership to dcentrald. The production lab-unit path can use
 #      gpio_bitbang PSU transport and must not force-bind xiic-i2c from init.
 #
 # Variant scope: this overlay stamps am2-s19pro. Carrier-level AM2 fan safety is
@@ -235,20 +235,20 @@ fi
 #   * S17 Pro factory jig (UNSTRIPPED, Bitmain's own symbols): power_on writes
 #     "0", power_off writes "1" on gpio907.
 #   * Same convention across the 7007 class (S17, T17/T17e/S17e, DR5, S11).
-#   * Live `a lab unit` register dump: gpio907 value=0 while bosminer held the rail up.
+#   * Live lab-unit register dump: gpio907 value=0 while bosminer held the rail up.
 #   * NOTHING anywhere writes the sysfs `active_low` attribute on this path.
 #
 # The S19 Pro leg is FAMILY-INFERRED, not model-exact: no decoded S19 Pro jig
 # artifact resolves the pin yet. A held candidate exists and is decodable at the
-# desk —  — which
+# desk — held reference corpus — which
 # would upgrade this to model-exact. Until then this image is the WEAKER of the
-# two evidence cases, and `a lab unit` is a live S19 Pro that would be affected.
+# two evidence cases, and lab-unit is a live S19 Pro that would be affected.
 #
 # Under the CURRENT export a terminal safe-off writes 0 — the jig's power-ON
 # level — and the readback tautologically agrees, minting a FALSE safe-off proof.
 # The export is nonetheless kept, deliberately, per operator decision: flipping
 # it is a fleet-visible change to the only power-cut path on this image. The flip
-# is OPERATOR-GATED.
+# is OPERATOR-GATED. See internal engineering notes
 #
 # Do NOT simply delete this block; that reintroduces the silent no-cut.
 unset DCENT_AM2_PWR_CONTROL_ACTIVE_LOW
@@ -328,7 +328,7 @@ ensure_i2c0_kernel_bound() {
 # Safety: command fans to the home cap. Tach/RPM is the physical noise proof.
 # PIC watchdog cuts voltage within 10-60s if dcentrald is dead.
 # NEVER PWM 127 — home mining, noise is unacceptable.
-# AUDIT FIX (2026-05-29, ):
+# AUDIT FIX (2026-05-29, am2 never leave unit without fan manager rule):
 # On AM2 (XIL Zynq) the fan PWM is held only while a process owns the uio16 mmap
 # AND keeps re-commanding it. The old `$DAEMON --set-fan N` wrote the PWM once
 # and EXITED, so the board's fan IP drifted the fans back to full speed — a home

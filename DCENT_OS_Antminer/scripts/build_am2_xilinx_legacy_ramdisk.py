@@ -38,7 +38,7 @@ EXTERNAL_MEDIA_RUNLEVEL_SHA256 = {
 EXTERNAL_MEDIA_ALLOWED_INIT_SHA256 = {
     "etc/init.d/S01syslogd": "04e70e4d94d046c59f4863e33b3f78ec43faceb3e31e1115c78b682b78a052de",
     "etc/init.d/S02klogd": "e2f967bf785912d605e5dd8055e1c2c668e8523a88df1c39109df00eb9564285",
-    "etc/init.d/S40network": "6fdbd927ab9c5592ee99a0c3e9bb86c9e2467846c8c44308b614e826a839c4e1",
+    "etc/init.d/S40network": "6dc692692f4fa8fc6b8e69a88f2bc5a55665e021279b7591fe806e4154770807",
     "etc/init.d/S41ntp": "17ceed6f66997f9d22e628f134855ff25fc77f8b02d968fd1431320044c594f2",
     "etc/init.d/S43logrotate": "6f7f8c44b22ced4c43a00465136e314b7b10da67b673144bb64bf677f0fa4a6a",
     "etc/init.d/S45persistent": "efc67721a90f8f48a9673822bfcdae9c98bc3223ab35651be9ff813ce96c90ff",
@@ -465,13 +465,10 @@ def _validate_rootfs_contract(
         and "etc/dcentrald/xil_override.toml" in analysis.selected
     ):
         raise LegacyRamdiskError("am2-s19pro rootfs must not contain the BM1362 XIL override")
+    # The XIL .25 seeder is a lab-only member (staged only behind
+    # DCENT_LAB_XIL25_SEED=1, never in release builds), so its absence is the
+    # normal am2-s19j release shape and is not required here.
     xil25_seed = "etc/init.d/S81dcentos-xil-seed"
-    if (
-        not external
-        and profile.payload_board_target == "am2-s19j"
-        and xil25_seed not in analysis.selected
-    ):
-        raise LegacyRamdiskError("am2-s19j rootfs is missing its external-media-gated XIL .25 seed")
     if profile.payload_board_target == "am2-s19pro" and xil25_seed in analysis.selected:
         raise LegacyRamdiskError("am2-s19pro rootfs must not contain the S19j XIL .25 seed")
 

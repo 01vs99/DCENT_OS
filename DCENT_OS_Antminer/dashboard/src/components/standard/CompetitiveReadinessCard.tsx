@@ -188,7 +188,8 @@ export function CompetitiveReadinessCard({ compact = false }: { compact?: boolea
           <span>Donation Proof</span>
           <strong>{gate?.donation?.donation_off_test_status ?? 'unavailable'}</strong>
           <p>
-            Default {gate?.donation?.default_percent ?? '?'}%, pool visible:{' '}
+            Default {gate?.donation?.default_percent ?? '?'}% (opt-in; disabled by
+            default), pool visible:{' '}
             {gate?.donation?.pool_visible ? 'yes' : 'unknown'}.
           </p>
         </div>

@@ -3,11 +3,12 @@
 # had zero dependency vulnerability / license / source scanning, while the ESP
 # sibling already runs cargo-audit in CI. This gives the daemon a CVE gate, a
 # copyleft/unknown-license tripwire, and a no-unknown-source guarantee.
-# Run: `cargo deny check` from this directory, or:
+# Structural scan: `cargo deny --locked --all-features check licenses bans sources`.
+# Full scan (including source-scoped advisory policy for optional MQTT TLS):
 #   sh DCENT_OS_Antminer/scripts/run_cargo_deny.sh
 # CI note: invoke `run_cargo_deny.sh` as a separate host job. Do NOT fold this
 # into scripts/ci_offline_gates.sh (QA sibling owns that file). Set
-# DCENT_REQUIRE_CARGO_DENY=1 so a missing cargo-deny binary fails closed.
+# Missing or mismatched tool versions fail closed; --install-tools installs pins.
 #
 # NOTE: to add a permissive SPDX id, run `cargo deny check licenses` and append
 # it here with justification rather than loosening the whole check.
@@ -17,18 +18,9 @@ version = 2
 # Fail on any RustSec advisory or yanked crate. Add specific RUSTSEC-*-* ids to
 # `ignore` ONLY with a written justification comment when a fix is unavailable.
 yanked = "deny"
-ignore = [
-    # anyhow 1.0.x Error::downcast_mut() unsoundness. The daemon does not call
-    # downcast_mut on anyhow::Error anywhere (anyhow is used for context/bail
-    # only). Same rationale + ignore as the ESP sibling gate. Unsoundness, not a
-    # reachable vulnerability; no fixed 1.x release at pin time.
-    "RUSTSEC-2026-0190",
-    # rand 0.8/0.9 unsoundness that requires a custom logger calling rand::rng()
-    # during log formatting — the daemon uses the `tracing` crate (not a rand-in-
-    # logger setup), so the unsound path is unreachable. Unsoundness, not a
-    # reachable vulnerability.
-    "RUSTSEC-2026-0097",
-]
+# RUSTSEC-2026-0190 and -0097 exceptions retired 2026-09-07: the locked
+# anyhow 1.0.104 and rand 0.8.6/0.9.4 are above their published fixed floors.
+ignore = []
 
 [licenses]
 version = 2

@@ -108,7 +108,7 @@ mod tests {
         assert_eq!(place.chip, 59);
         assert_eq!(place.core, 207);
         assert!(classify_s9se_nonce(2, 0, 2).is_err());
-        assert!(classify_s9se_nonce(2, (60 * 2) << 24 | 1, 2).is_err());
+        assert!(classify_s9se_nonce(2, (60 * 4) << 24 | 1, 4).is_err());
         assert_eq!(
             refuse_s9se_nonce_fifo_io(),
             Err(S9SeNonceError::FifoIoRefused)

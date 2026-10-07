@@ -687,7 +687,22 @@ fn default_night_power_reduction_pct() -> u8 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoTunerConfig {
     /// Whether auto-tuning is enabled.
-    #[serde(default = "default_false")]
+    ///
+    /// **Default `true` (operator decision 2026-09-01, Supremacy Gauntlet
+    /// lane C3a):** DCENT_OS ships with the autotuner enabled by default on
+    /// every supported variant. This flip is shippable ONLY because the
+    /// C3a safety substrate stands behind it — every tuning step validates
+    /// against the variant's BoardDesc cut-ladder + published envelope
+    /// BEFORE execution and REFUSES out-of-envelope / unknown-envelope
+    /// variants with a surfaced `NotTunable` reason (see
+    /// `tune_guard.rs`): **refuse, never tune blind**. First boot parks at
+    /// the variant's safe-stock profile until the first-boot start gate
+    /// (health snapshot OK + fans OK + temp in envelope + ExperimentalOptIn
+    /// operator ack) opens. The am2 dsPIC voltage-autotune remains behind
+    /// the default-OFF `DCENT_AM2_VOLTAGE_AUTOTUNE` live-safety fence, and
+    /// the am2/BM1362 frequency-autotuner still requires its explicit
+    /// operator opt-in (`am2_frequency_autotune`).
+    #[serde(default = "default_true")]
     pub enabled: bool,
 
     /// Requested operator-facing preset.
@@ -1078,7 +1093,11 @@ pub struct AutoTunerConfig {
 impl Default for AutoTunerConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            // C3a (2026-09-01): default-ON per the operator decision. The
+            // envelope guard + first-boot start gate (tune_guard.rs) are the
+            // safety substrate that makes this default shippable — refuse,
+            // never tune blind.
+            enabled: true,
             preset: None,
             target_mode: TuneTarget::default(),
             tuner_mode: None,
@@ -2061,7 +2080,11 @@ mod tests {
     fn test_default_config_validates() {
         let config = AutoTunerConfig::default();
         assert!(config.validate().is_ok());
-        assert!(!config.enabled);
+        // C3a (2026-09-01): the autotuner ships default-ON (operator
+        // decision). The envelope guard + first-boot start gate
+        // (tune_guard.rs) are the safety substrate that makes this
+        // shippable; voltage_optimization stays default-off.
+        assert!(config.enabled);
         assert!(!config.voltage_optimization);
     }
 

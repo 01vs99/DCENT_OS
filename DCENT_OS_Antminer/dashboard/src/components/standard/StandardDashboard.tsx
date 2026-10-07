@@ -53,6 +53,7 @@ import { TuningPriorityConfigurator } from './TuningPriorityConfigurator';
 import { FanCurveEditor } from './FanCurveEditor';
 import { SiliconProfilesPanel } from './SiliconProfilesPanel';
 import { PerChipOverridePanel } from './PerChipOverridePanel';
+import { WeakChipAdvisoryPanel } from './WeakChipAdvisoryPanel';
 import { TempFansPage } from './TempFansPage';
 import { LogsPage } from './LogsPage';
 import { SettingsPage } from './SettingsPage';
@@ -717,6 +718,10 @@ export function StandardDashboard() {
                   Self-gates on `a lab unit`-class XIL — returns null elsewhere. */}
               <ChainPresencePanel />
             </div>
+            {/* a5 Design 1 — weak-chip repair advisory (read-only ranking of
+                real /api/chips + /api/autotuner/chip-health evidence; the
+                derate CTA routes to PerChipOverridePanel on the Tuning page). */}
+            <WeakChipAdvisoryPanel />
             <div className="section temp-page-spacer">
               <ImmersionMode />
             </div>

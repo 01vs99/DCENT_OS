@@ -4,7 +4,9 @@
 The working tree is never a byte source.  Commit, tree, and blob objects are
 read with ``git cat-file --batch`` and every object is re-hashed before use.
 Only regular Git blobs (100644/100755) are supported in v1; links, gitlinks,
-and non-portable paths fail closed.
+and non-portable paths fail closed. The explicit v2 release profile omits only
+the public-releases tree, records its Git identity, and retains those refusals
+for all included source. It never claims to materialize the whole commit tree.
 """
 
 from __future__ import annotations
@@ -15,10 +17,12 @@ import json
 import os
 import pathlib
 import secrets
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 from dataclasses import dataclass
 from typing import (
@@ -35,6 +39,13 @@ from typing import (
 
 
 SCHEMA = "org.dcentral.dcentos.source-snapshot.v1"
+RELEASE_SCHEMA = "org.dcentral.dcentos.source-snapshot.v2"
+FULL_TREE_PROFILE = "full-tree-v1"
+RELEASE_PROFILE = "release-workspace-v1"
+# Published mirrors are not build inputs. Bind the omitted subtree's identity,
+# never traverse it or import its submodules into the firmware source authority.
+RELEASE_EXCLUDED_ROOTS = ("public-releases",)
+RELEASE_CLAIM = "exact-git-commit-scoped-regular-blob-snapshot-not-full-tree-build-execution-or-reproducibility-proof"
 OWNER_SCHEMA = "org.dcentral.dcentos.source-snapshot-owner.v1"
 GIT_VERIFICATION_SCHEMA = "org.dcentral.dcentos.source-snapshot-git-verification.v1"
 SNAPSHOT_NAME = "snapshot.json"
@@ -169,9 +180,43 @@ def _object_digest(object_format: str, object_type: str, raw: bytes) -> str:
     return digest.hexdigest()
 
 
+def host_path_text(value: str) -> str:
+    """Rewrite Git-Bash (MSYS) drive paths (/d/dir) and long-path prefixes.
+
+    MSYS automatic argument conversion is per-argument and inconsistent on
+    long release command lines (see runs drop1-20260916-cyg3sjwi and
+    drop1-20260917-gnscaudk/c1e73bep). Normalizing at the lexical layer
+    makes the shell conversion behavior irrelevant. POSIX and native
+    inputs are returned unchanged; on non-Windows hosts this is identity.
+    """
+    if os.name != "nt" or not isinstance(value, str):
+        return value
+    text = value
+    if text.startswith("\\\\?\\UNC\\"):
+        text = "\\\\" + text[8:]
+    elif text.startswith("//?/UNC/"):
+        text = "//" + text[8:]
+    else:
+        for prefix in ("\\\\?\\", "//?/"):
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+                break
+    if (
+        len(text) >= 2
+        and text[0] == "/"
+        and text[1].isascii()
+        and text[1].isalpha()
+        and (len(text) == 2 or text[2] == "/")
+    ):
+        return text[1].upper() + ":/" + text[3:]
+    return text
+
+
+
 class GitObjects:
     def __init__(self, repo_root: pathlib.Path):
-        self.root = pathlib.Path(os.path.abspath(os.fspath(repo_root)))
+        self.root = pathlib.Path(os.path.abspath(host_path_text(os.fspath(repo_root))))
+        self.git_program = "git"
         _require_real_directory(self.root, "repository root")
         self.env = os.environ.copy()
         self.env.update(
@@ -189,6 +234,13 @@ class GitObjects:
             .decode(sys.getfilesystemencoding(), "strict")
             .strip()
         )
+        if os.name != "nt" and len(top) > 2 and top[1] == ":":
+            # Windows Git reads Windows-created linked worktrees correctly.
+            # Convert only its read-only top-level result for the exact-root check.
+            converted = subprocess.run(
+                ("wslpath", "-u", top), capture_output=True, check=True
+            )
+            top = converted.stdout.decode("utf-8", "strict").strip()
         try:
             same_root = os.path.samefile(self.root, pathlib.Path(top))
         except OSError:
@@ -204,22 +256,47 @@ class GitObjects:
         self.process: Optional[subprocess.Popen[bytes]] = None
 
     def _run(self, arguments: Sequence[str]) -> bytes:
-        completed = subprocess.run(
-            ("git", "-C", os.fspath(self.root), *arguments),
-            env=self.env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if completed.returncode:
+        # Windows transient-crash hardening (2026-09-01, Lane H): on this
+        # host, an occasional `git rev-parse` exits nonzero with EMPTY stderr
+        # under heavy filesystem/docker-teardown pressure (observed twice:
+        # 2026-08-30 lane phase 1 and 2026-09-01 run-4's post-build receipt
+        # verify; 200/200 standalone re-runs pass). These are idempotent
+        # reads whose RESULT is still fully verified by the caller, so retry
+        # the empty-stderr failure signature a bounded number of times with
+        # spacing — the same robustness class as the lane's documented
+        # release_result_stage verify TOCTOU retries. A DETERMINISTIC git
+        # failure (nonzero exit WITH stderr text) fails fast unchanged.
+        attempts = 0
+        while True:
+            completed = subprocess.run(
+                (self.git_program, *arguments),
+                cwd=self.root,
+                env=self.env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if not completed.returncode:
+                return completed.stdout
+            if (
+                self.git_program == "git"
+                and os.name != "nt"
+                and shutil.which("git.exe")
+                and arguments == ("rev-parse", "--show-toplevel")
+            ):
+                self.git_program = "git.exe"
+                continue
             message = completed.stderr.decode("utf-8", "replace").strip()
-            fail(f"Git plumbing failed ({' '.join(arguments)}): {message}")
-        return completed.stdout
+            attempts += 1
+            if message or attempts > 3:
+                fail(f"Git plumbing failed ({' '.join(arguments)}): {message}")
+            time.sleep(2.0 * attempts)
 
     def __enter__(self) -> "GitObjects":
         self.process = subprocess.Popen(
-            ("git", "-C", os.fspath(self.root), "cat-file", "--batch"),
+            (self.git_program, "cat-file", "--batch"),
+            cwd=self.root,
             env=self.env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -340,8 +417,17 @@ def _parse_tree(raw: bytes, oid_bytes: int, prefix: str) -> List[Tuple[str, str,
 
 
 def _read_graph(
-    git: GitObjects, commit_oid: str
-) -> Tuple[str, bytes, List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, bytes]]:
+    git: GitObjects, commit_oid: str, profile: str = FULL_TREE_PROFILE
+) -> Tuple[
+    str,
+    bytes,
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    Dict[str, bytes],
+    List[Dict[str, Any]],
+]:
+    if profile not in (FULL_TREE_PROFILE, RELEASE_PROFILE):
+        fail("unsupported source snapshot profile")
     commit_raw = git.read(commit_oid, "commit")
     root_tree = _commit_tree(commit_raw, git.oid_bytes)
     pending: List[Tuple[str, str]] = [("", root_tree)]
@@ -351,6 +437,7 @@ def _read_graph(
     paths: set[str] = set()
     portable: set[Tuple[str, ...]] = set()
     blob_entries: List[Tuple[str, str, str]] = []
+    omitted_trees: List[Dict[str, Any]] = []
     while pending:
         current = pending
         pending = []
@@ -365,6 +452,18 @@ def _read_graph(
                     )
                 paths.add(path)
                 portable.add(_portable_collision_key(path))
+                if profile == RELEASE_PROFILE and any(
+                    path.casefold() == root.casefold() and path != root
+                    for root in RELEASE_EXCLUDED_ROOTS
+                ):
+                    fail("release source excluded root has noncanonical case")
+                if profile == RELEASE_PROFILE and path in RELEASE_EXCLUDED_ROOTS:
+                    if mode != "040000":
+                        fail(f"excluded release root must be a Git tree: {path}")
+                    omitted_trees.append(
+                        {"path": path, "git_mode": mode, "tree_oid": oid}
+                    )
+                    continue
                 if mode == "040000":
                     directories.append(
                         {
@@ -380,10 +479,10 @@ def _read_graph(
                         fail("Git tree exceeds the source snapshot file-count bound")
                     blob_entries.append((path, mode, oid))
                 elif mode == "120000":
-                    fail(f"Git symlinks are unsupported by source snapshot v1: {path}")
+                    fail(f"Git symlinks are unsupported by source snapshot: {path}")
                 elif mode == "160000":
                     fail(
-                        f"Gitlinks/submodules are unsupported by source snapshot v1: {path}"
+                        f"Gitlinks/submodules are unsupported by source snapshot: {path}"
                     )
                 else:
                     fail(f"unsupported Git tree mode {mode} at {path}")
@@ -405,7 +504,8 @@ def _read_graph(
         )
     directories.sort(key=lambda item: item["path"].encode("utf-8"))
     files.sort(key=lambda item: item["path"].encode("utf-8"))
-    return root_tree, commit_raw, directories, files, blobs
+    omitted_trees.sort(key=lambda item: item["path"].encode("utf-8"))
+    return root_tree, commit_raw, directories, files, blobs, omitted_trees
 
 
 def _mkdir(path: pathlib.Path) -> None:
@@ -542,11 +642,61 @@ def _inspect_exact_tree(stage: pathlib.Path, descriptor: Dict[str, Any]) -> None
     if actual_files != expected_files or actual_dirs != expected_dirs:
         fail("source snapshot on-disk tree is not exact")
     if os.name != "nt":
+        windows_bridge = _windows_bridge_filesystem(stage)
         for item in descriptor["files"]:
             metadata = os.lstat(stage.joinpath(*item["staged_path"].split("/")))
-            expected = 0o555 if item["git_mode"] == "100755" else 0o444
-            if stat.S_IMODE(metadata.st_mode) != expected:
-                fail(f"snapshot executable classification changed: {item['path']}")
+            mode = stat.S_IMODE(metadata.st_mode)
+            if windows_bridge:
+                # Docker Desktop bind mounts from NTFS cannot represent the
+                # executable bit: every read-only file arrives as 0444 (and
+                # nothing can arrive executable).  On those filesystems the
+                # exact 0555/0444 classification is unenforceable, so verify
+                # the enforceable invariant instead: no file may be writable.
+                # The classification itself stays verified against the git
+                # object tree by verify_descriptor_against_git, and the
+                # reverse smuggle (git 100644, disk executable) is impossible
+                # because the bridge never yields execute bits.
+                if mode & 0o222:
+                    fail(
+                        "snapshot file is writable on a read-only bridge mount: "
+                        + item["path"]
+                    )
+            else:
+                expected = 0o555 if item["git_mode"] == "100755" else 0o444
+                if mode != expected:
+                    fail(f"snapshot executable classification changed: {item['path']}")
+
+
+def _windows_bridge_filesystem(
+    stage: pathlib.Path, mount_table: pathlib.Path = pathlib.Path("/proc/mounts")
+) -> bool:
+    """True when the stage sits on a Windows-bridge mount (Docker Desktop
+    bind mount of an NTFS tree), where the executable bit is not
+    representable.  Reads the mount table with a longest-prefix match; a
+    missing or unparseable table fails closed to False (keep the exact mode
+    check).
+    """
+    if not mount_table.is_file():
+        return False
+    resolved = str(stage.resolve()).replace(chr(92), "/")
+    best_type = ""
+    best_prefix = -1
+    try:
+        entries = mount_table.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    for entry in entries:
+        fields = entry.split()
+        if len(fields) < 3:
+            continue
+        mount_point, fs_type = fields[1], fields[2]
+        if resolved == mount_point or resolved.startswith(
+            mount_point.rstrip("/") + "/"
+        ):
+            if len(mount_point) > best_prefix:
+                best_prefix = len(mount_point)
+                best_type = fs_type
+    return best_type in ("drvfs", "9p", "fuse.9p", "virtiofs", "cifs")
 
 
 def _descriptor_body(
@@ -556,9 +706,11 @@ def _descriptor_body(
     root_tree: str,
     directories: List[Dict[str, Any]],
     files: List[Dict[str, Any]],
+    profile: str = FULL_TREE_PROFILE,
+    omitted_trees: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    return {
-        "schema": SCHEMA,
+    body = {
+        "schema": SCHEMA if profile == FULL_TREE_PROFILE else RELEASE_SCHEMA,
         "object_format": object_format,
         "commit": {
             "oid": commit_oid,
@@ -575,6 +727,20 @@ def _descriptor_body(
         "files": files,
         "scope": {"claim": SNAPSHOT_CLAIM, "does_not_claim": list(SNAPSHOT_NON_CLAIMS)},
     }
+    if profile == RELEASE_PROFILE:
+        body["scope"] = {
+            "claim": RELEASE_CLAIM,
+            "does_not_claim": [
+                *SNAPSHOT_NON_CLAIMS,
+                "excluded-public-release-mirror-content",
+            ],
+        }
+        body["projection"] = {
+            "profile": RELEASE_PROFILE,
+            "excluded_roots": list(RELEASE_EXCLUDED_ROOTS),
+            "omitted_trees": omitted_trees or [],
+        }
+    return body
 
 
 @dataclass(frozen=True)
@@ -639,9 +805,11 @@ def create_snapshot(
     stage_parent: Optional[pathlib.Path] = None,
     after_graph_read: AfterGraphHook = None,
     after_materialize: AfterMaterializeHook = None,
+    *,
+    profile: str = FULL_TREE_PROFILE,
 ) -> CreatedSnapshot:
     parent = pathlib.Path(
-        os.path.abspath(os.fspath(stage_parent or tempfile.gettempdir()))
+        os.path.abspath(host_path_text(os.fspath(stage_parent or tempfile.gettempdir())))
     )
     _require_real_directory(parent, "source snapshot parent")
     stage = pathlib.Path(tempfile.mkdtemp(prefix=STAGE_PREFIX, dir=os.fspath(parent)))
@@ -656,8 +824,8 @@ def create_snapshot(
                 "commit must be one full lowercase object id, not a ref or abbreviation"
             )
         with git:
-            root_tree, commit_raw, directories, files, blobs = _read_graph(
-                git, commit_oid
+            root_tree, commit_raw, directories, files, blobs, omitted_trees = (
+                _read_graph(git, commit_oid, profile)
             )
         if after_graph_read:
             after_graph_read(commit_oid)
@@ -676,7 +844,14 @@ def create_snapshot(
             _write_exclusive(destination, blobs[item["path"]])
             created_files.append(destination)
         body = _descriptor_body(
-            git.object_format, commit_oid, commit_raw, root_tree, directories, files
+            git.object_format,
+            commit_oid,
+            commit_raw,
+            root_tree,
+            directories,
+            files,
+            profile,
+            omitted_trees,
         )
         snapshot_id = sha256_bytes(canonical_bytes(body))
         descriptor = dict(body)
@@ -704,7 +879,18 @@ def create_snapshot(
         raise
 
 
+def descriptor_profile(value: object) -> str:
+    """Read a validated descriptor's fixed projection; never accept caller roots."""
+    if isinstance(value, dict):
+        if value.get("schema") == SCHEMA:
+            return FULL_TREE_PROFILE
+        if value.get("schema") == RELEASE_SCHEMA:
+            return RELEASE_PROFILE
+    fail("unsupported source snapshot schema")
+
+
 def _validate_descriptor(value: object) -> Dict[str, Any]:
+    profile = descriptor_profile(value)
     top = _exact_object(
         value,
         "source snapshot descriptor",
@@ -717,9 +903,10 @@ def _validate_descriptor(value: object) -> Dict[str, Any]:
             "files",
             "scope",
             "snapshot_id",
-        ),
+        )
+        + (("projection",) if profile == RELEASE_PROFILE else ()),
     )
-    if top["schema"] != SCHEMA or top["object_format"] not in ("sha1", "sha256"):
+    if top["object_format"] not in ("sha1", "sha256"):
         fail("unsupported source snapshot schema or object format")
     oid_len = 40 if top["object_format"] == "sha1" else 64
     commit = _exact_object(
@@ -746,10 +933,45 @@ def _validate_descriptor(value: object) -> Dict[str, Any]:
         "tree_oid": commit["tree_oid"],
     }:
         fail("snapshot root tree evidence is invalid")
-    if top["scope"] != {
+    expected_scope = {
         "claim": SNAPSHOT_CLAIM,
         "does_not_claim": list(SNAPSHOT_NON_CLAIMS),
-    }:
+    }
+    omitted_paths: List[str] = []
+    if profile == RELEASE_PROFILE:
+        expected_scope = {
+            "claim": RELEASE_CLAIM,
+            "does_not_claim": [
+                *SNAPSHOT_NON_CLAIMS,
+                "excluded-public-release-mirror-content",
+            ],
+        }
+        projection = _exact_object(
+            top["projection"],
+            "snapshot projection",
+            ("profile", "excluded_roots", "omitted_trees"),
+        )
+        if projection["profile"] != RELEASE_PROFILE or projection[
+            "excluded_roots"
+        ] != list(RELEASE_EXCLUDED_ROOTS):
+            fail("snapshot projection must use the fixed release source scope")
+        omitted = projection["omitted_trees"]
+        if not isinstance(omitted, list) or len(omitted) > len(RELEASE_EXCLUDED_ROOTS):
+            fail("snapshot omitted tree list is invalid")
+        for item in omitted:
+            entry = _exact_object(
+                item, "snapshot omitted tree", ("path", "git_mode", "tree_oid")
+            )
+            if (
+                entry["path"] not in RELEASE_EXCLUDED_ROOTS
+                or entry["git_mode"] != "040000"
+                or not _is_digest(entry["tree_oid"], oid_len)
+            ):
+                fail("snapshot omitted tree evidence is invalid")
+            omitted_paths.append(entry["path"])
+        if omitted_paths != sorted(set(omitted_paths)):
+            fail("snapshot omitted trees are not in canonical order")
+    if top["scope"] != expected_scope:
         fail("snapshot scope is invalid or overstated")
     if not _is_digest(top["snapshot_id"]):
         fail("snapshot id is invalid")
@@ -812,6 +1034,11 @@ def _validate_descriptor(value: object) -> Dict[str, Any]:
     ) or file_paths != sorted(file_paths, key=lambda item: item.encode("utf-8")):
         fail("snapshot source entries are not in canonical byte order")
     for path in source_paths:
+        if profile == RELEASE_PROFILE and any(
+            path.split("/", 1)[0].casefold() == root.casefold()
+            for root in RELEASE_EXCLUDED_ROOTS
+        ):
+            fail("snapshot materialized entries overlap the excluded release scope")
         key = _portable_collision_key(path)
         if key in portable:
             fail("snapshot contains duplicate or portable-colliding paths")
@@ -842,7 +1069,7 @@ def _read_json_file(
 def verify_snapshot(
     snapshot_path: pathlib.Path, expected_commit: Optional[str] = None
 ) -> Dict[str, Any]:
-    snapshot = pathlib.Path(os.path.abspath(os.fspath(snapshot_path)))
+    snapshot = pathlib.Path(os.path.abspath(host_path_text(os.fspath(snapshot_path))))
     stage = snapshot.parent
     if snapshot.name != SNAPSHOT_NAME or not stage.name.startswith(STAGE_PREFIX):
         fail("descriptor is not in an owned source-snapshot stage")
@@ -897,13 +1124,23 @@ def verify_against_git(
 ) -> Dict[str, Any]:
     """Authenticate the complete descriptor by reconstructing it from Git."""
     descriptor = verify_snapshot(snapshot_path, commit_oid)
+    profile = descriptor_profile(descriptor)
     git = GitObjects(repo_root)
     if not _is_digest(commit_oid, git.oid_bytes * 2):
         fail("commit must be one full lowercase object id, not a ref or abbreviation")
     with git:
-        root_tree, commit_raw, directories, files, _ = _read_graph(git, commit_oid)
+        root_tree, commit_raw, directories, files, _, omitted_trees = _read_graph(
+            git, commit_oid, profile
+        )
     body = _descriptor_body(
-        git.object_format, commit_oid, commit_raw, root_tree, directories, files
+        git.object_format,
+        commit_oid,
+        commit_raw,
+        root_tree,
+        directories,
+        files,
+        profile,
+        omitted_trees,
     )
     expected_snapshot_id = sha256_bytes(canonical_bytes(body))
     reconstructed = dict(body)
@@ -914,7 +1151,7 @@ def verify_against_git(
         fail(
             "source snapshot descriptor does not exactly match authenticated Git objects"
         )
-    snapshot = pathlib.Path(os.path.abspath(os.fspath(snapshot_path)))
+    snapshot = pathlib.Path(os.path.abspath(host_path_text(os.fspath(snapshot_path))))
     return {
         "schema": GIT_VERIFICATION_SCHEMA,
         "claim": "complete-source-snapshot-descriptor-reconstructed-from-authenticated-git-objects",
@@ -936,7 +1173,7 @@ def verify_descriptor_against_git(
     compiler.
     """
 
-    path = pathlib.Path(os.path.abspath(os.fspath(descriptor_path)))
+    path = pathlib.Path(os.path.abspath(host_path_text(os.fspath(descriptor_path))))
     metadata = os.lstat(path)
     if (
         not stat.S_ISREG(metadata.st_mode)
@@ -976,6 +1213,7 @@ def verify_descriptor_against_git(
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         fail(f"retained source descriptor is not valid JSON: {error}")
     descriptor = _validate_descriptor(value)
+    profile = descriptor_profile(descriptor)
     if raw != canonical_bytes(descriptor):
         fail("retained source descriptor is not canonical JSON")
 
@@ -983,9 +1221,18 @@ def verify_descriptor_against_git(
     if not _is_digest(commit_oid, git.oid_bytes * 2):
         fail("commit must be one full lowercase object id, not a ref or abbreviation")
     with git:
-        root_tree, commit_raw, directories, files, _ = _read_graph(git, commit_oid)
+        root_tree, commit_raw, directories, files, _, omitted_trees = _read_graph(
+            git, commit_oid, profile
+        )
     body = _descriptor_body(
-        git.object_format, commit_oid, commit_raw, root_tree, directories, files
+        git.object_format,
+        commit_oid,
+        commit_raw,
+        root_tree,
+        directories,
+        files,
+        profile,
+        omitted_trees,
     )
     reconstructed = dict(body)
     reconstructed["snapshot_id"] = sha256_bytes(canonical_bytes(body))
@@ -1027,7 +1274,7 @@ def destroy_snapshot(snapshot_path: pathlib.Path, token: str) -> None:
     if not _is_digest(token):
         fail("source snapshot destruction token is invalid")
     descriptor = verify_snapshot(snapshot_path)
-    stage = pathlib.Path(os.path.abspath(os.fspath(snapshot_path))).parent
+    stage = pathlib.Path(os.path.abspath(host_path_text(os.fspath(snapshot_path)))).parent
     _, sentinel_value = _read_json_file(
         stage, SENTINEL_NAME, 4096, "source snapshot owner sentinel"
     )
@@ -1149,6 +1396,11 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--repo-root", required=True)
     create.add_argument("--commit", required=True)
     create.add_argument("--stage-parent")
+    create.add_argument(
+        "--profile",
+        choices=(FULL_TREE_PROFILE, RELEASE_PROFILE),
+        default=FULL_TREE_PROFILE,
+    )
     verify = commands.add_parser("verify", help="verify a materialized snapshot")
     verify.add_argument("--commit")
     verify.add_argument("snapshot")
@@ -1198,14 +1450,30 @@ def parser() -> argparse.ArgumentParser:
     return top
 
 
+def normalize_host_path_args(args: argparse.Namespace) -> argparse.Namespace:
+    # ``commit`` and ``token`` are non-path scalars; ``profile`` and
+    # ``field`` are enum choices.
+    for field in (
+        "repo_root",
+        "stage_parent",
+        "snapshot",
+        "descriptor",
+    ):
+        value = getattr(args, field, None)
+        if isinstance(value, str):
+            setattr(args, field, host_path_text(value))
+    return args
+
+
 def main() -> int:
     try:
-        args = parser().parse_args()
+        args = normalize_host_path_args(parser().parse_args())
         if args.command == "create":
             created = create_snapshot(
                 pathlib.Path(args.repo_root),
                 args.commit,
                 pathlib.Path(args.stage_parent) if args.stage_parent else None,
+                profile=args.profile,
             )
             print(canonical_bytes(created.cli_result()).decode("ascii"), end="")
         elif args.command == "verify":

@@ -233,7 +233,7 @@ class BootMediaManifestTests(unittest.TestCase):
             'ARTIFACT_TARGET="am2-s17p-sd"',
             'CONFIG_NAME="dcentrald_s19pro_am2_baked_default.toml"',
             'CONFIG_NAME="dcentrald_s17pro_am2_baked_default.toml"',
-            '--native-runtime-support management_only',
+            '--native-runtime-support experimental',
             f"BRAIINS_IMG_SIZE={DONOR_SIZE}",
             f"BRAIINS_IMG_SHA256={DONOR_SHA256}",
             "validate_braiins_donor",

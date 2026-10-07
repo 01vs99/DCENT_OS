@@ -36,10 +36,14 @@ set -euo pipefail
 
 VARIANT="s19pro"
 VERIFY_DONOR_ONLY=0
+ROOTFS_INPUT=""
+RUNTIME_INPUT=""
+OUTPUT_INPUT=""
 
 usage() {
     echo "Usage: $(basename "$0") [--variant s19pro|s17p|s17plus|t17|t17plus]" >&2
-    echo "       Builds experimental, management-only AM2 Zynq SD boot media." >&2
+    echo "       Builds idle-first AM2 Zynq hardware beta SD boot media." >&2
+    echo "       --rootfs FILE --runtime FILE --output FILE select explicit build inputs/output." >&2
     echo "       --verify-donor-only checks the held boot image and exits." >&2
 }
 
@@ -52,6 +56,15 @@ while [ $# -gt 0 ]; do
         --variant=*)
             VARIANT="${1#--variant=}"
             shift
+            ;;
+        --rootfs|--runtime|--output)
+            [ $# -ge 2 ] && [ -n "$2" ] || { usage; exit 2; }
+            case "$1" in
+                --rootfs) ROOTFS_INPUT="$2" ;;
+                --runtime) RUNTIME_INPUT="$2" ;;
+                --output) OUTPUT_INPUT="$2" ;;
+            esac
+            shift 2
             ;;
         --verify-donor-only)
             VERIFY_DONOR_ONLY=1
@@ -137,11 +150,15 @@ SUDO="sudo"; [ "$(id -u)" = "0" ] && SUDO=""
 BRAIINS_IMG="${BRAIINS_IMG:-$PROJ/knowledge-base/firmware-archive/braiins-os_am2-s17_sd.img}"
 BRAIINS_IMG_SIZE=112197632
 BRAIINS_IMG_SHA256=b0444ad2a5e9b9e2b021ec756a40cb1448128545a42c77bdabb4363617d03579
-DCENTOS_ROOTFS="$PROJ/DCENT_OS_Antminer/dcentos_rootfs.squashfs"
-NEW_BINARY="$PROJ/DCENT_OS_Antminer/dcentrald/target/armv7-unknown-linux-musleabihf/release/dcentrald"
+DCENTOS_ROOTFS="${ROOTFS_INPUT:-$PROJ/DCENT_OS_Antminer/dcentos_rootfs.squashfs}"
+NEW_BINARY="${RUNTIME_INPUT:-$PROJ/DCENT_OS_Antminer/dcentrald/target/armv7-unknown-linux-musleabihf/release/dcentrald}"
 DCENTOS_CONFIG="$PROJ/DCENT_OS_Antminer/dcentrald/configs/$CONFIG_NAME"
 OVERLAY="$PROJ/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/rootfs-overlay"
-SD_IMAGE="$PROJ/DCENT_OS_Antminer/output/$IMAGE_NAME"
+SD_IMAGE="${OUTPUT_INPUT:-$PROJ/DCENT_OS_Antminer/output/$IMAGE_NAME}"
+# Resolve relative caller paths before changing into the private build directory.
+DCENTOS_ROOTFS="$(realpath -ms -- "$DCENTOS_ROOTFS")"
+NEW_BINARY="$(realpath -ms -- "$NEW_BINARY")"
+SD_IMAGE="$(realpath -ms -- "$SD_IMAGE")"
 export MTOOLS_SKIP_CHECK=1
 
 # The donor is executable boot-chain input, not merely descriptive evidence.
@@ -187,6 +204,14 @@ if [ ! -f "$NEW_BINARY" ] || [ -L "$NEW_BINARY" ]; then
     exit 1
 fi
 
+for build_input in "$DCENTOS_ROOTFS" "$DCENTOS_CONFIG"; do
+    [ -f "$build_input" ] && [ ! -L "$build_input" ] || {
+        echo "ERROR: build input must be a regular non-symlink file: $build_input" >&2
+        exit 1
+    }
+done
+INPUT_DIGESTS="$(sha256sum -- "$DCENTOS_ROOTFS" "$NEW_BINARY" "$DCENTOS_CONFIG")"
+
 # Shared SD helpers (squashfs-root partition writer + magic check).
 # shellcheck source=lib/sd_common.sh
 . "$PROJ/DCENT_OS_Antminer/scripts/lib/sd_common.sh"
@@ -217,7 +242,7 @@ trap cleanup_private_workdir EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-mkdir -p "$WORKDIR"/boot
+mkdir -p "$WORKDIR"/boot "$(dirname -- "$SD_IMAGE")"
 
 # ============================================================
 echo "=== Step 1: Extract FAT32 boot partition from BraiinsOS SD image (mtools, no loop) ==="
@@ -280,9 +305,12 @@ echo "  Installed idle-first $MODEL_LABEL config"
 [ -f "$OVERLAY/etc/default/dropbear" ] && { $SUDO cp "$OVERLAY/etc/default/dropbear" "$WORKDIR/rootfs_new/etc/default/dropbear"; echo "  Fixed dropbear config (password auth enabled)"; }
 
 # Copy updated init scripts (AM2 control-board family detection)
-for s in S10modules S15pic_boot S82dcentrald; do
+for s in S10modules S12fpga_identity S15pic_boot S82dcentrald; do
     [ -f "$OVERLAY/etc/init.d/$s" ] && $SUDO cp "$OVERLAY/etc/init.d/$s" "$WORKDIR/rootfs_new/etc/init.d/$s"
 done
+$SUDO mkdir -p "$WORKDIR/rootfs_new/usr/libexec/dcentos"
+$SUDO cp "$OVERLAY/usr/libexec/dcentos/am2-fabric-identity.sh" "$WORKDIR/rootfs_new/usr/libexec/dcentos/"
+$SUDO chmod 755 "$WORKDIR/rootfs_new/etc/init.d/S12fpga_identity"
 echo "  Updated init scripts (AM2 control-board family detection)"
 
 # CRITICAL (pass-2 fix P2-2): bake the am2 platform STAMPS into the rootfs. The
@@ -307,9 +335,20 @@ dcent_require_armv7_eabi_elf_paths "$WORKDIR/rootfs_new" "$MODEL_LABEL rootfs" \
 echo "  Arch guard OK: /sbin/init + busybox + dcentrald are ARMv7 EABI ELF"
 
 # Build new squashfs
+$SUDO python3 "$PROJ/DCENT_OS_Antminer/scripts/provision_runtime_policy.py" "$WORKDIR/rootfs_new"
+# The signature binds the final daemon bytes before the rootfs is compressed.
+# Explicit signing inputs are passed through sudo rather than inferred from a
+# mutable rootfs public-key file; no unsigned beta fallback exists.
+$SUDO python3 "$PROJ/DCENT_OS_Antminer/scripts/runtime_image_manifest.py" prepare \
+    --rootfs "$WORKDIR/rootfs_new" --board-target "$BOARD_TARGET" \
+    --version "$(cat "$WORKDIR/rootfs_new/etc/dcentos-version")" \
+    --channel "${DCENT_RELEASE_CHANNEL:-beta}" \
+    --hardware-recipe "${DCENT_RELEASE_HARDWARE_RECIPE:-board-default}" \
+    --key "${DCENT_RELEASE_SIGNING_KEY:?signed runtime image requires signing key}" \
+    --pubkey "${DCENT_RELEASE_PUBKEY_FILE:?signed runtime image requires trusted public key}"
 $SUDO rm -f "$WORKDIR/rootfs_dcentos.squashfs"
 $SUDO mksquashfs "$WORKDIR/rootfs_new" "$WORKDIR/rootfs_dcentos.squashfs" \
-    -comp xz -b 262144 -no-xattrs -noappend
+    -comp xz -b 262144 -no-xattrs -noappend -processors 2 -no-progress
 echo "  New rootfs: $(stat -c%s "$WORKDIR/rootfs_dcentos.squashfs") bytes"
 
 # ============================================================
@@ -422,6 +461,11 @@ bm_load_sd_images=fatload mmc 0 ${bm_kernel_addr} uImage && fatload mmc 0 ${bm_d
 sd_uenvcmd=echo === DCENT_OS Booting from SD ===; if run bm_load_bitstream; then echo FPGA programmed; else echo FPGA load failed - booting anyway; fi; run bm_load_sd_images && run bm_set_bootargs && bootm ${bm_kernel_addr} - ${bm_devicetree_addr}
 UENV
 
+python3 "$PROJ/DCENT_OS_Antminer/scripts/prepare_am2_fabric_boot.py" \
+    --bitstream-gzip "$WORKDIR/boot/system.bit.gz" \
+    --output-dir "$WORKDIR" --uenv "$WORKDIR/uEnv.txt"
+mcopy -i "$BOOTPART" -o "$WORKDIR/am2-fabric.itb" "::am2-fabric.itb"
+
 # Copy the boot chain + DCENT_OS kernel/DTB/uEnv into the FAT (mcopy, no mount).
 for f in boot.bin u-boot.img system.bit.gz system_bm.bit.gz miner.btm miner.btm.sig; do
     mcopy -i "$BOOTPART" -o "$WORKDIR/boot/$f" "::$f"
@@ -440,22 +484,27 @@ dd if="$BOOTPART" of="$SD_IMAGE" bs=1M seek=$P1_OFFSET_MB conv=notrunc 2>/dev/nu
 # the "No init found" boot-loop defect.
 sd_common::write_squashfs_root_partition "$SD_IMAGE" "$WORKDIR/rootfs_dcentos.squashfs" "$P2_OFFSET_MB" "$P2_SIZE_MB"
 
+[ "$INPUT_DIGESTS" = "$(sha256sum -- "$DCENTOS_ROOTFS" "$NEW_BINARY" "$DCENTOS_CONFIG")" ] || {
+    echo "ERROR: runtime/rootfs/config inputs changed during image construction" >&2
+    exit 1
+}
+
 # Bind the exact image and held AM2/S17 donor evidence to an explicit support
-# scope. This is experimental external-media boot for the AM2 control-board
-# family, not authorization to mutate NAND and not a native-mining claim.
+# scope. Native execution is available for the exact beta target; physical
+# qualification remains pending. This image authorizes external-media boot.
 python3 "$PROJ/DCENT_OS_Antminer/scripts/write_sd_boot_media_manifest.py" \
     --image "$SD_IMAGE" \
     --target "$ARTIFACT_TARGET" \
     --board-target "$BOARD_TARGET" \
     --control-board-family zynq-bm3-am2 \
-    --native-runtime-support management_only \
+    --native-runtime-support experimental \
     --donor "$BRAIINS_IMG" \
     --runtime "$NEW_BINARY" \
     --complete-zynq-boot-set
 
 echo ""
 echo "============================================"
-echo "  DCENT_OS SD Card Image: LAB-ONLY"
+echo "  DCENT_OS SD Card Image: HARDWARE BETA"
 echo "============================================"
 echo "  Image: $SD_IMAGE"
 echo "  Manifest: $SD_IMAGE.manifest.json"
@@ -466,6 +515,7 @@ echo "    balenaEtcher: select $IMAGE_NAME"
 echo "    Or: dd if=$IMAGE_NAME of=/dev/sdX bs=4M"
 echo ""
 echo "  Boot: Insert SD + power on $MODEL_LABEL (JP4 jumper to SD position)"
-echo "  NOTE: This image is for AM2 SD boot validation only. Do NOT treat it as a safe NAND installer yet."
-echo "  SSH:  root@<IP> password: dcentral"
+echo "  Configure a pool and Start mining to run the exact-target native beta."
+echo "  This SD image grants no NAND install or firmware-write capability."
+echo "  Setup: open http://<IP>/; use the provisioned key for SSH access."
 echo "============================================"

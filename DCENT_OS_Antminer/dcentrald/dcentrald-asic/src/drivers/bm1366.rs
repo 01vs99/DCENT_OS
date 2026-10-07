@@ -546,7 +546,7 @@ impl ChipDriver for Bm1366Driver {
         // value byte-identical — the live nonce partitioning is never silently changed.
         let hash_counting = resolve_hash_counting(
             stock_hash_counting,
-            std::env::var("DCENT_BM1366_HASH_COUNTING").ok().as_deref(),
+            dcentrald_common::lab_env::var("DCENT_BM1366_HASH_COUNTING").ok().as_deref(),
         );
         Self::write_reg_broadcast(chain, regs::HASH_COUNTING, hash_counting);
         std::thread::sleep(std::time::Duration::from_millis(5));

@@ -49,6 +49,7 @@ PERSISTENT_COMPAT="/data/dcentos-compat"
 API_PORT=8080
 SCRIPT="$0"
 SESSION_LATCH_HELPER="/usr/libexec/dcentos/dcentrald-session-latch.sh"
+FIRSTLIGHT_CONFIG_HELPER="/usr/libexec/dcentos/dcentrald-firstlight-config.sh"
 PROCESS_IDENTITY_HELPER="/usr/libexec/dcentos/dcentrald-process-identity.sh"
 FAN_CUSTODY_HELPER="/usr/libexec/dcentos/dcentrald-fan-custody.sh"
 DEPLOY_RECOVERY_HELPER="/usr/libexec/dcentos/dcentrald-deploy-recovery.sh"
@@ -243,7 +244,7 @@ am2_power_cut_proven() {
     [ -r /sys/class/gpio/gpio907/value ] && [ "$(cat /sys/class/gpio/gpio907/value 2>/dev/null)" = "0" ]
 }
 
-# AUDIT FIX (2026-05-29, ):
+# AUDIT FIX (2026-05-29, am2 never leave unit without fan manager rule):
 # On AM2 (XIL Zynq) the fan PWM is held only while a process owns the uio16 mmap
 # AND keeps re-commanding it. The old `$DAEMON --set-fan N` wrote the PWM once
 # and EXITED, so the board's fan IP drifted the fans back to full speed — a home
@@ -307,7 +308,120 @@ fan_safety_override() {
     return 1
 }
 
+FIRSTLIGHT_CENSUS_TOKEN=
+FIRSTLIGHT_WORK_SECONDS=
+validate_firstlight_request() {
+    [ "${#1}" -eq 32 ] || return 1
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+    case "$(cat /etc/dcentos/board_target 2>/dev/null)" in
+        am1-s9|am1-s9i|am1-s9j|am2-s17p|am2-s17plus|am2-t17|am2-t17plus|am2-s19j) ;;
+        *) return 1 ;;
+    esac
+}
+
+validate_firstlight_seconds() {
+    case "$1" in ''|*[!0-9]*|0*) return 1 ;; esac
+    [ "$1" -ge 1 ] && [ "$1" -le 300 ]
+}
+
+firstlight_restore_locked() {
+    [ "$#" -eq 1 ] && validate_firstlight_request "$1" || return 1
+    dcent_validate_deploy_lock_handoff || return 1
+    [ ! -e /run/dcentos-sysupgrade.lock ] && [ ! -L /run/dcentos-sysupgrade.lock ] || return 1
+    [ ! -e /data/dcent/reset-settings ] && [ ! -L /data/dcent/reset-settings ] || return 1
+    [ ! -e "$DEPLOY_MAINTENANCE_MARKER" ] && [ ! -L "$DEPLOY_MAINTENANCE_MARKER" ] || return 1
+    [ "$(sh "$SESSION_LATCH_HELPER" status)" = clear ] || return 1
+    [ -z "$(pidof dcentrald 2>/dev/null || true)" ] || return 1
+    resolve_interrupted_persistent_deploy || return 1
+    select_dcentrald_paths
+    dcent_verify_resolved_deploy_selection "$DAEMON" "$CONFIG" \
+        && dcent_verify_resolved_deploy_generation || return 1
+    [ -r "$FIRSTLIGHT_CONFIG_HELPER" ] && [ ! -L "$FIRSTLIGHT_CONFIG_HELPER" ] \
+        && . "$FIRSTLIGHT_CONFIG_HELPER" || return 1
+    firstlight_restore_token=$1
+    firstlight_retired=$DCENT_FIRSTLIGHT_BASE/retired-$1
+    firstlight_retire_needed=0
+    if [ -e "$DCENT_FIRSTLIGHT_STAGE" ] || [ -L "$DCENT_FIRSTLIGHT_STAGE" ]; then
+        # Never merge/overwrite a foreign destination, including dangling links.
+        [ ! -e "$firstlight_retired" ] && [ ! -L "$firstlight_retired" ] || return 1
+        dcent_firstlight_capture_config "$1" work "$DAEMON" "$CONFIG" || return 1
+        firstlight_retire_needed=1
+    else
+        # Resume after atomic retirement. The session record must still exist;
+        # a bare empty directory cannot stand in for original-generation proof.
+        DCENT_FIRSTLIGHT_STAGE=$firstlight_retired
+        dcent_firstlight_identity "$DCENT_FIRSTLIGHT_STAGE/session" record >/dev/null || return 1
+        dcent_firstlight_check_identity_record "$1" && dcent_firstlight_check_original || return 1
+        [ "$DAEMON" = "$(dcent_firstlight_field daemon_path)" ] \
+            && [ "$CONFIG" = "$(dcent_firstlight_field original_path)" ] || return 1
+    fi
+    firstlight_restore_record=$(dcent_firstlight_identity "$DCENT_FIRSTLIGHT_STAGE/session" record) || return 1
+    for firstlight_entry in "$DCENT_FIRSTLIGHT_STAGE"/* "$DCENT_FIRSTLIGHT_STAGE"/.[!.]* "$DCENT_FIRSTLIGHT_STAGE"/..?*; do
+        [ -e "$firstlight_entry" ] || [ -L "$firstlight_entry" ] || continue
+        case "$firstlight_entry" in
+            "$DCENT_FIRSTLIGHT_STAGE/session") ;;
+            "$DCENT_FIRSTLIGHT_STAGE/census.toml"|"$DCENT_FIRSTLIGHT_STAGE/work.toml")
+                firstlight_phase=${firstlight_entry##*/}
+                firstlight_phase=${firstlight_phase%.toml}
+                firstlight_observed=$(dcent_firstlight_identity "$firstlight_entry" phase) || return 1
+                [ "$firstlight_observed" = "$(dcent_firstlight_field "$firstlight_phase")" ] || return 1
+                ;;
+            *) return 1 ;;
+        esac
+    done
+    "$DAEMON" --check-firstlight-idle-config "$CONFIG" || return 1
+    # The parser process is read-only, but its result is still a point-in-time
+    # observation. Revalidate original bytes/inodes and the record afterwards.
+    dcent_firstlight_check_original || return 1
+    [ "$firstlight_restore_record" = "$(dcent_firstlight_identity "$DCENT_FIRSTLIGHT_STAGE/session" record)" ] || return 1
+    if [ "$firstlight_retire_needed" -eq 1 ]; then
+        mv "$DCENT_FIRSTLIGHT_STAGE" "$firstlight_retired" || return 1
+        sync || return 1
+        DCENT_FIRSTLIGHT_STAGE=$firstlight_retired
+    fi
+    # Only the two recognized phase files and exact bound session record can be
+    # removed. Any interruption retains either a resumable record or no active
+    # stage; the original mining-disabled config is never rewritten.
+    for firstlight_phase in census work; do
+        if [ -e "$DCENT_FIRSTLIGHT_STAGE/$firstlight_phase.toml" ]; then
+            rm "$DCENT_FIRSTLIGHT_STAGE/$firstlight_phase.toml" || return 1
+            sync || return 1
+        fi
+    done
+    dcent_firstlight_check_original || return 1
+    [ "$firstlight_restore_record" = "$(dcent_firstlight_identity "$DCENT_FIRSTLIGHT_STAGE/session" record)" ] || return 1
+    [ "$(sh "$SESSION_LATCH_HELPER" status)" = clear ] \
+        && [ -z "$(pidof dcentrald 2>/dev/null || true)" ] || return 1
+    rm "$DCENT_FIRSTLIGHT_STAGE/session" || return 1
+    rmdir "$DCENT_FIRSTLIGHT_STAGE" || return 1
+    sync || return 1
+    # exec preserves this shell PID, its compiled parent and the original
+    # handoff descriptors. Ordinary start rechecks the same protected generation.
+    exec "$0" start-locked
+}
+
 case "$1" in
+    firstlight-restore)
+        [ "$#" -eq 2 ] && validate_firstlight_request "$2" || exit 64
+        [ -x "$DEPLOY_LOCK_HELPER" ] || exit 1
+        exec "$DEPLOY_LOCK_HELPER" --handoff "$0" firstlight-restore-locked "$2"
+        ;;
+    firstlight-restore-locked)
+        [ "$#" -eq 2 ] || exit 64
+        firstlight_restore_locked "$2"
+        exit $?
+        ;;
+    firstlight-work)
+        [ "$#" -eq 3 ] && validate_firstlight_request "$2" \
+            && validate_firstlight_seconds "$3" || exit 64
+        [ -x "$DEPLOY_LOCK_HELPER" ] || exit 1
+        exec "$DEPLOY_LOCK_HELPER" --handoff "$0" start-locked firstlight-work "$2" "$3"
+        ;;
+    firstlight-census)
+        [ "$#" -eq 2 ] && validate_firstlight_request "$2" || exit 64
+        [ -x "$DEPLOY_LOCK_HELPER" ] || exit 1
+        exec "$DEPLOY_LOCK_HELPER" --handoff "$0" start-locked firstlight-census "$2"
+        ;;
     deploy-recovery-capabilities)
         [ -r "$DEPLOY_RECOVERY_HELPER" ] \
             && [ ! -L "$DEPLOY_RECOVERY_HELPER" ] || exit 1
@@ -325,10 +439,34 @@ case "$1" in
         ;;
 
     start-locked)
+        if [ "$#" -ne 1 ]; then
+            if [ "$#" -eq 3 ] && [ "$2" = firstlight-census ]; then
+                validate_firstlight_request "$3" || exit 64
+            elif [ "$#" -eq 4 ] && [ "$2" = firstlight-work ]; then
+                validate_firstlight_request "$3" && validate_firstlight_seconds "$4" || exit 64
+                FIRSTLIGHT_WORK_SECONDS=$4
+            else
+                exit 64
+            fi
+            FIRSTLIGHT_CENSUS_TOKEN=$3
+        fi
         if ! dcent_validate_deploy_lock_handoff; then
             echo "  [FAIL] dcentrald deploy-lock handoff provenance is invalid"
             exit 1
         fi
+        # A durable settings-reset intent survives worker death and /run loss.
+        # Only the checked reset owner may consume it after mining-off defaults
+        # are durable. Any unsafe entry also refuses ordinary startup.
+        if [ -e /data/dcent/reset-settings ] || [ -L /data/dcent/reset-settings ]; then
+            echo "  [FAIL] dcentrald admission blocked by /data/dcent/reset-settings; complete the checked reset"
+            exit 1
+        fi
+        for firstlight_prepared in /data/.dcent-firstlight/prepared-* /data/.dcent-firstlight/retired-*; do
+            [ ! -e "$firstlight_prepared" ] && [ ! -L "$firstlight_prepared" ] || {
+                echo "  [FAIL] Resolve the retained firstlight session before startup"
+                exit 1
+            }
+        done
         [ ! -e "$DEPLOY_MAINTENANCE_MARKER" ] \
             && [ ! -L "$DEPLOY_MAINTENANCE_MARKER" ] || {
             echo "  [FAIL] dcentrald admission blocked by active deploy maintenance"
@@ -346,7 +484,25 @@ case "$1" in
             echo "  [FAIL] Resolved persistent generation changed before admission"
             exit 1
         fi
+        if [ -n "$FIRSTLIGHT_CENSUS_TOKEN" ]; then
+            [ -r "$FIRSTLIGHT_CONFIG_HELPER" ] && [ ! -L "$FIRSTLIGHT_CONFIG_HELPER" ] \
+                && . "$FIRSTLIGHT_CONFIG_HELPER" || exit 1
+            FIRSTLIGHT_PHASE=census
+            [ -z "$FIRSTLIGHT_WORK_SECONDS" ] || FIRSTLIGHT_PHASE=work
+            dcent_firstlight_capture_config "$FIRSTLIGHT_CENSUS_TOKEN" "$FIRSTLIGHT_PHASE" \
+                "$DAEMON" "$CONFIG" || {
+                echo "  [FAIL] Firstlight stage/context is absent, stale or foreign"
+                exit 1
+            }
+        elif [ -e /data/.dcent-firstlight/current ] || [ -L /data/.dcent-firstlight/current ]; then
+            echo "  [FAIL] Resolve the retained firstlight session before normal start"
+            exit 1
+        fi
         if [ ! -x "$DAEMON" ]; then
+            if [ -n "$FIRSTLIGHT_CENSUS_TOKEN" ]; then
+                echo "  [FAIL] Firstlight census requires the installed daemon"
+                exit 1
+            fi
             echo "  [SKIP] dcentrald: binary not found at $DAEMON"
             exit 0
         fi
@@ -448,11 +604,40 @@ case "$1" in
             exit 1
         fi
 
+        if [ -n "$FIRSTLIGHT_CENSUS_TOKEN" ]; then
+            if ! dcent_firstlight_verify_config "$DAEMON" "$CONFIG"; then
+                /bin/sh "$SESSION_LATCH_HELPER" abandon "$SESSION_TOKEN" firstlight-config-binding-changed \
+                    >> "$LOGFILE" 2>&1 || true
+                fan_safety_override
+                echo "  [FAIL] Firstlight config/context changed at exec"
+                exit 1
+            fi
+            CONFIG=$DCENT_FIRSTLIGHT_CONFIG
+        fi
         rm -f "$PIDFILE"
-        DCENTOS_SESSION_WRAPPER_PIDFILE="$PIDFILE" \
-            /bin/sh "$SESSION_LATCH_HELPER" supervise "$SESSION_TOKEN" \
-            "$SCRIPT" "$LOGFILE" "$CHILD_PIDFILE" "$EXPECTFILE" \
-            "$DAEMON" --config "$CONFIG" >>"$LOGFILE" 2>&1 &
+        set -- "$DAEMON" --config "$CONFIG"
+        if [ -n "$FIRSTLIGHT_CENSUS_TOKEN" ]; then
+            # Firstlight census/work extends the common supervisor with
+            # dedicated latch modes; the ordinary path below keeps the
+            # canonical literal invocation the admission-policy gate pins.
+            if [ -n "$FIRSTLIGHT_WORK_SECONDS" ]; then
+                SUPERVISE_MODE=supervise-firstlight-work
+                set -- "$@" --firstlight-work "$FIRSTLIGHT_CENSUS_TOKEN" \
+                    --firstlight-seconds "$FIRSTLIGHT_WORK_SECONDS"
+            else
+                SUPERVISE_MODE=supervise-census
+                set -- "$@" --firstlight-census "$FIRSTLIGHT_CENSUS_TOKEN"
+            fi
+            DCENTOS_SESSION_WRAPPER_PIDFILE="$PIDFILE" \
+                /bin/sh "$SESSION_LATCH_HELPER" "$SUPERVISE_MODE" "$SESSION_TOKEN" \
+                "$SCRIPT" "$LOGFILE" "$CHILD_PIDFILE" "$EXPECTFILE" \
+                "$@" >>"$LOGFILE" 2>&1 &
+        else
+            DCENTOS_SESSION_WRAPPER_PIDFILE="$PIDFILE" \
+                /bin/sh "$SESSION_LATCH_HELPER" supervise "$SESSION_TOKEN" \
+                "$SCRIPT" "$LOGFILE" "$CHILD_PIDFILE" "$EXPECTFILE" \
+                "$@" >>"$LOGFILE" 2>&1 &
+        fi
         SUPERVISOR_PID=$!
         case "$SUPERVISOR_PID" in
             ''|*[!0-9]*)
@@ -469,6 +654,20 @@ case "$1" in
             fan_safety_override
             echo "  [FAIL] dcentrald supervisor did not start"
             exit 1
+        fi
+        if [ -n "$FIRSTLIGHT_CENSUS_TOKEN" ]; then
+            # Keep the kernel deploy lock until the one-shot supervisor ends.
+            # Release only fan transition serialization, allowing its post-exit
+            # safety owner to run after wait(2) proves the child is dead.
+            dcent_release_fan_transition_lock
+            wait "$SUPERVISOR_PID"
+            CENSUS_RESULT=$?
+            if [ "$CENSUS_RESULT" -eq 0 ]; then
+                /bin/sh "$SESSION_LATCH_HELPER" status | grep -qx clear || CENSUS_RESULT=1
+            fi
+            # EOF on process exit also releases the handoff. No live mining
+            # owner remains for this synchronous one-shot entry.
+            exit "$CENSUS_RESULT"
         fi
         ADMITTED_CHILD=
         ADMISSION_WAIT=0

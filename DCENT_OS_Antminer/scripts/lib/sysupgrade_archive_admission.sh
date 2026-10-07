@@ -38,7 +38,9 @@ dcent_sysupgrade_archive_admit() (
     dcent_manifest_status="$dcent_archive_scratch/$dcent_archive_token.manifest-status"
     dcent_manifest_paths="$dcent_archive_scratch/$dcent_archive_token.manifest-paths"
     dcent_payload_paths="$dcent_archive_scratch/$dcent_archive_token.payload-paths"
-    trap 'rm -f "$dcent_member_list" "$dcent_member_types" "$dcent_manifest" "$dcent_manifest_status" "$dcent_manifest_paths" "$dcent_payload_paths"' EXIT
+    dcent_manifest_tar_err="$dcent_archive_scratch/$dcent_archive_token.manifest-tar.err"
+    dcent_manifest_dd_err="$dcent_archive_scratch/$dcent_archive_token.manifest-dd.err"
+    trap 'rm -f "$dcent_member_list" "$dcent_member_types" "$dcent_manifest" "$dcent_manifest_status" "$dcent_manifest_paths" "$dcent_payload_paths" "$dcent_manifest_tar_err" "$dcent_manifest_dd_err"' EXIT
     trap 'exit 1' HUP INT TERM
 
     tar tf "$dcent_archive_path" >"$dcent_member_list" 2>/dev/null ||
@@ -165,18 +167,49 @@ dcent_sysupgrade_archive_admit() (
     # Bound the only member read before full extraction.  Capturing one byte
     # beyond the limit distinguishes an oversized manifest without allowing it
     # to consume unbounded scratch space.
+    #
+    # dd reads BYTES, not blocks: with bs=$LIMIT count=1 a single short read()
+    # satisfies dd's block count and it exits while tar is still writing,
+    # SIGPIPEing the extractor (exit 141, empty stderr — observed as the
+    # load-timing "tar: silent" failure on run drop1-20260919-4f5h9mgl,
+    # am3-s21, after six identical lanes passed).  bs=1 count=LIMIT+1 keeps
+    # dd reading until EOF or the byte limit, so a compliant manifest is
+    # always delivered whole and only a genuinely oversized one trips the
+    # bound.  The byte-granular reads cost ~10-150 ms per admission at the
+    # bound on the measured hosts (negligible next to hashing the ~40 MB
+    # envelope); a Zynq target pays at most ~0.5 s.
+    dcent_manifest_dd_status=0
     (
         dcent_manifest_tar_status=0
-        tar -xOf "$dcent_archive_path" "$dcent_manifest_member" 2>/dev/null ||
+        # Capture tar's own complaint: "cannot be read" alone hid the real
+        # extractor failure for the first A126/bm1362-nopic-family lane
+        # (run drop1-20260919-n7k05sqv, am3-s19jproa).
+        tar -xOf "$dcent_archive_path" "$dcent_manifest_member" 2>"$dcent_manifest_tar_err" ||
             dcent_manifest_tar_status=$?
         printf '%s\n' "$dcent_manifest_tar_status" >"$dcent_manifest_status"
-    ) | dd bs=$((DCENT_SYSUPGRADE_MANIFEST_MAX_BYTES + 1)) count=1 of="$dcent_manifest" 2>/dev/null
-    [ -r "$dcent_manifest_status" ] || dcent_archive_error "manifest extraction status is unavailable"
-    [ "$(cat "$dcent_manifest_status")" = 0 ] || dcent_archive_error "MANIFEST.json cannot be read from archive"
+    ) | dd bs=1 count=$((DCENT_SYSUPGRADE_MANIFEST_MAX_BYTES + 1)) of="$dcent_manifest" 2>"$dcent_manifest_dd_err" ||
+        dcent_manifest_dd_status=$?
     dcent_manifest_size=$(wc -c <"$dcent_manifest" | tr -d '[:space:]')
-    [ "$dcent_manifest_size" -gt 0 ] || dcent_archive_error "MANIFEST.json is empty"
+    # Size verdict FIRST: bytes on disk outrank any extractor status, and the
+    # over-limit read is exactly how an oversized manifest announces itself.
+    [ -n "$dcent_manifest_size" ] ||
+        dcent_archive_error "manifest extraction is unavailable (scratch unwritable?)"
     [ "$dcent_manifest_size" -le "$DCENT_SYSUPGRADE_MANIFEST_MAX_BYTES" ] ||
         dcent_archive_error "MANIFEST.json exceeds $DCENT_SYSUPGRADE_MANIFEST_MAX_BYTES bytes"
+    # A partial-write dd failure (ENOSPC/SIGXFSZ on the scratch) can truncate
+    # the captured bytes while tar reports success; only dd's own nonzero
+    # status names that window.  dd's success statistics land in the same
+    # stderr file, so its contents are evidence only when dd failed.
+    [ "$dcent_manifest_dd_status" = 0 ] || {
+        dcent_manifest_dd_error="$(tr '\n' ' ' <"$dcent_manifest_dd_err" 2>/dev/null | cut -c1-200)"
+        dcent_archive_error "MANIFEST.json cannot be captured to scratch (dd exit $dcent_manifest_dd_status; ${dcent_manifest_dd_error:-silent})"
+    }
+    [ -r "$dcent_manifest_status" ] || dcent_archive_error "manifest extraction status is unavailable"
+    if [ "$(cat "$dcent_manifest_status")" != 0 ]; then
+        dcent_manifest_tar_error="$(tr '\n' ' ' <"$dcent_manifest_tar_err" 2>/dev/null | cut -c1-200)"
+        dcent_archive_error "MANIFEST.json cannot be read from archive (tar exit $(cat "$dcent_manifest_status"); ${dcent_manifest_tar_error:-silent})"
+    fi
+    [ "$dcent_manifest_size" -gt 0 ] || dcent_archive_error "MANIFEST.json is empty"
 
     # Authority profile v1 is deliberately escape-free.  The small target
     # readers inspect literal field spellings; accepting JSON escapes would

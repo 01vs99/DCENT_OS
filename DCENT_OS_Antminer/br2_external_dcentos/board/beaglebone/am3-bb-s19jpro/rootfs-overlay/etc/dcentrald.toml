@@ -38,6 +38,9 @@ fan_max_pwm = 30
 pid_interval_s = 2.0
 
 [api]
+# Read-only LAN monitoring; remote control requires a separate explicit opt-in.
+cgminer_bind_lan = true
+cgminer_lan_writes = false
 cgminer_port = 4028
 http_port = 8080
 websocket = true
@@ -49,4 +52,12 @@ enabled = false
 enabled = false
 
 [autotuner]
-enabled = false
+# Autotune is ON by default (operator decision 2026-09-01). Safety contract:
+# the tuner REFUSES to tune blind - every frequency/voltage step validates
+# against the variant BoardDesc cut-ladder + published envelope BEFORE
+# execution; variants with unknown/missing envelope datums surface
+# NOT TUNABLE instead of tuning. First boot parks at the safe-stock
+# profile until health + fans + temp-in-envelope (+ ExperimentalOptIn
+# operator ack) pass. Voltage autotune on am2 stays behind the
+# DCENT_AM2_VOLTAGE_AUTOTUNE live-safety fence.
+enabled = true

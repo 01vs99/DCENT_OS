@@ -4,6 +4,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -z "${DCENT_TEST_SOURCE_SNAPSHOT_PROFILE:-}" ]; then
+    DCENT_TEST_SOURCE_SNAPSHOT_PROFILE=full-tree-v1 bash "$0"
+    DCENT_TEST_SOURCE_SNAPSHOT_PROFILE=release-workspace-v1 bash "$0"
+    exit 0
+fi
+SOURCE_PROFILE="$DCENT_TEST_SOURCE_SNAPSHOT_PROFILE"
 GENERATOR="$SCRIPT_DIR/source_closure.py"
 SOURCE_SNAPSHOT_HELPER="$SCRIPT_DIR/source_snapshot.py"
 INVOCATION_HELPER="$SCRIPT_DIR/release_invocation.py"
@@ -78,6 +84,13 @@ git init -q "$REPO"
 git -C "$REPO" config user.name source-closure-test
 git -C "$REPO" config user.email source-closure-test.invalid
 git -C "$REPO" add .
+if [ "$SOURCE_PROFILE" = release-workspace-v1 ]; then
+    # A real monorepo carries unrelated release submodules whose objects are
+    # absent locally. Current portable audits must reconstruct this same scope.
+    mkdir -p "$REPO/public-releases/unrelated"
+    git -C "$REPO" update-index --add --cacheinfo 160000 \
+        abababababababababababababababababababab public-releases/unrelated
+fi
 GIT_AUTHOR_DATE='2023-11-14T22:13:20Z' \
 GIT_COMMITTER_DATE='2023-11-14T22:13:20Z' \
     git -C "$REPO" commit -q -m fixture
@@ -86,6 +99,7 @@ COMMIT="$(git -C "$REPO" rev-parse HEAD)"
 mkdir -p "$TMPDIR_TEST/source-snapshots" "$TMPDIR_TEST/invocations" \
     "$TMPDIR_TEST/build-input-snapshots" "$TMPDIR_TEST/result-stages"
 SOURCE_SNAPSHOT_RESULT="$(python3 "$SOURCE_SNAPSHOT_HELPER" create \
+    --profile "$SOURCE_PROFILE" \
     --repo-root "$REPO" --commit "$COMMIT" \
     --stage-parent "$TMPDIR_TEST/source-snapshots")"
 SOURCE_SNAPSHOT="$(printf '%s\n' "$SOURCE_SNAPSHOT_RESULT" | \
@@ -116,8 +130,6 @@ RESULT_STAGE="$(printf '%s\n' "$RESULT_STAGE_RESULT" | \
     python3 "$RESULT_STAGE_HELPER" query-result --field stage)"
 RESULT_CAPABILITY="$(printf '%s\n' "$RESULT_STAGE_RESULT" | \
     python3 "$RESULT_STAGE_HELPER" query-result --field capability)"
-python3 "$RESULT_STAGE_HELPER" seal --capability "$RESULT_CAPABILITY" \
-    --invocation-stage "$RELEASE_INVOCATION" "$RESULT_STAGE" >/dev/null
 
 BUILD_INPUT_SNAPSHOT_RESULT="$(python3 "$BUILD_INPUT_SNAPSHOT_HELPER" create \
     --repo-root "$REPO" \
@@ -219,6 +231,16 @@ receipt_path.write_text(
 )
 PY
 done
+
+RESULT_BINARIES="$RESULT_STAGE/results/target/armv7-unknown-linux-musleabihf/release"
+mkdir -p "$RESULT_BINARIES"
+for binary_name in dcentrald dcentos-init; do
+    cp "$ARTIFACT_DIR/release.tar.prebuilt-rust.${binary_name}.bin" "$RESULT_BINARIES/$binary_name"
+    cp "$ARTIFACT_DIR/release.tar.prebuilt-rust.${binary_name}.build-receipt.json" \
+        "$RESULT_BINARIES/$binary_name.build-receipt.json"
+done
+python3 "$RESULT_STAGE_HELPER" seal --capability "$RESULT_CAPABILITY" \
+    --invocation-stage "$RELEASE_INVOCATION" "$RESULT_STAGE" >/dev/null
 
 COMMON_ARGS=(
     --repo-root "$REPO"
@@ -1204,8 +1226,17 @@ python3 "$GENERATOR" verify-inputs \
     --repo-root "$REPO" \
     --build-input-manifest "$REPO/DCENT_OS_Antminer/scripts/build_inputs.manifest" \
     --target am2-s19jpro >/dev/null
-for alias in am2-s19jpro-sd am2-s19pro; do
+for alias in am2-s19jpro-sd; do
     python3 "$GENERATOR" verify-inputs \
+        --repo-root "$REPO" \
+        --build-input-manifest "$REPO/DCENT_OS_Antminer/scripts/build_inputs.manifest" \
+        --target "$alias" >/dev/null
+done
+for alias in am2-s19pro; do
+    # Native SD now requires its exact S17 boot donor. A legacy kernel/FPGA
+    # pair cannot qualify that different source closure (positive donor tests
+    # live in test_release_source_profiles.py).
+    expect_failure "native-donor-missing-$alias" python3 "$GENERATOR" verify-inputs \
         --repo-root "$REPO" \
         --build-input-manifest "$REPO/DCENT_OS_Antminer/scripts/build_inputs.manifest" \
         --target "$alias" >/dev/null
@@ -1235,7 +1266,7 @@ done
 
 cp "$REPO/knowledge-base/extractions/s19j/kernel.bin" "$TMPDIR_TEST/s19j-kernel.saved"
 printf 'mutated alias kernel\n' > "$REPO/knowledge-base/extractions/s19j/kernel.bin"
-for alias in am2-s19jpro am2-s19jpro-sd am2-s19pro; do
+for alias in am2-s19jpro am2-s19jpro-sd; do
     expect_failure "changed-kernel-$alias" python3 "$GENERATOR" verify-inputs \
         --repo-root "$REPO" \
         --build-input-manifest "$REPO/DCENT_OS_Antminer/scripts/build_inputs.manifest" \
@@ -1373,6 +1404,7 @@ git -C "$REPO" add scripts/build-dcentrald.sh
 git -C "$REPO" commit -q -m unlocked-builder
 UNLOCKED_COMMIT="$(git -C "$REPO" rev-parse HEAD)"
 UNLOCKED_SNAPSHOT_RESULT="$(python3 "$SOURCE_SNAPSHOT_HELPER" create \
+    --profile "$SOURCE_PROFILE" \
     --repo-root "$REPO" --commit "$UNLOCKED_COMMIT" \
     --stage-parent "$TMPDIR_TEST/source-snapshots")"
 UNLOCKED_SNAPSHOT="$(printf '%s\n' "$UNLOCKED_SNAPSHOT_RESULT" | \
@@ -1398,6 +1430,7 @@ git -C "$REPO" add DCENT_OS_Antminer/br2_external_dcentos/linked-input
 git -C "$REPO" commit -q -m linked-input
 LINKED_COMMIT="$(git -C "$REPO" rev-parse HEAD)"
 expect_failure symlink-input python3 "$SOURCE_SNAPSHOT_HELPER" create \
+    --profile "$SOURCE_PROFILE" \
     --repo-root "$REPO" --commit "$LINKED_COMMIT" \
     --stage-parent "$TMPDIR_TEST/source-snapshots"
 
@@ -1523,6 +1556,18 @@ shutil.copyfile(
     stage / "release-packaging-input.json",
 )
 PY
+CURRENT_PRODUCER_STAGE="$TMPDIR_TEST/current-producer-audit"
+mkdir -p "$CURRENT_PRODUCER_STAGE"
+cp "$PORTABLE_PRIVATE_STAGE"/* "$CURRENT_PRODUCER_STAGE/"
+mv "$CURRENT_PRODUCER_STAGE/firmware.source-closure.json" \
+    "$CURRENT_PRODUCER_STAGE/dcentos-sysupgrade-118.tar.source-closure.json"
+mv "$CURRENT_PRODUCER_STAGE/firmware.source-closure.json.sig" \
+    "$CURRENT_PRODUCER_STAGE/dcentos-sysupgrade-118.tar.source-closure.json.sig"
+python3 "$SCRIPT_DIR/release_producer_evidence.py" retain-live \
+    --repo-root "$REPO" --source-commit "$COMMIT" \
+    --source-snapshot "$SOURCE_SNAPSHOT" --release-invocation "$RELEASE_INVOCATION" \
+    --cargo-input-snapshot "$CARGO_BUILD_INPUT_SNAPSHOT" \
+    --result-stage "$RESULT_STAGE" --artifact-dir "$CURRENT_PRODUCER_STAGE"
 python3 "$PORTABLE_EVIDENCE_HELPER" create-live \
     --repo-root "$REPO" --source-commit "$COMMIT" \
     --target s9 \
@@ -1581,6 +1626,59 @@ python3 "$GENERATOR" verify-portable \
     "$SIGNED_RECEIPT" >/dev/null
 python3 "$PORTABLE_EVIDENCE_HELPER" verify --repo-root "$REPO" \
     --public-key "$PUBLIC_KEY" "$PORTABLE_PUBLISHED" >/dev/null
+PYTHONPATH="$SCRIPT_DIR" python3 - "$CURRENT_PRODUCER_STAGE" "$REPO" "$COMMIT" "$PUBLIC_KEY" <<'PY'
+from pathlib import Path
+import sys
+import release_producer as producer
+import release_producer_evidence as evidence
+directory, repo, commit, key = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], Path(sys.argv[4])
+row = producer.get_producer("s9")
+def verify(commit=commit, logical_name="s9", row=row):
+    evidence.verify_audit_contents(directory, row, commit, logical_name, repo, key)
+verify()
+for kwargs in ({"commit": "0" * 40}, {"logical_name": "am2-s19jpro"},
+               {"row": producer.get_producer("am2-s19jpro")}):
+    try:
+        verify(**kwargs)
+    except (ValueError, OSError):
+        pass
+    else:
+        raise AssertionError("current producer accepted a foreign source/cohort/board")
+path = directory / "release-cargo-input.json"
+original = path.read_bytes()
+try:
+    path.write_bytes(original + b" ")
+    try:
+        verify()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("current producer accepted noncanonical retained Cargo authority")
+finally:
+    path.write_bytes(original)
+# Mutate a structurally valid projected result, recomputing its manifest
+# digest. Rejection must come from the retained binary/receipt join.
+import copy
+import release_result_stage
+path = directory / evidence.projections.RESULT_NAME
+original = path.read_bytes()
+try:
+    result = evidence.projections.read_canonical(path, "result projection")
+    for index in range(len(result["manifest"]["files"])):
+        changed = copy.deepcopy(result)
+        changed["manifest"]["files"][index]["sha256"] = "f" * 64
+        changed["manifest"] = release_result_stage._manifest(changed["manifest"])
+        path.write_bytes(evidence.projections.canonical_bytes(changed))
+        try:
+            verify()
+        except ValueError as error:
+            assert "sealed Cargo result differs" in str(error), str(error)
+        else:
+            raise AssertionError("current producer accepted unrelated sealed Cargo output")
+finally:
+    path.write_bytes(original)
+print("current producer retained audit: actual signed post-cleanup positive and foreign-source/cohort/board/input/result negatives passed")
+PY
 PORTABLE_TAMPERED="$PORTABLE_OUTPUT_PARENT/portable-release-tampered"
 cp -a "$PORTABLE_PUBLISHED" "$PORTABLE_TAMPERED"
 python3 - "$PORTABLE_TAMPERED" <<'PY'

@@ -82,7 +82,7 @@ require_literal "$profiles" '("am1-s9", "stock", "Antminer S9", "BM1387"' \
     "sim profile pins am1-s9 to Antminer S9 / BM1387"
 require_literal "$profiles" '("am2-s19jpro-zynq", "braiinsos", "Antminer S19j Pro", "BM1362"' \
     "sim profile pins am2-s19jpro-zynq to Antminer S19j Pro / BM1362"
-require_literal "$model_rs" '"am1s9" => "BM1387"' \
+require_literal "$model_rs" '"am1s9" | "am1s9i" | "am1s9j" => "BM1387"' \
     "firmware resolver maps am1-s9 board_target to BM1387"
 require_literal "$model_rs" '"am2s19j" | "am2s19jpro" | "am2s19jprozynq"' \
     "firmware resolver recognizes am2-s19jpro-zynq as the BM1362 family"

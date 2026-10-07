@@ -1,3 +1,4 @@
+import { DCENT_DOCS_URL, fundContributeUrl } from '../../utils/links';
 import React, { useEffect, useState } from 'react';
 import { useMinerStore } from '../../store/miner';
 import { getPrimaryPage } from '../../utils/router';
@@ -349,6 +350,13 @@ export function Sidebar({ mobileOpen, onNavigate, sidebarId, sidebarRef }: Sideb
           </div>
         ))}
 
+        <a className="nav-item" href={DCENT_DOCS_URL} target="_blank"
+          rel="noopener noreferrer" aria-label="Help and installation guide"
+          style={{ textDecoration: 'none', color: 'inherit' }}>
+          <span className="nav-icon" aria-hidden="true">?</span>
+          {!visuallyCollapsed && <span className="nav-label">Help</span>}
+        </a>
+
         <Tooltip
           placement="right"
           content={
@@ -359,7 +367,7 @@ export function Sidebar({ mobileOpen, onNavigate, sidebarId, sidebarRef }: Sideb
         >
           <a
             className="nav-item"
-            href="https://d-central.tech/fund/go?source=dcent_os&placement=sidebar_nav"
+            href={fundContributeUrl('sidebar_nav')}
             target="_blank"
             rel="noopener noreferrer"
             aria-label="Fund the Sovereign Stack"
@@ -405,7 +413,7 @@ export function Sidebar({ mobileOpen, onNavigate, sidebarId, sidebarRef }: Sideb
             {build && (<><br />build {build}</>)}
             <br />
             <a
-              href="https://d-central.tech/fund/go?source=dcent_os&placement=sidebar_footer"
+              href={fundContributeUrl('sidebar_footer')}
               target="_blank"
               rel="noopener noreferrer"
               style={{ color: 'var(--accent, #FAA500)', textDecoration: 'none', fontWeight: 600 }}

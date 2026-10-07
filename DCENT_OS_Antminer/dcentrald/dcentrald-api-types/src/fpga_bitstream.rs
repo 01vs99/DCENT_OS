@@ -792,6 +792,7 @@ mod tests {
         "mtd write",
         "dd of=",
         "fw_setenv",
+        "dcent_ubi_update_volume",
     ];
 
     /// Every mechanism by which a Zynq fabric can be programmed.
@@ -883,11 +884,11 @@ mod tests {
         // Positive half: the kernel and rootfs writes must still be there, so
         // this contract cannot pass by the installer having lost its writes.
         assert!(
-            writes.iter().any(|w| w.contains("/dev/ubi1_0")),
+            writes.iter().any(|w| w.contains("dcent_ubi_update_volume 1 0 \"$KERNEL_SOURCE\"")),
             "kernel volume write vanished; contract is no longer meaningful"
         );
         assert!(
-            writes.iter().any(|w| w.contains("/dev/ubi1_1")),
+            writes.iter().any(|w| w.contains("dcent_ubi_update_volume 1 1 \"$ROOTFS\"")),
             "rootfs volume write vanished; contract is no longer meaningful"
         );
     }

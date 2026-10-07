@@ -726,7 +726,7 @@ export const GLOSSARY = {
       'PSU_CALIBRATION_PROBE_WAKE) were each independently LIVE-FALSIFIED — ' +
       'setting any one re-breaks the proven path. See the documentation.',
   },
-  chain_rail_mv_xil25: {
+  chain_rail_mv_actual: {
     term: 'Chain rail (mV actual vs target)',
     body:
       'The voltage the dsPIC is currently regulating to on the chip rail vs ' +

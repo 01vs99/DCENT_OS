@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useMinerStore } from '../../store/miner';
 import { InfoDot } from '../common/Tooltip';
 import type { CanonicalTunerMode } from '../../utils/autotunerModes';
+import type { AutotunerStatusResponse } from '../../api/types';
 
 /**
  * COMP-AUTOTUNER contract surface (DCENT Design Language —
@@ -118,6 +119,24 @@ function ribbonIndexFor(state: string): number {
       // disabled / idle / waiting / failed → ribbon shows all pending.
       return -1;
   }
+}
+
+/**
+ * C3a: whether a convergence snapshot carries any evidence worth rendering
+ * (any non-zero rung count or a recorded last step). Keeps the guard strip
+ * out of the way on fresh boots before the tuner has done anything.
+ */
+function convergenceHasEvidence(
+  convergence: NonNullable<AutotunerStatusResponse['convergence']>,
+): boolean {
+  const r = convergence.rung_counts;
+  return (
+    r.tunable > 0 ||
+    r.not_tuned > 0 ||
+    r.not_tunable > 0 ||
+    r.refused > 0 ||
+    convergence.last_step != null
+  );
 }
 
 function formatEta(seconds?: number | null): string {
@@ -605,6 +624,70 @@ export function AutotunerCard() {
         }}>
           {status.message}
         </div>
+
+        {/* C3a (2026-09): variant-guard evidence strip. Surfaces the honest
+            refuse-not-tune-blind state — the NotTunable reason, the
+            first-boot safe-stock park reason, and the per-run convergence
+            rung counts (tunable / not tuned / not tunable / refused) with
+            the refusal reasons and the envelope version the evidence was
+            produced under. The efficiency figure in the convergence payload
+            is an ESTIMATE and is only ever rendered with an "Est." label —
+            a projected J/TH is never displayed as a measured value. */}
+        {(status.not_tunable_reason || status.start_gate_park_reason || (status.convergence && convergenceHasEvidence(status.convergence))) && (
+          <div
+            className="atc-convergence"
+            data-testid="autotuner-convergence"
+            style={{
+              margin: '0 0 12px',
+              padding: '10px 12px',
+              borderRadius: 8,
+              background: 'var(--bg-accent, rgba(250,165,0,0.06))',
+              border: '1px solid var(--border)',
+              fontSize: '0.75rem',
+              color: 'var(--text-dim)',
+            }}
+          >
+            <div style={{ fontWeight: 700, marginBottom: 6, color: 'var(--text)' }}>
+              Variant guard (envelope {status.convergence?.envelope_version ?? '—'})
+            </div>
+            {status.not_tunable_reason && (
+              <div data-testid="autotuner-not-tunable" style={{ color: 'var(--red)', marginBottom: 4 }}>
+                NOT TUNABLE — {status.not_tunable_reason}
+              </div>
+            )}
+            {status.start_gate_park_reason && (
+              <div data-testid="autotuner-start-gate-park" style={{ marginBottom: 4 }}>
+                Parked in Idle — {status.start_gate_park_reason}
+              </div>
+            )}
+            {status.convergence && convergenceHasEvidence(status.convergence) && (
+              <div data-testid="autotuner-convergence-rungs" style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                <span>Tunable {status.convergence.rung_counts.tunable}</span>
+                <span>Not tuned {status.convergence.rung_counts.not_tuned}</span>
+                <span>Not tunable {status.convergence.rung_counts.not_tunable}</span>
+                <span style={{ color: status.convergence.rung_counts.refused > 0 ? 'var(--red)' : undefined }}>
+                  Refused {status.convergence.rung_counts.refused}
+                </span>
+                {status.convergence.last_step && (
+                  <span style={{ opacity: 0.8 }}>last step: {status.convergence.last_step}</span>
+                )}
+              </div>
+            )}
+            {status.convergence?.refusal_reasons?.map((reason, i) => (
+              <div key={i} style={{ color: 'var(--red)', marginTop: 4 }}>
+                refused: {reason}
+              </div>
+            ))}
+            {status.convergence?.estimated_efficiency_jth != null && (
+              <div style={{ marginTop: 4 }}>
+                Est. J/TH (model projection, not measured):{' '}
+                {status.convergence.efficiency_jth_estimated
+                  ? status.convergence.estimated_efficiency_jth.toFixed(2)
+                  : '—'}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Kit signature: live "last step" strip. The value re-keys on
             stepTick — which only increments when last_update_s actually

@@ -129,7 +129,8 @@ export function EarningsPage() {
         if (!cancelled) setDonationPercent(donationTakePercent(cfg));
       })
       .catch(() => {
-        // Unknown config → firmware default 2%, never a silent 0%.
+        // Unknown config → the firmware's shared 0% opt-in default — never
+        // an invented take-rate, and never a silent nonzero one either.
         if (!cancelled) setDonationPercent(DEFAULT_DONATION_PERCENT);
       });
     return () => { cancelled = true; };

@@ -685,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn g6_autotune_and_mining_default_off_in_s19k_toml() {
+    fn g6_mining_default_off_autotune_default_on_in_s19k_toml() {
         assert!(S19K_TOML.contains("[mining]"));
         assert!(S19K_TOML.contains("enabled = false"));
         assert!(S19K_TOML.contains("[autotuner]"));
@@ -698,27 +698,29 @@ mod tests {
             .split("[autotuner]")
             .nth(1)
             .expect("autotuner section");
-        assert!(autotuner.contains("enabled = false"));
-        assert!(!BoardDesc::am3_s19kpro().public_beta_install);
+        // C3a flip (operator decision 2026-09-01): autotune config is default-ON
+        // everywhere; the s19k honesty marker pins that this stays a config
+        // posture, not a tuning claim (no tuner runtime on this lane).
+        assert!(autotuner.contains("enabled = true"));
+        assert!(autotuner.contains("no tuner runtime yet"));
+        assert!(autotuner.contains("posture, not a tuning claim"));
+        assert!(!BoardDesc::am3_s19kpro().public_beta_install());
     }
 
     #[test]
-    fn native_bm1366_mining_stays_not_implemented_refusal() {
-        // Since 13915439a the authoritative refusal literal lives in the
-        // silicon-profiles admission module (S19K_NATIVE_MINING_REFUSAL),
-        // wired to S19kMiningDisposition::NotImplemented, which every
-        // successful admit_s19k_nopic_profile fabric admission returns.
+    fn fabric_claim_requires_the_separate_native_runtime_owner() {
         const NOPIC_ADMISSION: &str =
             include_str!("../../dcentrald-silicon-profiles/src/s19k_nopic_admission.rs");
         assert!(NOPIC_ADMISSION.contains(
-            "pub const S19K_NATIVE_MINING_REFUSAL: &str = \"NOT IMPLEMENTED: native BM1366 catalog identities are live-evidence-backed NoPic hashboards"
+            "pub const S19K_NATIVE_MINING_REFUSAL: &str = \"native BM1366 execution requires the exact runtime owner"
         ));
-        assert!(NOPIC_ADMISSION.contains("Self::NotImplemented => S19K_NATIVE_MINING_REFUSAL"));
+        assert!(NOPIC_ADMISSION.contains("Self::NativeOwnerRequired => S19K_NATIVE_MINING_REFUSAL"));
         // Single source of truth: the serial engine must not re-inline a
         // drifting copy of the refusal.
         assert!(!SERIAL_MINING.contains("NOT IMPLEMENTED: native BM1366 catalog identities"));
-        // The serial path keeps native S19k BM1366 cold start behind an
-        // explicit fail-closed opt-in (default: refused).
+        // Normal exact beta dispatch already requests native cold start;
+        // the old lab knob is only an additional diagnostic request.
+        assert!(SERIAL_MINING.contains("fn s19k_native_request_from_dispatch("));
         assert!(SERIAL_MINING.contains("DCENT_S19K_NATIVE_COLD_START"));
         assert!(SERIAL_MINING
             .contains("fn s19k_native_cold_start_opt_in_from(raw: Option<&str>) -> bool"));
@@ -831,7 +833,10 @@ mod tests {
             .split("[autotuner]")
             .nth(1)
             .expect("overlay autotuner");
-        assert!(overlay_at.contains("enabled = false"));
+        // C3a flip: default-ON with the refuse-never-tune-blind safety contract
+        // carried in the same comment block.
+        assert!(overlay_at.contains("enabled = true"));
+        assert!(overlay_at.contains("to tune blind"));
         assert!(TMP_TRIAL.contains("dcentrald_s19k_tmp_deploy.sh"));
         assert!(TMP_TRIAL.contains("exec \"$SCRIPT_DIR/dcentrald_s19k_tmp_deploy.sh\" \"$@\""));
         for retired_surface in [

@@ -487,7 +487,7 @@ impl Sv2MiningChannel {
             payload.len(),
         );
         let frame = Sv2Frame::new(
-            EXTENSION_TYPE_MINING,
+            EXTENSION_TYPE_MINING | 0x8000, // SV2 channel-message bit
             mining::SUBMIT_SHARES_STANDARD,
             payload,
         );
@@ -522,7 +522,7 @@ impl Sv2MiningChannel {
             payload.len(),
         );
         let frame = Sv2Frame::new(
-            EXTENSION_TYPE_MINING,
+            EXTENSION_TYPE_MINING | 0x8000, // SV2 channel-message bit
             mining::SUBMIT_SHARES_EXTENDED,
             payload,
         );
@@ -552,7 +552,7 @@ impl Sv2MiningChannel {
             payload.len(),
         );
         let frame = Sv2Frame::new(
-            EXTENSION_TYPE_MINING,
+            EXTENSION_TYPE_MINING | 0x8000, // SV2 channel-message bit
             mining::SET_CUSTOM_MINING_JOB,
             payload,
         );

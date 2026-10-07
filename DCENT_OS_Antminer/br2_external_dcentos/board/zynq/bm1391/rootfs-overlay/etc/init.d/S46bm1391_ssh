@@ -1,0 +1,51 @@
+#!/bin/sh
+# Optional first-use Ed25519 public key provisioning from this SD card.
+# Persistent keys win on later boots; the boot filesystem is always read-only.
+set -eu
+[ "${1:-}" = start ] || exit 0
+case "$(cat /etc/dcentos/board_target)" in am1-s15|am1-t15) ;; *) exit 1 ;; esac
+[ "$(cat /run/dcentos/bm1391-sd-data-ready)" = "$(cat /etc/dcentos/bm1391-data-uuid)" ] || exit 1
+umask 077
+dcent_keys=/data/dcent/authorized_keys
+[ ! -L "$dcent_keys" ] || exit 1
+if [ ! -e "$dcent_keys" ]; then
+    mkdir -p /run/bm1391-boot
+    # No key file is a normal dashboard-only first boot. A mount failure does
+    # not invent credential state or prevent the dashboard from starting.
+    if mount -t vfat -o ro,nodev,nosuid,noexec /dev/mmcblk0p1 /run/bm1391-boot; then
+        trap 'umount /run/bm1391-boot 2>/dev/null || true; rm -f /data/dcent/.bm1391-key.tmp' EXIT HUP INT TERM
+        dcent_input=/run/bm1391-boot/DCENT_SSH_KEY.pub
+        if [ -f "$dcent_input" ] && [ ! -L "$dcent_input" ]; then
+            dcent_size=$(wc -c < "$dcent_input")
+            if [ "$dcent_size" -le 8192 ] && awk '
+                NF == 0 || $1 ~ /^#/ { next }
+                $1 != "ssh-ed25519" || length($2) != 68 ||
+                $2 !~ /^AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+\/]+$/ { bad=1; next }
+                { print $1 " " $2; count++ }
+                END { exit (bad || count < 1 || count > 16) ? 1 : 0 }
+            ' "$dcent_input" > /data/dcent/.bm1391-key.tmp; then
+                chmod 0600 /data/dcent/.bm1391-key.tmp
+                mv /data/dcent/.bm1391-key.tmp "$dcent_keys"
+                sync
+                echo "BM1391: provisioned the operator's SD public key."
+            else
+                echo "BM1391: DCENT_SSH_KEY.pub is not a bounded Ed25519 public-key file; SSH stays unprovisioned." >&2
+            fi
+        fi
+        umount /run/bm1391-boot
+        rm -f /data/dcent/.bm1391-key.tmp
+        trap - EXIT HUP INT TERM
+    fi
+fi
+# Dropbear reads root's authorized_keys, while API/persistence own /data.
+# The link also sees an atomic later replacement of the persistent key file.
+mkdir -p /root/.ssh
+chmod 0700 /root/.ssh
+if [ -e /root/.ssh/authorized_keys ] || [ -L /root/.ssh/authorized_keys ]; then
+    rm /root/.ssh/authorized_keys
+fi
+ln -s /data/dcent/authorized_keys /root/.ssh/authorized_keys
+if [ -s "$dcent_keys" ]; then
+    chmod 0600 "$dcent_keys"
+    printf 'reason=sd-public-key\n' > /data/dcent/.ssh-enabled
+fi

@@ -40,8 +40,10 @@ pub const MISC_BAUD_CLEAR: u32 = 0xFFFF_E0FF;
 pub const MISC_BAUD_MASK: u32 = 0x1F00;
 pub const MISC_BAUD_SHIFT: u32 = 8;
 
-/// `set_core_number_BM1390` high 24 bits (`0x1380D0` + chip_addr).
-pub const CORE_NUMBER_VALUE_HI: u32 = 0x1380_D000;
+/// S9k `set_core_number_BM1390@137d4` stores LE 0x00d09313, then
+/// replaces its high byte with chip_addr: wire bytes 13 93 d0 addr.
+/// Official S9 SE at 0x6fef0..0x6ff2c independently emits the same prefix.
+pub const CORE_NUMBER_VALUE_HI: u32 = 0x1393_D000;
 /// `enable_core_clock_BM1393`: cmd_type|rw `0x84`, data `0xAA`.
 pub const CORE_ENABLE_CMD: u8 = 0x84;
 pub const CORE_ENABLE_DATA: u8 = 0xAA;
@@ -299,7 +301,7 @@ mod tests {
         assert_eq!(frame[0], 0x41);
         assert_eq!(frame[3], REG_CHIP_ADDRESS);
         assert_eq!(frame[4], 0x13);
-        assert_eq!(frame[5], 0x80);
+        assert_eq!(frame[5], 0x93);
         assert_eq!(frame[6], 0xD0);
         assert_eq!(frame[7], 0x78);
     }

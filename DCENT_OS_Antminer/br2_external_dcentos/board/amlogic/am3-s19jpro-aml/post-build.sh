@@ -1,24 +1,24 @@
 #!/bin/sh
 #
-# DCENTos post-build script — am3-s19jpro-aml (S19j Pro Amlogic PIC1704 variant)
+# DCENTos post-build script â€” am3-s19jpro-aml (S19j Pro Amlogic classic fw89 variant)
 # D-Central Technologies, Phase 4B (2026-05-15)
 #
 # Sibling of board/amlogic/am3-s21/post-build.sh. Same overlay-on-overlay
 # pattern, same aarch64 toolchain, same shared `board/amlogic/rootfs-overlay/`
-# base layer. Differs only in product identity (BM1362 + PIC1704 voltage
+# base layer. Differs only in product identity (BM1362 + fw89 application voltage
 # controller, vs S21's BM1368 + NoPic TAS5782M).
 #
 # Overlay-on-overlay (see defconfig): Buildroot applies the shared
 # board/amlogic/rootfs-overlay/ FIRST, then this board's rootfs-overlay on
 # top, then this script runs LAST.
 #
-# CRITICAL — :
+# CRITICAL â€” :
 #   The overlay MUST NOT ship a stale dcentrald binary. This script installs
 #   the fresh cross-compiled aarch64 binary AFTER Buildroot copies overlays,
 #   so the compiled daemon always wins over anything checked in. Refuses to
 #   build if the binary is missing.
 #
-# CRITICAL — :
+# CRITICAL â€” :
 #   board_target MUST be "am3-s19jpro-aml" here. Sysupgrade tarball prefix is
 #   "sysupgrade-am3-s19jpro-aml/". Wrong name = silent failure on flash.
 #
@@ -50,7 +50,15 @@ rm -f "${TARGET_DIR}/etc/init.d/S50telnet" "${TARGET_DIR}/usr/sbin/telnetd"
 rm -f "${TARGET_DIR}/usr/sbin/in.telnetd" "${TARGET_DIR}/usr/bin/telnet"
 rm -f "${TARGET_DIR}/etc/default/telnet" 2>/dev/null || true
 
-chmod +x "${TARGET_DIR}"/etc/dcentos-early-init.sh 2>/dev/null || true
+# These are mandatory startup owners, not optional overlay decorations.
+for required in etc/dcentos-early-init.sh etc/init.d/S45persistent \
+    usr/libexec/dcentos/classic-aml-storage.py usr/sbin/ubiattach; do
+    [ -f "${TARGET_DIR}/$required" ] && [ ! -L "${TARGET_DIR}/$required" ] || {
+        echo "ERROR: required Classic persistent startup file missing/indirect: $required" >&2
+        exit 1
+    }
+    chmod 0755 "${TARGET_DIR}/$required"
+done
 chmod +x "${TARGET_DIR}"/root/tools/*.py 2>/dev/null || true
 chmod +x "${TARGET_DIR}"/root/tools/*.sh 2>/dev/null || true
 chmod +x "${TARGET_DIR}"/usr/bin/dcent-shell 2>/dev/null || true
@@ -102,7 +110,8 @@ if [ -f "$DCENTOS_INIT" ]; then
     chmod 755 "${TARGET_DIR}/sbin/init"
     echo "DCENTos post-build (am3-s19jpro-aml): installed dcentos-init as /sbin/init"
 else
-    echo "DCENTos post-build (am3-s19jpro-aml): WARNING: dcentos-init not found at $DCENTOS_INIT"
+    echo "DCENTos post-build (am3-s19jpro-aml): ERROR: dcentos-init not found at $DCENTOS_INIT" >&2
+    exit 1
 fi
 
 DCENTRALD_BIN="${BR2_EXTERNAL_DCENTOS_PATH}/../dcentrald/target/aarch64-unknown-linux-musl/release/dcentrald"
@@ -142,8 +151,8 @@ fi
 
 # F-9 (Sweep-v3 PR-086): board_family must match the S99verify
 # detect_platform() `am3-aml*` classifier glob. Bare "am3" hit the
-# `*) PLATFORM=unknown` arm — and because board_family was set (not
-# "unknown"/empty) the board_target fallback never ran — silently
+# `*) PLATFORM=unknown` arm â€” and because board_family was set (not
+# "unknown"/empty) the board_target fallback never ran â€” silently
 # disabling the per-family V5/V6/V7/V11/V12/V13 cold-boot-proof
 # overrides. Stamp the SKU-qualified `am3-aml-*` form (same value as
 # the platform file below; documented BOARD_FAMILY vocabulary;
@@ -163,16 +172,15 @@ else
     echo "DCENTos post-build (am3-s19jpro-aml): WARNING: am3_geometry.sh not found at $AM3_GEOMETRY_SRC" >&2
 fi
 
-# Phase 4C deliverable. The script may not exist yet when Phase 4B
-# scaffolding lands; that's fine — warn but do not fail. Once Phase 4C
-# ships revert_to_stock_am3_aml_s19jpro.sh, this becomes a hard install.
+# The exact restore helper is a required image dependency.
 REVERT_S19JPRO_SRC="${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/revert_to_stock_am3_aml_s19jpro.sh"
 if [ -f "$REVERT_S19JPRO_SRC" ]; then
     cp "$REVERT_S19JPRO_SRC" "${TARGET_DIR}/usr/sbin/revert_to_stock_am3_aml_s19jpro.sh"
     chmod +x "${TARGET_DIR}/usr/sbin/revert_to_stock_am3_aml_s19jpro.sh" 2>/dev/null || true
     echo "DCENTos post-build (am3-s19jpro-aml): installed revert_to_stock_am3_aml_s19jpro.sh from scripts/"
 else
-    echo "DCENTos post-build (am3-s19jpro-aml): WARNING: revert_to_stock_am3_aml_s19jpro.sh not found (Phase 4C pending) at $REVERT_S19JPRO_SRC" >&2
+    echo "DCENTos post-build (am3-s19jpro-aml): ERROR: required restore helper not found at $REVERT_S19JPRO_SRC" >&2
+    exit 1 >&2
 fi
 
 # Stock-Bitmain manifest (parity with zynq board post-build). The daemon
@@ -200,7 +208,10 @@ fi
 
 echo "DCENTos post-build (am3-s19jpro-aml): directories, permissions, and board identity set."
 
-# Production-readiness matrix §7 #1 (public-image trust boundary): release-image
-# marker + first-boot SSH posture when DCENT_RELEASE_IMAGE=1. NO-OP on DEV/LAB.
+# Production-readiness matrix Â§7 #1 (public-image trust boundary): release-image
+# marker + first-boot SSH posture on the RELEASE posture â€” the DEFAULT since
+# WS-A4 (2026-09-01; canonical resolution scripts/lib/release_posture.sh).
+# NO-OP on an explicit DEV/LAB opt-out (DCENT_DEV_IMAGE=1).
 . "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/release_image_provision.sh"
+python3 "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/provision_runtime_policy.py" "$TARGET_DIR"
 dcent_provision_release_image "$TARGET_DIR" "am3-s19jpro-aml"

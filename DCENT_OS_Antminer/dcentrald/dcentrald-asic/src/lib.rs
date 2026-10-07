@@ -40,6 +40,7 @@ pub mod hw_err_tracker;
 pub mod pic;
 pub mod pic1704;
 pub mod protocol;
+pub mod register_transaction;
 pub mod serial_chip_address;
 pub mod uart_trans;
 /// Thin VoltageRail adapters over PIC16 / dsPIC (P1-2 I/O edge).
@@ -285,7 +286,8 @@ mod process_environment_source_contract {
         );
     }
 
-    fn assert_environment_adapters(active_env: Option<&str>) {
+    fn assert_environment_adapters(raw_active_env: Option<&str>) {
+        let active_env = raw_active_env.filter(|_| dcentrald_common::lab_env::compiled());
         use crate::bm1362::uart_relay::{
             cold_boot_enable_nonce_path, NoncePathOutcome, UartRelayReg,
         };
@@ -369,7 +371,7 @@ mod process_environment_source_contract {
         #[cfg(feature = "recovery-tool")]
         {
             let path = crate::dspic::recovery_fw86::path_c_log_path();
-            if active_env == Some("DCENT_PIC_RECOVERY_LOG_DIR") {
+            if raw_active_env == Some("DCENT_PIC_RECOVERY_LOG_DIR") {
                 let dir = std::env::var("DCENT_PIC_RECOVERY_LOG_DIR")
                     .expect("explicit recovery log directory");
                 assert_eq!(

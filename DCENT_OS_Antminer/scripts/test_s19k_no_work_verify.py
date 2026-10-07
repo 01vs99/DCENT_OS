@@ -1423,9 +1423,13 @@ class RunnerNoWorkReceiptContractTests(unittest.TestCase):
             'NO_WORK_TRANSCRIPT_RECEIPT="$TRIAL_DIR/runtime_handoff_no_work_transcript"',
             source,
         )
-        hold = source.index(
-            'if [ "$DEPLOY_MODE" = handoff-no-work ] || [ "$DEPLOY_MODE" = bounded-work-proof ]; then\n    exec 6<'
-        )
+        # f2d3b9bc6 widened the transcript-hold gate to a multi-line condition
+        # that also covers install-custody-safeoff; assert the receipt-bearing
+        # modes still gate the exec 6< inode hold, then that the hold precedes
+        # the daemon launch.
+        self.assertIn('[ "$DEPLOY_MODE" = handoff-no-work ]', source)
+        self.assertIn('[ "$DEPLOY_MODE" = bounded-work-proof ]', source)
+        hold = source.index('exec 6< "$STARTUP_DAEMON_TRANSCRIPT"')
         launch = source.index(
             '"$@" 6>&- 9>&- </dev/null >>"$STARTUP_DAEMON_TRANSCRIPT"'
         )
@@ -1444,11 +1448,17 @@ class RunnerNoWorkReceiptContractTests(unittest.TestCase):
             'wc -l < "$NO_WORK_TRANSCRIPT_RECEIPT" | tr -d \' \\t\\r\\n\')" -eq 65',
             source,
         )
+        # The no-work receipt is now published by the consolidated
+        # publish_mode_specific_receipts_after_safeoff() helper, which every
+        # checked-SafeOff exit path invokes immediately after clearing the
+        # runtime obligation; the helper in turn binds the no-work transcript.
         for branch_tail in (
-            'clear_runtime_obligation_after_safeoff || exit 1\n        publish_handoff_no_work_transcript_receipt "$EXIT_CODE"',
-            'clear_runtime_obligation_after_safeoff || exit 1\n    publish_handoff_no_work_transcript_receipt "$CHILD_STATUS"',
+            'clear_runtime_obligation_after_safeoff || exit 1\n        publish_mode_specific_receipts_after_safeoff "$EXIT_CODE"',
+            'clear_runtime_obligation_after_safeoff || exit 1\n    publish_mode_specific_receipts_after_safeoff "$CHILD_STATUS"',
         ):
             self.assertIn(branch_tail, source)
+        unified = source.index("publish_mode_specific_receipts_after_safeoff() {")
+        self.assertIn('publish_handoff_no_work_transcript_receipt "$', source[unified:])
 
 
 if __name__ == "__main__":

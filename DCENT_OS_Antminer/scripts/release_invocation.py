@@ -93,8 +93,40 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def host_path_text(value: str) -> str:
+    """Rewrite Git-Bash (MSYS) drive paths (/d/dir) and long-path prefixes.
+
+    MSYS automatic argument conversion is per-argument and inconsistent on
+    long release command lines (see runs drop1-20260916-cyg3sjwi and
+    drop1-20260917-gnscaudk/c1e73bep). Normalizing at the lexical layer
+    makes the shell conversion behavior irrelevant. POSIX and native
+    inputs are returned unchanged; on non-Windows hosts this is identity.
+    """
+    if os.name != "nt" or not isinstance(value, str):
+        return value
+    text = value
+    if text.startswith("\\\\?\\UNC\\"):
+        text = "\\\\" + text[8:]
+    elif text.startswith("//?/UNC/"):
+        text = "//" + text[8:]
+    else:
+        for prefix in ("\\\\?\\", "//?/"):
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+                break
+    if (
+        len(text) >= 2
+        and text[0] == "/"
+        and text[1].isascii()
+        and text[1].isalpha()
+        and (len(text) == 2 or text[2] == "/")
+    ):
+        return text[1].upper() + ":/" + text[3:]
+    return text
+
+
 def lexical_absolute(value: pathlib.Path) -> pathlib.Path:
-    return pathlib.Path(os.path.abspath(str(value)))
+    return pathlib.Path(os.path.abspath(host_path_text(str(value))))
 
 
 def _contains_control(value: str) -> bool:
@@ -457,7 +489,10 @@ def _validate_capability(
     )
     if capability["schema"] != CAPABILITY_SCHEMA:
         fail("unsupported release invocation capability schema")
-    if capability["stage_path"] != str(stage):
+    stage_recorded = capability["stage_path"]
+    if stage_recorded != str(stage) and not _same_recorded_path(
+        stage_recorded, str(stage)
+    ):
         fail("release invocation capability is bound to a different stage")
     if capability["invocation_id"] != descriptor["invocation_id"]:
         fail("release invocation capability is bound to a different invocation")
@@ -1040,9 +1075,23 @@ def parser() -> argparse.ArgumentParser:
     return top
 
 
+def normalize_host_path_args(args: argparse.Namespace) -> argparse.Namespace:
+    # ``name`` is intentionally excluded: it is a logical stage name bound
+    # by NAME_RE ([a-z0-9][a-z0-9-]{0,31}), never a host path.
+    for field in (
+        "stage_parent",
+        "stage",
+        "capability",
+    ):
+        value = getattr(args, field, None)
+        if isinstance(value, str):
+            setattr(args, field, host_path_text(value))
+    return args
+
+
 def main() -> int:
     try:
-        args = parser().parse_args()
+        args = normalize_host_path_args(parser().parse_args())
         if args.command == "create":
             created = create_invocation(pathlib.Path(args.stage_parent), args.name)
             print(canonical_bytes(created.cli_result()).decode("ascii"), end="")

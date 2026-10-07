@@ -2674,8 +2674,11 @@ mod tests {
             "PR-056 BM1396 fail-closed pin must remain in drivers/mod.rs"
         );
         assert!(
-            !bm1396_src.contains("impl ChipDriver for Bm1396Driver"),
-            "BM1396 scaffold must not implement ChipDriver (silent production path)"
+            bm1396_src.contains("impl ChipDriver for Bm1396Driver"),
+            "R06: BM1396 must keep its evidence-cited ChipDriver impl \
+             (drivers/bm1396.rs); its carrier-bound methods refuse the \
+             Braiins-FIFO ABI and the ChipRegistry registration pin below \
+             still forbids silent production dispatch"
         );
         assert!(
             !mod_src.contains("register(Box::new(bm1396::Bm1396Driver"),

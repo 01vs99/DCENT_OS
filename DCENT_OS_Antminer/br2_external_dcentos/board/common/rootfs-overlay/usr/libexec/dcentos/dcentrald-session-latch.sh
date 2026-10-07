@@ -3,9 +3,8 @@
 #
 # The supervisor records an unresolved session before dcentrald can touch
 # hardware.  No process exit status is accepted as a physical SafeOff receipt.
-# A normal stop, crash, watchdog reboot, power loss, forced stop, or ambiguous
-# exit therefore blocks every later S82 start until an operator verifies the
-# hardware state and deliberately removes the persistent markers.
+# A checked orderly software closeout can retire its exact supervised session.
+# Crash, forced stop, missing proof and unresolved mutation remain latched.
 
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 
@@ -19,6 +18,8 @@ MOUNTINFO_FILE=/proc/self/mountinfo
 UBI_SYSFS_ROOT=/sys/class/ubi
 UPDATE_LOCK_DIR=/run/dcentos-sysupgrade.lock
 PARENT_DEATH_HELPER=/usr/libexec/dcentos/dcentos-deploy-lock
+CLOSEOUT_VALIDATOR=/usr/local/bin/dcentrald
+CENSUS_EXPECTED_EXIT=0
 
 log() {
     printf 'dcentrald-session-latch: %s\n' "$*" >&2
@@ -260,7 +261,7 @@ admit_update_window() {
     if [ "$UPDATE_ADMISSION_RESULT" -ne 0 ]; then
         return 1
     fi
-    log 'manual-resolution update window admitted; no hardware session marker is present'
+    log 'update window admitted under hardware-session exclusion'
     return 0
 }
 
@@ -287,6 +288,7 @@ write_marker() {
         printf 'image_version=%s\n' "$IMAGE_VERSION"
         printf 'platform=%s\n' "$MARKER_PLATFORM"
         printf 'writer_pid=%s\n' "$$"
+        printf 'session_token=%s\n' "$ADMISSION_TOKEN"
         printf 'recorded_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)"
     } > "$TMP_FILE"; then
         rm -f "$TMP_FILE"
@@ -346,6 +348,41 @@ promote_unresolved() {
     RESULT=$?
     release_lock || RESULT=1
     return "$RESULT"
+}
+
+# Only the fixed daemon validator can consume the protected, exact-run software
+# receipt. Exit status and emergency command success alone never authorize this.
+normalize_expected_stop_reason() {
+    case "$EXPECTED_STOP_REASON" in
+        '')
+            # Existing shipped stop writers record only the verified child
+            # PID. Missing/foreign PID still fails the exact consumer guard.
+            [ -z "$EXPECTED_PID" ] || EXPECTED_STOP_REASON=requested-stop
+            ;;
+        requested-stop|forced-stop-timeout) ;;
+        *) EXPECTED_STOP_REASON=invalid-stop-reason ;;
+    esac
+}
+
+clear_orderly_software_session() {
+    [ "$EXIT_CODE" -eq 0 ] && [ "$EXPECTED_PID" = "$CHILD_PID" ] \
+        && [ "$EXPECTED_STOP_REASON" = requested-stop ] && [ "$SAFETY_OK" -eq 1 ] \
+        || return 1
+    acquire_lock "$ADMISSION_TOKEN" || return 1
+    CLEAR_RESULT=1
+    if path_exists "$UNRESOLVED_FILE" && ! path_exists "$CRASH_LATCH_FILE" \
+        && "$CLOSEOUT_VALIDATOR" --check-software-closeout \
+            "$CHILD_PID" "$CHILD_START_TICKS" "$CHILD_BOOT_ID" "$ADMISSION_TOKEN"; then
+        # The Rust consumer has checked the still-current session token and
+        # absent mutation journal while this supervisor owns the session lock.
+        # Remove only this unresolved-session marker, never a mutation journal.
+        if rm -f "$UNRESOLVED_FILE" && sync_state; then
+            CLEAR_RESULT=0
+            log 'exact-session orderly software closeout admitted restart; physical rail state remains unmeasured'
+        fi
+    fi
+    release_lock || CLEAR_RESULT=1
+    return "$CLEAR_RESULT"
 }
 
 terminate_unpublished_child() {
@@ -436,6 +473,24 @@ supervise_session() {
     CHILD_PIDFILE=$4
     EXPECTFILE=$5
     shift 5
+    if [ "$CENSUS_EXPECTED_EXIT" -ne 0 ]; then
+        # The work timer is inside the daemon, before energizing. This shell
+        # expectation still requires the real exact-session closeout consumer.
+        if [ "$CENSUS_EXPECTED_EXIT" -eq 1 ]; then
+            [ "$#" -eq 5 ] && [ "$4" = --firstlight-census ] || return 1
+        else
+            [ "$#" -eq 7 ] && [ "$4" = --firstlight-work ] \
+                && [ "$6" = --firstlight-seconds ] || return 1
+            case "$7" in ''|*[!0-9]*|0*) return 1 ;; esac
+            [ "$7" -ge 1 ] && [ "$7" -le 300 ] || return 1
+        fi
+        [ "$2" = --config ] && [ "${#5}" -eq 32 ] || return 1
+        case "$1:$3:$5" in
+            /usr/local/bin/dcentrald:/*:*|/data/dcentrald:/*:*) ;;
+            *) return 1 ;;
+        esac
+        case "$5" in *[!0-9a-f]*) return 1 ;; esac
+    fi
     DEPLOY_LOCK_READY_FD=${DCENTOS_DEPLOY_LOCK_READY_FD:-}
     DEPLOY_LOCK_FD=${DCENTOS_DEPLOY_LOCK_FD:-}
     SUPERVISOR_PID=$$
@@ -548,10 +603,13 @@ supervise_session() {
     EXPECTED_RECORD=$(cat "$EXPECTFILE" 2>/dev/null || true)
     EXPECTED_PID=$(printf '%s\n' "$EXPECTED_RECORD" | awk 'NR == 1 {print $1}')
     EXPECTED_STOP_REASON=$(printf '%s\n' "$EXPECTED_RECORD" | awk 'NR == 1 {print $2}')
-    case "$EXPECTED_STOP_REASON" in
-        ''|requested-stop|forced-stop-timeout) ;;
-        *) EXPECTED_STOP_REASON=invalid-stop-reason ;;
-    esac
+    if [ "$CENSUS_EXPECTED_EXIT" -ne 0 ] && [ -z "$EXPECTED_RECORD" ]; then
+        # The supervisor captured PID/start/boot from its actual child and
+        # waited for that exact process. No host-written PID marker races exit.
+        EXPECTED_PID=$CHILD_PID
+        EXPECTED_STOP_REASON=requested-stop
+    fi
+    normalize_expected_stop_reason
 
     if [ "$EXPECTED_PID" = "$CHILD_PID" ] \
         && [ "$EXPECTED_STOP_REASON" = forced-stop-timeout ]; then
@@ -586,6 +644,11 @@ supervise_session() {
         log 'post-exit emergency safety action failed; power disposition remains unknown' >> "$LOGFILE"
     fi
 
+    if clear_orderly_software_session >> "$LOGFILE" 2>&1; then
+        rm -f "$CHILD_PIDFILE"
+        return 0
+    fi
+
     # Bind the terminal marker to the admission token and exact child identity
     # so stop consumers cannot mistake a stale crash latch for this helper's
     # safety completion receipt.
@@ -593,9 +656,10 @@ supervise_session() {
     if ! promote_unresolved "$TERMINAL_REASON" >> "$LOGFILE" 2>&1; then
         log 'could not promote the unresolved marker; admission remains blocked by unresolved state' >> "$LOGFILE"
     fi
-    log 'no exit status is a hardware SafeOff receipt; operator resolution is required before another start' >> "$LOGFILE"
+    log 'no valid exact-session software closeout receipt; operator resolution is required before another start' >> "$LOGFILE"
     rm -f "$CHILD_PIDFILE"
 
+    [ "$CENSUS_EXPECTED_EXIT" -eq 0 ] || return 1
     [ "$SAFETY_OK" -eq 1 ] || return 1
     if [ "$EXIT_CODE" -eq 0 ] && [ "$EXPECTED_PID" != "$CHILD_PID" ]; then
         return 1
@@ -794,6 +858,65 @@ self_test() {
             || TEST_FAILURES=$((TEST_FAILURES + 1))
     done
 
+    # The state transition uses an external validator result, never exit status
+    # alone. Its Rust tests execute the strict record/process/image checks.
+    CLOSEOUT_VALIDATOR=$TEST_ROOT/closeout-validator
+    DCENT_TEST_CLOSEOUT_TRACE=$TEST_ROOT/closeout-arguments
+    export DCENT_TEST_CLOSEOUT_TRACE DCENT_TEST_CLOSEOUT_RC
+    printf '%s\n' '#!/bin/sh' \
+        'printf "%s\\n" "$*" > "$DCENT_TEST_CLOSEOUT_TRACE"' \
+        'exit "${DCENT_TEST_CLOSEOUT_RC:-1}"' > "$CLOSEOUT_VALIDATOR"
+    chmod +x "$CLOSEOUT_VALIDATOR"
+    for TEST_CASE in valid legacy-requested-stop missing-proof wrong-pid missing-pid error-exit forced-stop invalid-stop safety-failed foreign-latch; do
+        rm -f "$UNRESOLVED_FILE" "$CRASH_LATCH_FILE" "$DCENT_TEST_CLOSEOUT_TRACE"
+        rm -rf "$LOCK_DIR"
+        ADMISSION_TOKEN=$(prepare_session 2>/dev/null) || TEST_FAILURES=$((TEST_FAILURES + 1))
+        release_lock || TEST_FAILURES=$((TEST_FAILURES + 1))
+        CHILD_PID=123
+        CHILD_START_TICKS=456
+        CHILD_BOOT_ID=test-boot
+        EXPECTED_PID=123
+        EXPECTED_STOP_REASON=requested-stop
+        EXIT_CODE=0
+        SAFETY_OK=1
+        DCENT_TEST_CLOSEOUT_RC=0
+        case "$TEST_CASE" in
+            legacy-requested-stop) EXPECTED_STOP_REASON= ;;
+            missing-proof) DCENT_TEST_CLOSEOUT_RC=1 ;;
+            wrong-pid) EXPECTED_PID=124 ;;
+            missing-pid) EXPECTED_PID=; EXPECTED_STOP_REASON= ;;
+            error-exit) EXIT_CODE=1 ;;
+            forced-stop) EXPECTED_STOP_REASON=forced-stop-timeout ;;
+            invalid-stop) EXPECTED_STOP_REASON=unrecognized ;;
+            safety-failed) SAFETY_OK=0 ;;
+            foreign-latch) printf 'foreign\n' > "$CRASH_LATCH_FILE" ;;
+        esac
+        normalize_expected_stop_reason
+        if clear_orderly_software_session >/dev/null 2>&1; then
+            case "$TEST_CASE" in valid|legacy-requested-stop) ;; *) TEST_FAILURES=$((TEST_FAILURES + 1)) ;; esac
+            path_exists "$UNRESOLVED_FILE" && TEST_FAILURES=$((TEST_FAILURES + 1))
+            grep -Fqx -- "--check-software-closeout 123 456 test-boot $ADMISSION_TOKEN" \
+                "$DCENT_TEST_CLOSEOUT_TRACE" || TEST_FAILURES=$((TEST_FAILURES + 1))
+        else
+            case "$TEST_CASE" in valid|legacy-requested-stop) TEST_FAILURES=$((TEST_FAILURES + 1)) ;; esac
+            path_exists "$UNRESOLVED_FILE" || TEST_FAILURES=$((TEST_FAILURES + 1))
+        fi
+    done
+
+    # A failed thermal/crash marker publication cannot remove the durable
+    # prelaunch boundary. A regular-file parent fails even when tests run root.
+    write_marker "$UNRESOLVED_FILE" unresolved || TEST_FAILURES=$((TEST_FAILURES + 1))
+    cp "$UNRESOLVED_FILE" "$TEST_ROOT/original-unresolved"
+    SELF_TEST_CRASH_LATCH=$CRASH_LATCH_FILE
+    printf 'not a directory\n' > "$TEST_ROOT/blocked-parent"
+    CRASH_LATCH_FILE=$TEST_ROOT/blocked-parent/crash
+    if promote_unresolved_locked thermal-lockout-persistence-failed >/dev/null 2>&1; then
+        TEST_FAILURES=$((TEST_FAILURES + 1))
+    fi
+    cmp "$UNRESOLVED_FILE" "$TEST_ROOT/original-unresolved" >/dev/null 2>&1 \
+        || TEST_FAILURES=$((TEST_FAILURES + 1))
+    CRASH_LATCH_FILE=$SELF_TEST_CRASH_LATCH
+
     rm -f "$UNRESOLVED_FILE" "$CRASH_LATCH_FILE"
     rm -rf "$LOCK_DIR"
     printf 'tmpfs / tmpfs rw,relatime 0 0\n' > "$MOUNTS_FILE"
@@ -814,6 +937,16 @@ case "${1:-}" in
     admit-update) admit_update_window "${2:-}" "${3:-}" "${4:-}" ;;
     latch) promote_unresolved "${2:-abnormal-exit}" ;;
     abandon) abandon_session "${2:-}" "${3:-supervisor-launch-failed}" ;;
+    supervise-firstlight-work)
+        CENSUS_EXPECTED_EXIT=2
+        shift
+        supervise_session "$@"
+        ;;
+    supervise-census)
+        CENSUS_EXPECTED_EXIT=1
+        shift
+        supervise_session "$@"
+        ;;
     supervise)
         shift
         supervise_session "$@"

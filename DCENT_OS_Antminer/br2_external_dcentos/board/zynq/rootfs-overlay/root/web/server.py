@@ -6,7 +6,7 @@ D-Central Technologies, 2026
 Serves the web dashboard and provides JSON API endpoints for system status,
 fan control, FPGA monitoring, and hardware diagnostics.
 
-Runs on port 80 by default (configurable via --port).
+Serves HTTPS on port 443 and redirects HTTP on release/password-protected images.
 Uses ThreadingMixIn for non-blocking request handling.
 
 API Endpoints:
@@ -31,6 +31,7 @@ import subprocess
 import sys
 import time
 import socket
+import ssl
 import argparse
 from http.server import HTTPServer
 from socketserver import ThreadingMixIn
@@ -86,6 +87,207 @@ def release_image():
     return os.path.exists(RELEASE_IMAGE_MARKER)
 
 
+TLS_DIR = Path("/data/dcent/tls")
+SESSION_COOKIE = "__Host-dcent_session"
+
+
+def password_state_exists():
+    """Any credential state closes plain HTTP, including corrupt/symlink state."""
+    try:
+        os.lstat(AUTH_FILE)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def _private_path(path, directory=False):
+    import stat
+    info = path.lstat()
+    kind_ok = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+    if not kind_ok or (not directory and info.st_nlink != 1):
+        raise RuntimeError("TLS material must use private, direct filesystem paths")
+    if os.name == "posix" and (info.st_uid != os.geteuid() or info.st_mode & 0o077):
+        raise RuntimeError("TLS material must be owned by the service user and private")
+
+
+def verify_persistent_tls_storage(tls_dir):
+    """Observe the current data owner and writable persistent backing before key I/O."""
+    data = Path("/data")
+    if Path(tls_dir) != TLS_DIR or data.is_symlink() or not data.is_dir():
+        raise RuntimeError("Device TLS requires the canonical persistent data directory")
+    target = Path("/etc/dcentos/board_target").read_text(encoding="ascii").strip()
+    helpers = {
+        "am3-s19jpro-aml": ("/usr/libexec/dcentos/classic-aml-storage.py", "check"),
+        "am3-s19jproa": ("/usr/libexec/dcentos/bm1362-nopic-storage.py", "check"),
+        "am3-s19jproplus": ("/usr/libexec/dcentos/bm1362-nopic-storage.py", "check"),
+        "am3-s19k": ("/usr/sbin/dcent-s19k-data-mount", "verify"),
+        "am3-s19kpro": ("/usr/sbin/dcent-s19k-data-mount", "verify"),
+        "am3-aml-s19kpro": ("/usr/sbin/dcent-s19k-data-mount", "verify"),
+    }
+    native = Path("/usr/libexec/dcentos/native-zynq-sd-storage.py")
+    command = helpers.get(target)
+    if native.exists():
+        command = (str(native), "--verify")
+    if command is not None:
+        helper = Path(command[0])
+        if helper.is_symlink() or not helper.is_file():
+            raise RuntimeError("Persistent data owner is unavailable")
+        subprocess.run(list(command), check=True, timeout=15,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    actual = next(path for path in (Path(tls_dir), Path(tls_dir).parent, data) if path.exists())
+    return persistent_data_mount(Path("/proc/self/mountinfo").read_text(), data.stat(), actual.stat())
+
+
+def persistent_data_mount(text, data_stat, target_stat=None):
+    """Join /data's actual filesystem device with its longest visible mount."""
+    import stat
+    target_stat = target_stat or data_stat
+    candidates = []
+    for line in text.splitlines():
+        fields = line.split()
+        try:
+            sep = fields.index("-")
+            point = fields[4]
+            if point not in ("/", "/data", "/data/dcent", "/data/dcent/tls"):
+                continue
+            candidates.append((len(point), fields, sep))
+        except (ValueError, IndexError):
+            raise RuntimeError("Malformed persistent storage mount information")
+    if not candidates:
+        raise RuntimeError("Persistent /data mount is absent")
+    _, fields, sep = max(candidates, key=lambda item: (item[0], int(item[1][0])))
+    filesystem, source = fields[sep + 1:sep + 3]
+    if (filesystem not in ("ext2", "ext3", "ext4", "f2fs", "xfs", "btrfs", "jffs2", "ubifs")
+            or "rw" not in fields[5].split(",") or "rw" not in fields[sep + 3].split(",")):
+        raise RuntimeError("TLS requires writable persistent storage, not volatile/root-image backing")
+    major, minor = (int(value) for value in fields[2].split(":"))
+    if (os.major(target_stat.st_dev), os.minor(target_stat.st_dev)) != (major, minor):
+        raise RuntimeError("Persistent /data device does not match its current mount")
+    if not stat.S_ISDIR(data_stat.st_mode):
+        raise RuntimeError("Persistent /data is not a directory")
+    if not (source.startswith("/dev/") or re.fullmatch(r"ubi[0-9]+:[A-Za-z0-9_-]+", source)):
+        raise RuntimeError("Persistent data mount has no recognized device owner")
+    return (data_stat.st_dev, data_stat.st_ino, fields[0], fields[2], fields[3], filesystem, source)
+
+
+def load_device_tls(tls_dir=TLS_DIR, verify_storage=verify_persistent_tls_storage):
+    """Create one private atomic key/cert bundle at first boot; never rotate silently."""
+    import secrets
+    import tempfile
+    tls_dir = Path(tls_dir).absolute()
+    storage_owner = verify_storage(tls_dir)
+    # Reject indirect ancestors before creating or opening any private material.
+    for parent in reversed((tls_dir,) + tuple(tls_dir.parents)):
+        if parent.is_symlink():
+            raise RuntimeError("TLS directory cannot traverse a symbolic link")
+    tls_dir.parent.mkdir(mode=0o700, exist_ok=True)
+    _private_path(tls_dir.parent, directory=True)
+    tls_dir.mkdir(mode=0o700, exist_ok=True)
+    _private_path(tls_dir, directory=True)
+    bundle = tls_dir / "dashboard.pem"
+    if not os.path.lexists(bundle):
+        # Exclusive generation directory and atomic publication prevent partial
+        # key/cert pairs after a reboot. No firmware image contains this key.
+        draft = Path(tempfile.mkdtemp(prefix=".generate-", dir=tls_dir))
+        key, cert, config = (draft / name for name in ("key.pem", "cert.pem", "openssl.cnf"))
+        try:
+            name = "dcentos-" + secrets.token_hex(8)
+            hostname = socket.gethostname().rstrip(".")
+            names = [name + ".local", "localhost"]
+            if re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}", hostname):
+                names.append(hostname)
+                if "." not in hostname:
+                    names.append(hostname + ".local")
+            config.write_text(
+                "[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n"
+                "[dn]\nCN=" + name + "\n[ext]\nsubjectAltName="
+                + ",".join("DNS:" + n for n in names) + ",IP:127.0.0.1,IP:::1\n"
+                "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n"
+                "extendedKeyUsage=serverAuth\n", encoding="ascii")
+            subprocess.run([
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-sha256", "-days", "3650", "-config", str(config),
+                "-keyout", str(key), "-out", str(cert),
+            ], check=True, timeout=45, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            pem = key.read_bytes() + cert.read_bytes()
+            staged = draft / "dashboard.pem"
+            fd = os.open(str(staged), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as output:
+                output.write(pem)
+                output.flush()
+                os.fsync(output.fileno())
+            # Validate before publishing. Corrupt existing material is never replaced.
+            probe = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            probe.load_cert_chain(str(staged))
+            # Hard-link publication is exclusive: concurrent starts cannot rotate a
+            # certificate that another process has already begun serving.
+            if verify_storage(tls_dir) != storage_owner:
+                raise RuntimeError("Persistent data owner changed during TLS generation")
+            try:
+                os.link(staged, bundle)
+            except FileExistsError:
+                pass
+            staged.unlink()
+            if os.name == "posix":
+                fd = os.open(str(tls_dir), os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+        finally:
+            # Only known files created in this private directory; never recurse.
+            for name in ("key.pem", "cert.pem", "openssl.cnf", "dashboard.pem"):
+                (draft / name).unlink(missing_ok=True)
+            draft.rmdir()
+    if verify_storage(tls_dir) != storage_owner:
+        raise RuntimeError("Persistent data owner changed before TLS load")
+    _private_path(bundle)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(str(bundle))
+    pem = bundle.read_text(encoding="ascii")
+    match = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", pem, re.S)
+    if not match:
+        raise RuntimeError("TLS bundle has no certificate")
+    fingerprint = hashlib.sha256(ssl.PEM_cert_to_DER_cert(match.group(0))).hexdigest()
+    return context, {"enabled": True, "certificate_sha256": fingerprint, "algorithm": "sha256"}
+
+
+def tls_session_cookie(token):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{20,256}", token):
+        raise ValueError("Invalid session token")
+    return SESSION_COOKIE + "=" + token + "; Path=/; Secure; HttpOnly; SameSite=Strict"
+
+
+def same_origin(origin, host, scheme="https"):
+    from urllib.parse import urlsplit
+    try:
+        source, target = urlsplit(origin), urlsplit(scheme + "://" + host)
+        default = 443 if scheme == "https" else 80
+        return (source.scheme == scheme and source.hostname == target.hostname
+                and (source.port or default) == (target.port or default)
+                and not source.username and not source.password
+                and source.path in ("", "/") and not source.query and not source.fragment
+                and host_header_is_allowed(host))
+    except ValueError:
+        return False
+
+
+def cookie_bearer(headers):
+    from http.cookies import SimpleCookie, CookieError
+    try:
+        cookies = SimpleCookie()
+        cookies.load(headers.get("Cookie", ""))
+        item = cookies.get(SESSION_COOKIE)
+        if item and re.fullmatch(r"[A-Za-z0-9_-]{20,256}", item.value):
+            return "Bearer " + item.value
+    except CookieError:
+        pass
+    return None
+
+
 def _strip_host_port(host):
     """Strip :port from Host / Origin host. Default :80 must match a bare host."""
     host = (host or "").strip().rstrip(".")
@@ -123,8 +325,15 @@ def _extra_csrf_hosts():
 
 def host_header_is_allowed(host):
     """Parity with dcentrald-api csrf_allowlist.rs. Origin==Host is not enough."""
-    host = _strip_host_port(host)
-    if not host:
+    from urllib.parse import urlsplit
+    try:
+        parsed = urlsplit("https://" + (host or ""))
+        if (parsed.path or parsed.query or parsed.fragment or parsed.username
+                or parsed.password or not parsed.hostname or any(c.isspace() for c in host)):
+            return False
+        _ = parsed.port  # Validate range and syntax even though the allowlist is host-only.
+        host = parsed.hostname
+    except ValueError:
         return False
     if _is_loopback_or_literal_ip(host) or _is_mdns_local(host):
         return True
@@ -133,30 +342,11 @@ def host_header_is_allowed(host):
 
 
 def cors_origin_allowed(origin, host):
-    """Mirror dcentrald-api csrf_allowlist: localhost, .local, literal IP.
-
-    Origin==Host without the allowlist is DNS-rebinding. :80 overlay Host
-    headers are compared after stripping the port so `ip` and `ip:80` match.
-    """
-    if not origin:
+    """Only a matching HTTP(S) authority can receive browser CORS headers."""
+    if not origin or not host:
         return False
-    origin = origin.strip()
-    host_only = origin
-    if host_only.startswith("https://"):
-        host_only = host_only[8:]
-    elif host_only.startswith("http://"):
-        host_only = host_only[7:]
-    origin_host = _strip_host_port(host_only.split("/")[0])
-    if origin_host.lower() in ("localhost", "127.0.0.1", "::1"):
-        return True
-    if _is_mdns_local(origin_host):
-        return True
-    if not host:
-        return False
-    host_bare = _strip_host_port(host)
-    if origin_host.lower() != host_bare.lower():
-        return False
-    return host_header_is_allowed(host)
+    scheme = "https" if origin.startswith("https://") else "http"
+    return same_origin(origin, host, scheme)
 
 
 def cors_allow_origin_value(headers):
@@ -186,7 +376,7 @@ def bearer_auth_header(headers):
     return value
 
 
-def build_dcentrald_proxy_headers(headers, client_ip):
+def build_dcentrald_proxy_headers(headers, client_ip, encrypted=False):
     """Build headers for the dcentrald reverse proxy.
 
     Do not stamp DASHBOARD_PROXY_HEADER here. server.py is LAN-facing and has no
@@ -205,7 +395,7 @@ def build_dcentrald_proxy_headers(headers, client_ip):
         out["Host"] = host
         out["X-Forwarded-Host"] = host
     out["X-Forwarded-For"] = client_ip
-    out["X-Forwarded-Proto"] = "http"
+    out["X-Forwarded-Proto"] = "https" if encrypted else "http"
     return out
 
 
@@ -279,7 +469,7 @@ def bearer_authorized_by_auth_file(auth_header):
 
 def local_control_authorized(headers):
     """Authorize server.py's local POST controls."""
-    if not release_image():
+    if not release_image() and not password_state_exists():
         return True
     auth_header = bearer_auth_header(headers)
     if not auth_header:
@@ -576,13 +766,255 @@ def get_dashboard_health():
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     """Handle requests in a separate thread — prevents blocking on slow probes."""
     daemon_threads = True
+    max_connections = 16
+
+    def __init__(self, *args, **kwargs):
+        import threading
+        self.connection_slots = threading.BoundedSemaphore(self.max_connections)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self.connection_slots.acquire(blocking=False):
+            request.close()
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.connection_slots.release()
+            request.close()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        # TLS handshakes run in the request worker with a deadline; one client
+        # that never sends ClientHello cannot stall the listening socket.
+        try:
+            request.settimeout(15)
+            context = getattr(self, "tls_context", None)
+            if context is not None:
+                request = context.wrap_socket(request, server_side=True)
+            super().process_request_thread(request, client_address)
+        except (OSError, ssl.SSLError):
+            request.close()
+        finally:
+            self.connection_slots.release()
+
+
+def create_tls_server(address, context, info):
+    server = ThreadedHTTPServer(address, DCENTosHandler)
+    server.tls_context = context
+    server.tls_info = info
+    return server
 
 
 class DCENTosHandler(http.server.SimpleHTTPRequestHandler):
     """HTTP request handler with API endpoints + reverse proxy to dcentrald."""
+    protocol_version = "HTTP/1.1"
+    request_body_timeout = 120
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
+
+    def parse_request(self):
+        if not super().parse_request():
+            return False
+        host = self.headers.get("Host", "")
+        if not host_header_is_allowed(host) or len(self.headers.get_all("Host", [])) != 1:
+            self.send_error(403, "Invalid dashboard Host")
+            return False
+        encrypted = isinstance(self.connection, ssl.SSLSocket)
+        if not encrypted and (release_image() or password_state_exists()
+                              or not self.path.startswith("/api/")
+                              or self.path.split("?", 1)[0].startswith("/api/auth/")):
+            from urllib.parse import urlsplit
+            hostname = urlsplit("http://" + host).hostname
+            if not hostname:
+                self.send_error(403)
+                return False
+            authority = "[" + hostname + "]" if ":" in hostname else hostname
+            tls_port = getattr(self.server, "tls_port", 443)
+            if tls_port != 443:
+                authority += ":" + str(tls_port)
+            self.send_response(308)
+            # A path cannot replace the explicitly constructed authority.
+            self.send_header("Location", "https://" + authority + "/" + self.path.lstrip("/"))
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            return False
+        origin = self.headers.get("Origin")
+        scheme = "https" if encrypted else "http"
+        if origin and not same_origin(origin, host, scheme):
+            self.send_error(403, "Cross-origin dashboard request refused")
+            return False
+        if encrypted and not self.headers.get("Authorization"):
+            authorization = cookie_bearer(self.headers)
+            if authorization:
+                # Cookies are ambient credentials. Unsafe methods require an
+                # explicit same-origin browser proof; Bearer clients are unchanged.
+                if self.command not in ("GET", "HEAD", "OPTIONS") and not origin:
+                    self.send_error(403, "Cookie writes require same-origin Origin")
+                    return False
+                self.headers["Authorization"] = authorization
+        if self.command in ("POST", "PUT", "PATCH", "DELETE"):
+            self.request_body_length = self._body_length()
+            if self.request_body_length is None:
+                return False
+        if getattr(self, "_expect_continue", False):
+            self.send_response_only(100)
+            super().end_headers()
+            self._expect_continue = False
+        return True
+
+    def end_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if isinstance(self.connection, ssl.SSLSocket):
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
+        if self.path.startswith("/api/auth/") or self.path == "/api/tls/info":
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+    def handle_expect_100(self):
+        # BaseHTTPRequestHandler calls this before our transport/Origin checks.
+        # Delay Continue until those checks and body admission have succeeded.
+        self._expect_continue = True
+        return True
+
+    def _body_length(self):
+        fields = self.headers.get_all("Content-Length", [])
+        if (len(fields) > 1 or self.headers.get("Transfer-Encoding")
+                or (fields and not re.fullmatch(r"[0-9]{1,10}", fields[0]))):
+            self.send_error(400, "Ambiguous or unsupported request framing")
+            self.close_connection = True
+            return None
+        length = int(fields[0]) if fields else 0
+        self.stream_upload = self.command == "POST" and self.path.split("?", 1)[0] in (
+            "/api/system/upgrade", "/api/v1/system/upgrade", "/api/v1/firmware/update")
+        limit = 128 * 1024 * 1024 if self.stream_upload else 2 * 1024 * 1024
+        if length > limit:
+            self.send_error(413, "Request body exceeds endpoint limit")
+            self.close_connection = True
+            return None
+        if self.stream_upload:
+            bearer = bearer_auth_header(self.headers)
+            if not bearer or validate_bearer_with_dcentrald(bearer) is not True:
+                self.send_error(401, "Firmware upload requires an authenticated session")
+                self.close_connection = True
+                return None
+        return length
+
+    def _body_chunks(self):
+        remaining = self.request_body_length
+        deadline = time.monotonic() + self.request_body_timeout
+        while remaining:
+            budget = deadline - time.monotonic()
+            if budget <= 0:
+                raise TimeoutError("Request body deadline exceeded")
+            self.connection.settimeout(min(15, budget))
+            # read() may repeat raw reads until this whole chunk is filled,
+            # allowing a slow sender to renew the socket timeout indefinitely.
+            # read1() preserves buffered bytes but performs at most one raw read
+            # before returning to the absolute deadline check.
+            chunk = self.rfile.read1(min(65536, remaining))
+            if not chunk:
+                raise ConnectionError("Request body ended early")
+            remaining -= len(chunk)
+            yield chunk
+
+    def _forward_mutation(self):
+        body = b"".join(self._body_chunks())
+        if self.path.startswith("/api/"):
+            if not self._proxy_to_dcentrald(self.command, body):
+                self._send_disconnect_json("dcentrald not reachable on 127.0.0.1:8080")
+        else:
+            self.send_error(404)
+
+    do_DELETE = _forward_mutation
+    do_PUT = _forward_mutation
+    do_PATCH = _forward_mutation
+
+    def _proxy_websocket(self):
+        """Relay authenticated WebSocket bytes through the same TLS endpoint."""
+        import base64
+        import select
+        if self.headers.get("Upgrade", "").lower() != "websocket":
+            self.send_error(400, "WebSocket upgrade required")
+            return
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        try:
+            if len(base64.b64decode(key, validate=True)) != 16:
+                raise ValueError("invalid key")
+        except ValueError:
+            self.send_error(400, "Invalid WebSocket key")
+            return
+        upstream = None
+        upgraded = False
+        try:
+            headers = build_dcentrald_proxy_headers(
+                self.headers, self.client_address[0], isinstance(self.connection, ssl.SSLSocket))
+            for name in ("Sec-WebSocket-Key", "Sec-WebSocket-Version", "Sec-WebSocket-Protocol"):
+                if self.headers.get(name):
+                    headers[name] = self.headers[name]
+            headers.update({"Upgrade": "websocket", "Connection": "Upgrade"})
+            if any("\r" in value or "\n" in value for value in headers.values()):
+                self.send_error(400)
+                return
+            request = "GET " + self.path + " HTTP/1.1\r\n" + "".join(
+                name + ": " + value + "\r\n" for name, value in headers.items()) + "\r\n"
+            upstream = socket.create_connection((DCENTRALD_HOST, DCENTRALD_PORT), timeout=10)
+            upstream.sendall(request.encode("latin-1"))
+            received = bytearray()
+            while b"\r\n\r\n" not in received:
+                data = upstream.recv(4096)
+                if not data or len(received) + len(data) > 65536:
+                    raise ValueError("Invalid upstream WebSocket response")
+                received.extend(data)
+            head, tail = bytes(received).split(b"\r\n\r\n", 1)
+            lines = head.decode("latin-1").split("\r\n")
+            status = int(lines[0].split()[1])
+            fields = {}
+            for line in lines[1:]:
+                name, value = line.split(":", 1)
+                fields[name.lower()] = value.strip()
+            if status != 101:
+                self.send_error(status if status in (400, 401, 403, 429) else 502)
+                return
+            expected = base64.b64encode(hashlib.sha1(
+                (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()).decode("ascii")
+            if (fields.get("sec-websocket-accept") != expected
+                    or fields.get("upgrade", "").lower() != "websocket"):
+                raise ValueError("Invalid upstream WebSocket handshake")
+            self.send_response(101)
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            self.send_header("Sec-WebSocket-Accept", expected)
+            if fields.get("sec-websocket-protocol"):
+                self.send_header("Sec-WebSocket-Protocol", fields["sec-websocket-protocol"])
+            self.end_headers()
+            upgraded = True
+            if tail:
+                self.connection.sendall(tail)
+            # Single worker owns both directions of the SSL object. Its
+            # decrypted pending bytes must be drained before waiting on select.
+            while True:
+                pending = isinstance(self.connection, ssl.SSLSocket) and self.connection.pending()
+                ready = [self.connection] if pending else select.select(
+                    [self.connection, upstream], [], [], 60)[0]
+                if not ready:
+                    break
+                for source in ready:
+                    data = source.recv(65536)
+                    if not data:
+                        return
+                    (upstream if source is self.connection else self.connection).sendall(data)
+        except (OSError, ValueError, IndexError, UnicodeError):
+            if not upgraded:
+                self.send_error(502, "WebSocket backend unavailable")
+        finally:
+            if upstream is not None:
+                upstream.close()
+            self.close_connection = True
 
     def _proxy_to_dcentrald(self, method="GET", body=None):
         """Forward request to dcentrald on port 8080.
@@ -598,12 +1030,40 @@ class DCENTosHandler(http.server.SimpleHTTPRequestHandler):
         """
         try:
             conn = http.client.HTTPConnection(DCENTRALD_HOST, DCENTRALD_PORT, timeout=10)
-            headers = build_dcentrald_proxy_headers(self.headers, self.client_address[0])
+            headers = build_dcentrald_proxy_headers(
+                self.headers, self.client_address[0], isinstance(self.connection, ssl.SSLSocket))
+            if getattr(self, "stream_upload", False) and method == "POST":
+                headers["Content-Length"] = str(self.request_body_length)
             conn.request(method, self.path, body=body, headers=headers)
             resp = conn.getresponse()
             resp_body = resp.read()
 
+            encrypted = isinstance(self.connection, ssl.SSLSocket)
+            cookie = None
+            route = self.path.split("?", 1)[0]
+            if encrypted and 200 <= resp.status < 300:
+                if method == "POST" and route in ("/api/auth/setup", "/api/auth/session"):
+                    try:
+                        token = json.loads(resp_body).get("session_token")
+                        if token:
+                            cookie = tls_session_cookie(token)
+                    except (ValueError, TypeError, AttributeError):
+                        pass
+                elif method == "DELETE" and route == "/api/auth/session/current":
+                    cookie = SESSION_COOKIE + "=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0"
+            if route in ("/api/info", "/api/system/info") and resp.status == 200:
+                try:
+                    info = json.loads(resp_body)
+                    if isinstance(info, dict):
+                        info["tls"] = getattr(self.server, "tls_info", {"enabled": False})
+                        resp_body = json.dumps(info).encode("utf-8")
+                except (ValueError, TypeError):
+                    pass
             self.send_response(resp.status)
+            if cookie:
+                self.send_header("Set-Cookie", cookie)
+            if resp.getheader("Cache-Control"):
+                self.send_header("Cache-Control", resp.getheader("Cache-Control"))
             self.send_header("Content-Type", resp.getheader("Content-Type", "application/json"))
             self.send_header("Content-Length", len(resp_body))
             self.end_headers()
@@ -627,6 +1087,12 @@ class DCENTosHandler(http.server.SimpleHTTPRequestHandler):
         self.send_json(body, status=503)
 
     def do_GET(self):
+        if self.path.split("?", 1)[0] == "/ws":
+            self._proxy_websocket()
+            return
+        if self.path == "/api/tls/info":
+            self.send_json(getattr(self.server, "tls_info", {"enabled": False}))
+            return
         if self.path.startswith("/api/"):
             # ALWAYS-LOCAL endpoints — must work even when dcentrald is dead.
             # That's the whole point of the diagnostic dashboard.
@@ -635,7 +1101,7 @@ class DCENTosHandler(http.server.SimpleHTTPRequestHandler):
                 return
             if self.path.startswith("/api/dashboard/log"):
                 # /api/dashboard/log?lines=N (default 100, max 1000)
-                if release_image() and not bearer_auth_header(self.headers):
+                if not local_control_authorized(self.headers):
                     self.send_json({"error": "unauthorized"}, status=401)
                     return
                 lines = 100
@@ -654,7 +1120,7 @@ class DCENTosHandler(http.server.SimpleHTTPRequestHandler):
                 })
                 return
             if self.path == "/api/dashboard/probe":
-                if release_image() and not bearer_auth_header(self.headers):
+                if not local_control_authorized(self.headers):
                     self.send_json({"error": "unauthorized"}, status=401)
                     return
                 # Full diagnostic snapshot — same data as health but explicit
@@ -710,8 +1176,11 @@ class DCENTosHandler(http.server.SimpleHTTPRequestHandler):
             super().do_GET()
 
     def do_POST(self):
-        content_len = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_len) if content_len > 0 else None
+        if self.stream_upload:
+            if not self._proxy_to_dcentrald("POST", self._body_chunks()):
+                self._send_disconnect_json("Authenticated upload backend unavailable")
+            return
+        body = b"".join(self._body_chunks())
 
         if self.path.startswith("/api/"):
             # ALWAYS-LOCAL endpoints — work even when dcentrald is dead.
@@ -813,6 +1282,7 @@ class DCENTosHandler(http.server.SimpleHTTPRequestHandler):
     def do_OPTIONS(self):
         """Handle CORS preflight for all paths."""
         self.send_response(200)
+        self.send_header("Content-Length", "0")
         allow = cors_allow_origin_value(self.headers)
         if allow:
             self.send_header("Access-Control-Allow-Origin", allow)
@@ -907,22 +1377,36 @@ class DCENTosHandler(http.server.SimpleHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="DCENTos Web Dashboard")
-    parser.add_argument("--port", type=int, default=80, help="HTTP port (default: 80)")
+    import threading
+    parser = argparse.ArgumentParser(description="DCENTos HTTPS Dashboard")
+    parser.add_argument("--port", type=int, default=80, help="HTTP redirect port (default: 80)")
+    parser.add_argument("--tls-port", type=int, default=443, help="HTTPS port (default: 443)")
     parser.add_argument("--bind", default="0.0.0.0", help="Bind address")
     args = parser.parse_args()
 
-    server = ThreadedHTTPServer((args.bind, args.port), DCENTosHandler)
-    hostname = socket.gethostname()
-    print(f"DCENTos Dashboard v{VERSION} — http://{args.bind}:{args.port}/")
-    print(f"  Hostname: {hostname}")
-    print(f"  API:      http://{args.bind}:{args.port}/api/status")
-    print(f"  Fan API:  http://{args.bind}:{args.port}/api/fan")
+    # Establish a valid persistent device identity before opening either listener.
+    context, info = load_device_tls()
+    server = create_tls_server((args.bind, args.tls_port), context, info)
+    redirect = None
+    worker = None
     try:
+        redirect = ThreadedHTTPServer((args.bind, args.port), DCENTosHandler)
+        redirect.tls_port = args.tls_port
+        worker = threading.Thread(target=redirect.serve_forever, daemon=True)
+        worker.start()
+        print("DCENTos Dashboard v{} â€” HTTPS :{}, HTTP redirect :{}".format(
+            VERSION, args.tls_port, args.port), flush=True)
+        print("  Certificate SHA-256: " + info["certificate_sha256"], flush=True)
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nShutting down.")
+        pass
+    finally:
         server.server_close()
+        if redirect is not None:
+            if worker is not None:
+                redirect.shutdown()
+                worker.join(timeout=5)
+            redirect.server_close()
 
 
 if __name__ == "__main__":

@@ -111,7 +111,7 @@ do
 done
 
 for _dcent_geometry_post_image in \
-    br2_external_dcentos/board/zynq/am2-s17pro/post-image.sh \
+    br2_external_dcentos/board/zynq/post-image-17-family.sh \
     br2_external_dcentos/board/zynq/am2-s19jpro/post-image.sh \
     br2_external_dcentos/board/zynq/am2-s19pro/post-image.sh
 do

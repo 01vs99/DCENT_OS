@@ -7,6 +7,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -74,6 +76,64 @@ class ReleaseSigningAuthorityTests(unittest.TestCase):
             self.private,
             self.public,
         )
+
+    def test_driver_result_parent_preparation_allows_actual_durable_authority(self) -> None:
+        parent = self.root / "driver-control"
+        parent.mkdir(mode=0o755)
+        sentinel = parent / "existing-public-source.txt"
+        sentinel.write_bytes(b"source bytes remain unchanged\n")
+        result = self.run_cli("prepare-result-parent", str(parent))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sentinel.read_bytes(), b"source bytes remain unchanged\n")
+        authority._check_directory(parent.lstat(), "prepared driver parent", private=True)
+        authority._require_private_windows_path(parent, "prepared driver parent")
+        created = authority.create_authority(
+            self.authority_parent, self.release_invocation.stage, self.private,
+            self.public, result_output=parent / "signing-result.json")
+        value = json.loads((parent / "signing-result.json").read_bytes())
+        self.assertEqual(value["authority_id"], created.authority_id)
+        authority.destroy_authority(created.stage, created.capability)
+        self.assertFalse(created.stage.exists())
+        self.assertNotEqual(self.run_cli("prepare-result-parent", str(sentinel)).returncode, 0)
+
+    @unittest.skipUnless(os.name == "nt", "actual Git Bash/Windows DACL integration")
+    def test_capsule_directory_preparation_admits_actual_release_set_stage(self) -> None:
+        # Execute the actual driver's directory setup, without a compiler or key.
+        # Both siblings start with an inherited DACL, as Git Bash mkdir creates.
+        git = shutil.which("git")
+        self.assertIsNotNone(git, "Windows release acceptance requires Git Bash")
+        bash = next((parent / "usr/bin/bash.exe" for parent in Path(git).resolve().parents
+                     if (parent / "usr/bin/bash.exe").is_file()), None)
+        self.assertIsNotNone(bash, "active Git installation must contain Bash")
+        source = SCRIPT.with_name("build_release_capsule.sh").read_text(encoding="utf-8")
+        start = source.index('\nWORK_PARENT="$PUBLIC_OUTPUT_ROOT/.dcent-release-capsules"') + 1
+        end = source.index('\nINVOCATION_STAGE=""', start)
+        output = self.root / "actual capsule parents"
+        output.mkdir()
+        script = (
+            "set -euo pipefail\numask 077\nexport PATH=/usr/bin:/bin:$PATH\n"
+            f"PUBLIC_OUTPUT_ROOT={shlex.quote(output.as_posix())}\n"
+            f"SCRIPT_DIR={shlex.quote(SCRIPT.parent.as_posix())}\n"
+            f"python3() {{ {shlex.quote(Path(sys.executable).as_posix())} \"$@\"; }}\n"
+            + source[start:end] + "\n"
+        )
+        result = subprocess.run([str(bash), "-c", script], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in (".dcent-release-capsules", ".release-set-stages"):
+            authority._require_private_windows_path(output / name, "actual capsule parent")
+        publication = SCRIPT.with_name("release_set_publication.py")
+        capability = output / ".dcent-release-capsules" / "stage-capability.json"
+        created = subprocess.run([
+            sys.executable, str(publication), "create-stage", "--parent",
+            str(output / ".release-set-stages"), "--capability-output", str(capability)
+        ], capture_output=True, text=True, timeout=30)
+        self.assertEqual(created.returncode, 0, created.stderr)
+        self.assertTrue(capability.is_file())
+        destroyed = subprocess.run([
+            sys.executable, str(publication), "destroy-stage", "--capability-file", str(capability)
+        ], capture_output=True, text=True, timeout=30)
+        self.assertEqual(destroyed.returncode, 0, destroyed.stderr)
+        self.assertEqual(list((output / ".release-set-stages").iterdir()), [])
 
     def run_cli(
         self, *arguments: str, stdin: bytes = b""
@@ -634,5 +694,57 @@ raise SystemExit("raced FIFO unexpectedly admitted")
         self.assertEqual(private.read_bytes(), b"PRIVATE-JUNCTION\n")
 
 
+# Explicit platform ownership keeps mandatory tests executing without turning
+# decorator skips into a passing blocking gate. New test methods must be owned.
+PORTABLE_TESTS = (
+    "test_driver_result_parent_preparation_allows_actual_durable_authority",
+    "test_create_is_private_exact_invocation_bound_and_path_free",
+    "test_query_result_and_cli_lifecycle_are_strict",
+    "test_create_is_idempotent_and_repairs_authenticated_partial_files",
+    "test_create_failure_after_capability_is_resumable",
+    "test_durable_result_precedes_key_copy_and_is_idempotent",
+    "test_create_recovers_linked_capability_publication_boundary",
+    "test_create_rebinds_durable_capability_after_empty_stage_loss",
+    "test_descriptor_directory_barrier_precedes_every_key_copy",
+    "test_destroy_retries_after_partial_key_removal",
+    "test_destroy_retries_after_stage_removal",
+    "test_destroy_upgrades_legacy_capability_before_mutation",
+    "test_wrong_capability_and_invocation_cannot_authorize",
+    "test_hardlink_fifo_and_loose_private_mode_are_rejected",
+    "test_stage_tampering_and_cleanup_escape_are_rejected",
+)
+POSIX_TESTS = (
+    # Creating symlinks on Windows requires privileges; its reparse-point
+    # rejection is exercised by the mandatory Windows junction fixture.
+    "test_symlink_source_is_rejected",
+    "test_exclusive_write_closes_descriptor_when_fdopen_fails",
+    "test_open_handle_rejects_pathname_rotation",
+    "test_raced_fifo_open_never_blocks_before_handle_revalidation",
+)
+WINDOWS_TESTS = (
+    "test_windows_rejects_public_private_key_acl",
+    "test_windows_normalizes_existing_capability_directory_acl",
+    "test_windows_junction_source_component_is_rejected",
+    "test_capsule_directory_preparation_admits_actual_release_set_stage",
+)
+
+
+def host_platform_suite(host: str) -> unittest.TestSuite:
+    owned = PORTABLE_TESTS + POSIX_TESTS + WINDOWS_TESTS
+    discovered = unittest.defaultTestLoader.getTestCaseNames(ReleaseSigningAuthorityTests)
+    if len(owned) != len(set(owned)) or set(owned) != set(discovered):
+        raise ValueError("signing authority test platform ownership is incomplete or duplicated")
+    if host == "posix":
+        selected = PORTABLE_TESTS + POSIX_TESTS
+    elif host == "nt":
+        selected = PORTABLE_TESTS + WINDOWS_TESTS
+    else:
+        raise ValueError(f"unsupported signing test host: {host}")
+    return unittest.TestSuite(ReleaseSigningAuthorityTests(name) for name in selected)
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--host-platform"]:
+        result = unittest.TextTestRunner(verbosity=2).run(host_platform_suite(os.name))
+        raise SystemExit(0 if result.wasSuccessful() and not result.skipped else 1)
     unittest.main(verbosity=2)

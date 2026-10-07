@@ -701,7 +701,13 @@ function Test-FirmwareIntakePackagingGates {
 
     Test-Pattern $packageText 'MANIFEST\.sig[\s\S]*release_ed25519\.pub[\s\S]*openssl\s+pkeyutl\s+-sign[\s\S]*openssl\s+pkeyutl\s+-verify' 'packager signing artifacts' 'package_sysupgrade signs MANIFEST.json and embeds release_ed25519.pub' 'package_sysupgrade does not visibly produce signed release-key artifacts' $packagePath
     Test-Pattern $packageText 'Refusing live upload of an unsigned package' 'unsigned live upload refusal' 'package_sysupgrade refuses unsigned live upload unless explicitly allowed' 'package_sysupgrade does not visibly refuse unsigned live upload' $packagePath
-    Test-Pattern $packageText 'requires_inactive_slot"\s*:\s*true' 'package inactive-slot metadata' 'sysupgrade manifest declares inactive-slot requirement' 'sysupgrade manifest does not visibly declare inactive-slot requirement' $packagePath
+    # AM1-A Drop-1 route scoping (adjudication AM1_S9 Option A, 2026-09-15):
+    # requires_inactive_slot is now derived per route contract — literal true
+    # for the dual-route (fitting) build, false only under the typed
+    # first-install-only self-update denial. Pin BOTH the dual-route literal
+    # derivation and the manifest's conditional emission (same approach as
+    # the pre_flash_validate pin in ci_offline_gates.sh).
+    Test-Pattern $packageText 'S9_REQUIRES_INACTIVE_SLOT=true[\s\S]*requires_inactive_slot"\s*:\s*\$S9_REQUIRES_INACTIVE_SLOT' 'package inactive-slot metadata' 'sysupgrade manifest derives the dual-route inactive-slot requirement (true; false only under the first-install-only denial contract)' 'sysupgrade manifest does not visibly declare the inactive-slot requirement' $packagePath
 
     Test-Pattern $flashUniversalText 'Unsafe BraiinsOS active-rootfs flashing is disabled[\s\S]*Use package_sysupgrade\.sh' 'legacy flash_braiinsos promotion' 'universal installer refuses BraiinsOS active-rootfs flash and points to sysupgrade' 'universal installer may still promote the legacy BraiinsOS active-rootfs flash path' $flashUniversalPath
     Test-Pattern $flashBraiinsosText 'Legacy BraiinsOS UBI Path[\s\S]*active rootfs volume and is disabled[\s\S]*exit 1' 'flash_braiinsos disabled' 'flash_braiinsos exits before active-rootfs flash steps' 'flash_braiinsos is not visibly disabled before active-rootfs flash steps' $flashBraiinsosPath

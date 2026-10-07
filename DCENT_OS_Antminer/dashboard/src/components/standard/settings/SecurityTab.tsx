@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { api } from '../../../api/client';
 import { useMinerStore } from '../../../store/miner';
+import { SshKeysPanel } from './SshKeysPanel';
 
 export function SecurityTab() {
   const settings = useMinerStore(s => s.settings);
@@ -139,6 +140,8 @@ export function SecurityTab() {
           </div>
         )}
       </div>
+
+      <SshKeysPanel />
 
       <div
         id="circuit-safety"

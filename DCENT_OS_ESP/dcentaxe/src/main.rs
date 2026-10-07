@@ -148,6 +148,26 @@ use log::*;
 
 use dcentaxe_asic::{AsicResult, SerialPort};
 use dcentaxe_hal::display::Ssd1306Display;
+// P1-O4: `fit_line`, `resolve_rung` and `TEXT_COLUMNS` are consumed only by
+// the carousel, which is `display-ssd1306`-gated; `MiningRung` still feeds
+// the four boot/init screens on every board. Both `use` lines below are
+// pinned VERBATIM by `oled_truth_ladder_guards` / `oled_truth_ladder_r2_guards`,
+// so the headless-unused half is silenced here rather than split out.
+#[cfg_attr(feature = "display-none", allow(unused_imports))]
+use dcentaxe_hal::display_convert::{fit_line, resolve_rung, MiningRung, TEXT_COLUMNS};
+// P1-O2 round 2: a SECOND use line on purpose. The dcentaxe-core source
+// contract pins the line above verbatim (it is how the host gate proves this
+// espidf-only file imports the shared resolver at all), so round 2's two
+// bounded composers arrive beside it rather than inside it.
+#[cfg_attr(feature = "display-none", allow(unused_imports))]
+use dcentaxe_hal::display_convert::{rung_decoration, rung_status_line};
+#[cfg(feature = "display-ssd1306")]
+use dcentaxe_hal::display_convert::halving_progress;
+// P1-O1: the fail-closed reason CODES and the bounded rows that carry
+// them. Same host-pure split, and pinned by a dcentaxe-core source
+// contract for the same reason: this file can never be host-compiled, so
+// a sentence composed here could not be measured against the panel.
+use dcentaxe_hal::block_reason::{blocked_screen, code_line, ip_row, BlockReason};
 use dcentaxe_hal::emc2103::Emc2103;
 use dcentaxe_hal::emc2302::Emc2302;
 use dcentaxe_hal::gpio::GpioController;
@@ -162,6 +182,8 @@ use dcentaxe_hal::safety::{
 use dcentaxe_hal::temp::{Emc2101, Tmp1075};
 use dcentaxe_mining::dispatcher::{DispatcherConfig, MiningDispatcher, PoolSlot};
 use dcentaxe_stratum::client::StratumClient;
+#[cfg(feature = "display-ssd1306")]
+use dcentaxe_stratum::solo::ChainId;
 use dcentaxe_stratum::types::{MiningEvent, StratumEvent, StratumProtocol};
 
 use autotuner::Autotuner;
@@ -169,6 +191,15 @@ use config::{ControlSurface, DcentAxeConfig};
 use shared::{stratum_status_snapshots, SharedState};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Columns available to the companion page's activity word.
+///
+/// P1-O2: the pet-room layout draws it with `draw_text(22, 25, ...)` and
+/// puts the wattage at x = 90, so (90 - 22) / 6 = 11 characters. The
+/// full-pet layout starts at x = 36 and has 15, but one budget for both
+/// slots means the word cannot change width when the layout flips.
+#[cfg(feature = "display-ssd1306")]
+const PET_ACTIVITY_COLUMNS: usize = 11;
+
 const EMERGENCY_TEMP_C: f32 = 105.0;
 const WARNING_TEMP_C: f32 = 90.0;
 
@@ -396,6 +427,7 @@ const PANIC_I2C_TICKS: u32 = 20;
 /// configured. Upstream `NerdQaxePlus::initAsics` waits exactly this long
 /// between `LDO_enable()` and `m_tps->init()`.
 const LDO_SETTLE_MS: u64 = 100;
+
 
 /// Settle time between cutting the core rail and dropping the ASIC LDO on the
 /// normal fail-closed path. Upstream `NerdQaxePlus::shutdown` waits this long
@@ -706,39 +738,83 @@ fn fail_closed_power_off(
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// OLED NOTIFICATION EMITTER (P1-O4)
+// ══════════════════════════════════════════════════════════════════════════
+// `Ssd1306Display::notify` is a NO-OP stub in the `display-none` variant of
+// `dcentaxe-hal::display`, so on the 21 headless build targets these calls did
+// nothing at runtime — but the compiler still built every `format!` and every
+// string literal behind them and linked them into the image. Routing the ~70
+// gamification call sites through this macro moves the whole ARGUMENT LIST
+// behind the `display-ssd1306` cfg.
+//
+// What deliberately stays OUTSIDE the gate at every call site: the achievement
+// bitmask updates, the `nvs_save_*` dirty flags, `lifetime_shares`,
+// `share_flash_tick` / `achievement_flash_tick`, the state-edge trackers
+// `prev_accepted` / `prev_streak` / `prev_block_height` and the telemetry
+// publish. A headless board must unlock, persist and report exactly what a
+// panelled board does. Display-only by construction and therefore INSIDE the
+// gate: the `pending_flash` strobe machine and the notification-edge trackers
+// `prev_rejected` / `prev_best_diff` / `prev_clean_jobs`, whose only readers are
+// notification arms (blind critic + DCENT_CE/EE review, P1-O4 round 1).
+//
+// The urgent safety notifications (`display.notify_urgent`) in the power /
+// thermal / fan handlers are NOT routed through this macro: they sit inside
+// safety code and are out of this lane's footprint.
+#[cfg(feature = "display-ssd1306")]
+macro_rules! oled_notify {
+    ($display:expr, $($arg:expr),+ $(,)?) => {
+        $display.notify($($arg),+)
+    };
+}
+#[cfg(feature = "display-none")]
+macro_rules! oled_notify {
+    ($display:expr, $($arg:expr),+ $(,)?) => {
+        ()
+    };
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // PIXEL ART — 8x8 1-bit sprites stored as const byte arrays
 // Each sprite is 8 bytes: one byte per column, LSB = top pixel.
 // ══════════════════════════════════════════════════════════════════════════
 
 /// Pickaxe swinging frame 1 (mining)
+#[cfg(feature = "display-ssd1306")]
 const SPRITE_PICKAXE_1: [u8; 8] = [
     0b00000001, 0b00000010, 0b00000100, 0b00001000, 0b00111000, 0b01001000, 0b10001000, 0b00001000,
 ];
 /// Pickaxe swinging frame 2
+#[cfg(feature = "display-ssd1306")]
 const SPRITE_PICKAXE_2: [u8; 8] = [
     0b00000000, 0b00000001, 0b00000010, 0b00000100, 0b00011100, 0b00100100, 0b01000100, 0b00000100,
 ];
 /// Bitcoin coin frame 1 (front)
+#[cfg(feature = "display-ssd1306")]
 const SPRITE_COIN_1: [u8; 8] = [
     0b00111100, 0b01000010, 0b10011001, 0b10100101, 0b10100101, 0b10011001, 0b01000010, 0b00111100,
 ];
 /// Bitcoin coin frame 2 (turning)
+#[cfg(feature = "display-ssd1306")]
 const SPRITE_COIN_2: [u8; 8] = [
     0b00011000, 0b00100100, 0b01001001, 0b01010101, 0b01010101, 0b01001001, 0b00100100, 0b00011000,
 ];
 /// Bitcoin coin frame 3 (edge)
+#[cfg(feature = "display-ssd1306")]
 const SPRITE_COIN_3: [u8; 8] = [
     0b00001000, 0b00010100, 0b00100010, 0b00101010, 0b00101010, 0b00100010, 0b00010100, 0b00001000,
 ];
 /// Lightning bolt (share accepted flash)
+#[cfg(feature = "display-ssd1306")]
 const SPRITE_LIGHTNING: [u8; 8] = [
     0b00000000, 0b00001100, 0b00010100, 0b00111100, 0b00011110, 0b00010100, 0b00011000, 0b00000000,
 ];
 /// Campfire (space heater vibes)
+#[cfg(feature = "display-ssd1306")]
 const SPRITE_CAMPFIRE: [u8; 8] = [
     0b00000000, 0b00010000, 0b00101000, 0b00010000, 0b01111110, 0b11111111, 0b01111110, 0b00111100,
 ];
 /// Rocket (milestone/achievement)
+#[cfg(feature = "display-ssd1306")]
 const SPRITE_ROCKET: [u8; 8] = [
     0b00010000, 0b00111000, 0b01111100, 0b01111100, 0b01111100, 0b00111000, 0b01000100, 0b10000010,
 ];
@@ -749,6 +825,7 @@ const SPRITE_ROCKET: [u8; 8] = [
 // ══════════════════════════════════════════════════════════════════════════
 
 /// Happy miner creature — wide eyes, smile, pickaxe hat (16x16, eyes open)
+#[cfg(feature = "display-ssd1306")]
 const CREATURE_HAPPY: [u8; 32] = [
     0x00, 0x00, 0x1C, 0x22, 0x49, 0x45, 0x41, 0x45, 0x49, 0x22, 0x1C, 0x00, 0x00, 0x00, 0x00,
     0x00, // top 8 rows
@@ -757,18 +834,21 @@ const CREATURE_HAPPY: [u8; 32] = [
 ];
 
 /// Happy miner blink frame — eyes closed (16x16)
+#[cfg(feature = "display-ssd1306")]
 const CREATURE_BLINK: [u8; 32] = [
     0x00, 0x00, 0x1C, 0x22, 0x41, 0x4D, 0x41, 0x4D, 0x41, 0x22, 0x1C, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x3C, 0x42, 0x81, 0xA5, 0x81, 0x81, 0x42, 0x3C, 0x18, 0x24, 0x24, 0x18, 0x00, 0x00, 0x00,
 ];
 
 /// Sad creature — droopy eyes, frown (16x16)
+#[cfg(feature = "display-ssd1306")]
 const CREATURE_SAD: [u8; 32] = [
     0x00, 0x00, 0x1C, 0x22, 0x41, 0x49, 0x41, 0x49, 0x41, 0x22, 0x1C, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x3C, 0x42, 0x81, 0x99, 0x81, 0xA5, 0x42, 0x3C, 0x18, 0x24, 0x24, 0x18, 0x00, 0x00, 0x00,
 ];
 
 /// Sleeping creature — closed eyes, Zzz (16x16)
+#[cfg(feature = "display-ssd1306")]
 const CREATURE_SLEEP: [u8; 32] = [
     0x00, 0x00, 0x1C, 0x22, 0x41, 0x4D, 0x41, 0x4D, 0x41, 0x22, 0x1C, 0x0E, 0x04, 0x0E, 0x02,
     0x06, // Zzz pattern top-right
@@ -777,16 +857,20 @@ const CREATURE_SLEEP: [u8; 32] = [
 ];
 
 /// Heart filled (5x7 column-major)
+#[cfg(feature = "display-ssd1306")]
 const HEART_FILLED: [u8; 5] = [0x0C, 0x1E, 0x3C, 0x1E, 0x0C];
 /// Heart empty (5x7 column-major)
+#[cfg(feature = "display-ssd1306")]
 const HEART_EMPTY: [u8; 5] = [0x0C, 0x12, 0x24, 0x12, 0x0C];
 
 /// Brightness breathing LUT (6 steps, hardware contrast register)
+#[cfg(feature = "display-ssd1306")]
 const BREATH_LUT: [u8; 6] = [0x60, 0x90, 0xCF, 0xFF, 0xCF, 0x90];
 
 // ══════════════════════════════════════════════════════════════════════════
 // HASHRATE FUN COMPARISONS
 // ══════════════════════════════════════════════════════════════════════════
+#[cfg(feature = "display-ssd1306")]
 const HASHRATE_COMPARISONS: &[&str] = &[
     "Game Boys mining!",
     "x Satoshi's 2009 HR",
@@ -801,6 +885,7 @@ const HASHRATE_COMPARISONS: &[&str] = &[
 // ══════════════════════════════════════════════════════════════════════════
 // MINING FORTUNE COOKIES
 // ══════════════════════════════════════════════════════════════════════════
+#[cfg(feature = "display-ssd1306")]
 const FORTUNE_COOKIES: &[&str] = &[
     "A golden nonce awaits",
     "Trust the math. Mine.",
@@ -813,6 +898,7 @@ const FORTUNE_COOKIES: &[&str] = &[
 ];
 
 /// Check if a block height is "special" (palindrome, round, repeating, sequential).
+#[cfg(feature = "display-ssd1306")]
 fn is_special_block(h: u32) -> Option<&'static str> {
     if h == 0 {
         return None;
@@ -1455,6 +1541,7 @@ fn spawn_stratum_thread(
 }
 
 /// Format a large number with K/M/G suffix to fit on 21-char OLED lines.
+#[cfg(feature = "display-ssd1306")]
 fn fmt_num(n: u64) -> String {
     if n >= 1_000_000_000 {
         format!("{}G", n / 1_000_000_000)
@@ -1468,6 +1555,7 @@ fn fmt_num(n: u64) -> String {
 }
 
 /// Compact GH/s display for 21-character OLED rows.
+#[cfg(feature = "display-ssd1306")]
 fn fmt_hashrate(hr_ghs: f64) -> String {
     if hr_ghs >= 1000.0 {
         format!("{:.2}T", hr_ghs / 1000.0)
@@ -1682,7 +1770,16 @@ fn main() {
             &mut i2c,
             &format!("DCENT_axe v{}", VERSION),
             "D-Central Tech.",
-            "",
+            // P1-O2: the panel speaks the dashboard's truth ladder from its
+            // very first frame. The web pill first-paints PENDING for the same
+            // reason: no telemetry yet is UNKNOWN, not "off".
+            //
+            // Round 2 (critic finding 1): RUNG first, detail second, like the
+            // other three init screens. The first word on the very first frame
+            // an operator ever sees is now the state, not the label "Mining:".
+            // 21 of 21 columns exactly - rung_status_line degrades to a bare
+            // PENDING if that ever stops fitting, it never clips.
+            &rung_status_line(MiningRung::TelemetryPending.panel_word(), "no telemetry"),
             "Booting...",
         );
     }
@@ -2305,19 +2402,16 @@ fn main() {
     PANIC_BUCK_ACTIVE_LOW.store(board_config.buck_enable_active_low, Ordering::Release);
 
     let mut mining_permitted = true;
-    let mut mining_block_reason: Option<String> = None;
+    let mut mining_block_reason: Option<BlockReason> = None;
 
-    if let Some(e) = config_safety_error.clone() {
+    if let Some(_e) = config_safety_error.clone() {
         mining_permitted = false;
-        mining_block_reason = Some(format!("Config safety validation failed: {}", e));
+        mining_block_reason = Some(BlockReason::ConfigUnsafe);
     }
 
     if safe_mode {
         mining_permitted = false;
-        mining_block_reason = Some(format!(
-            "SAFE MODE: {} task-WDT resets. POST /api/system/clear-safe-mode to recover.",
-            wdt_count
-        ));
+        mining_block_reason = Some(BlockReason::SafeModeWdt);
     }
 
     let power_gate_permitted = if board_config.plug_sense {
@@ -2346,7 +2440,8 @@ fn main() {
 
     if !power_gate_permitted {
         mining_permitted = false;
-        mining_block_reason = Some("Power input not detected by plug-sense gate".to_string());
+        mining_block_reason = Some(BlockReason::NoPlugSense);
+        error!("Power input not detected by plug-sense gate — mining disabled");
     }
 
     // Temperature sensor + Fan controller
@@ -2377,7 +2472,7 @@ fn main() {
             ),
             Err(e) => {
                 mining_permitted = false;
-                mining_block_reason = Some(format!("Thermal I2C mux channel select failed: {}", e));
+                mining_block_reason = Some(BlockReason::ThermalMux);
                 error!(
                     "Thermal I2C mux 0x{:02X} channel {} select failed: {} — mining disabled \
                      (no trusted temperature is reachable on this board without it)",
@@ -2485,10 +2580,7 @@ fn main() {
                     board_config.apply_nerdqx_tmp451_identity(true);
                 } else {
                     mining_permitted = false;
-                    mining_block_reason = Some(format!(
-                        "TMP451 diode mux: sensor init failed ({})",
-                        failed.join("; ")
-                    ));
+                    mining_block_reason = Some(BlockReason::ThermalDieSensor);
                     error!(
                         "TMP451 diode mux: {} of {} sensors failed to initialize ({}) — mining \
                          disabled (these ARE this board's die sensors; the TMP1075 is an airflow \
@@ -2501,7 +2593,7 @@ fn main() {
             }
             Err(e) => {
                 mining_permitted = false;
-                mining_block_reason = Some(format!("TMP451 diode mux unavailable: {}", e));
+                mining_block_reason = Some(BlockReason::ThermalDieSensor);
                 error!("TMP451 diode mux unavailable: {} — mining disabled", e);
             }
         }
@@ -2514,14 +2606,19 @@ fn main() {
                 let mut rpm2 = 0;
                 if let Err(e) = emc.set_fan_speed(&mut i2c, boot_fan_pct) {
                     mining_permitted = false;
-                    mining_block_reason = Some(format!("EMC2302 fan set failed: {}", e));
+                    mining_block_reason = Some(BlockReason::FanSet);
                     error!("EMC2302 fan set failed: {} - mining disabled", e);
                 } else {
                     std::thread::sleep(Duration::from_millis(500));
                     for _ in 0..5 {
                         rpm1 = emc.get_fan1_rpm(&mut i2c).unwrap_or(0);
                         rpm2 = emc.get_fan2_rpm(&mut i2c).unwrap_or(0);
-                        if rpm1 > 0 && rpm2 > 0 {
+                        // XPSAFE-8: stop as soon as every DECLARED fan has
+                        // proven tach. With the default both-headers population
+                        // this is the previous `rpm1 > 0 && rpm2 > 0`; with one
+                        // header declared it avoids spending the full retry
+                        // window waiting on a connector that is not populated.
+                        if board_config.declared_fan_tach_proven(rpm1, rpm2) {
                             break;
                         }
                         std::thread::sleep(Duration::from_millis(250));
@@ -2553,18 +2650,34 @@ fn main() {
                         );
                     }
                 }
+                // XPSAFE-8: the tach requirement itself is UNCHANGED — this
+                // board still must prove a tachometer. What is scoped is which
+                // headers the proof is demanded from, so a unit running one fan
+                // fails closed on the fan it actually has instead of failing
+                // closed forever on a header that was never populated. With the
+                // default both-headers population this is byte-for-byte the old
+                // `rpm1 == 0 || rpm2 == 0`.
                 if board_config.requires_fan_tach()
                     && !unsafe_lab_safety_bypass
-                    && (rpm1 == 0 || rpm2 == 0)
+                    && board_config.declared_fan_tach_missing(rpm1, rpm2)
                 {
                     mining_permitted = false;
-                    mining_block_reason = Some(format!(
-                        "EMC2302 required dual tach absent at boot: fan1={}, fan2={}",
-                        rpm1, rpm2
-                    ));
+                    mining_block_reason = Some(BlockReason::FanNoTach);
                     error!(
-                        "EMC2302 required dual tach absent at boot: fan1={}, fan2={} - mining disabled",
-                        rpm1, rpm2
+                        "EMC2302 required tach absent at boot: fan1={}, fan2={} (declared \
+                         population {:?}) - mining disabled",
+                        rpm1, rpm2, board_config.fans_populated
+                    );
+                } else if board_config.requires_fan_tach()
+                    && board_config.fans_populated != dcentaxe_hal::board::FanPopulation::Both
+                {
+                    // Surface the reduced redundancy explicitly: proof passed,
+                    // but this unit has no second fan to fall back on.
+                    warn!(
+                        "EMC2302 tach proof OK on declared population {:?} (fan1={}, fan2={}) - \
+                         mining permitted with NO fan redundancy; a single stall now relies on \
+                         the thermal ladder",
+                        board_config.fans_populated, rpm1, rpm2
                     );
                 }
                 fan_emc2302 = Some(emc);
@@ -2582,7 +2695,7 @@ fn main() {
             }
             Err(e) => {
                 mining_permitted = false;
-                mining_block_reason = Some(format!("Fan controller init failed: {}", e));
+                mining_block_reason = Some(BlockReason::FanInit);
                 error!(
                     "EMC2302 init failed: {} — mining disabled until fan control is available",
                     e
@@ -2593,11 +2706,11 @@ fn main() {
             Ok(emc) => {
                 if let Err(e) = emc.init_fan(&mut i2c) {
                     mining_permitted = false;
-                    mining_block_reason = Some(format!("EMC2101 fan init failed: {}", e));
+                    mining_block_reason = Some(BlockReason::FanInit);
                     error!("EMC2101 fan init failed: {} — mining disabled", e);
                 } else if let Err(e) = emc.set_fan_speed(&mut i2c, boot_fan_pct) {
                     mining_permitted = false;
-                    mining_block_reason = Some(format!("EMC2101 fan set failed: {}", e));
+                    mining_block_reason = Some(BlockReason::FanSet);
                     error!("EMC2101 fan set failed: {} — mining disabled", e);
                 } else {
                     if board_config.emc_ideality_factor != 0 {
@@ -2635,8 +2748,7 @@ fn main() {
                         }
                         if boot_rpm == 0 {
                             mining_permitted = false;
-                            mining_block_reason =
-                                Some("EMC2101 required tach absent at boot".to_string());
+                            mining_block_reason = Some(BlockReason::FanNoTach);
                             error!("EMC2101 tach stayed at 0 RPM during boot — mining disabled");
                         } else {
                             info!(
@@ -2668,8 +2780,7 @@ fn main() {
             }
             Err(e) => {
                 mining_permitted = false;
-                mining_block_reason =
-                    Some(format!("Expected EMC2101 fan controller missing: {}", e));
+                mining_block_reason = Some(BlockReason::FanMissing);
                 error!(
                     "Expected EMC2101 fan controller missing: {} — mining disabled",
                     e
@@ -2701,7 +2812,7 @@ fn main() {
                         }
                         if boot_fan_pct > 0 && boot_rpm == 0 {
                             mining_permitted = false;
-                            mining_block_reason = Some("GT fan tach absent at boot".to_string());
+                            mining_block_reason = Some(BlockReason::FanNoTach);
                             error!("EMC2103 tach stayed at 0 RPM during boot — mining disabled");
                         } else {
                             info!(
@@ -2725,14 +2836,13 @@ fn main() {
                     }
                     Err(_) => {
                         mining_permitted = false;
-                        mining_block_reason =
-                            Some("EMC2103 fan controller init failed".to_string());
+                        mining_block_reason = Some(BlockReason::FanInit);
                         error!("EMC2103 init failed — mining disabled");
                     }
                 }
             } else {
                 mining_permitted = false;
-                mining_block_reason = Some("Expected EMC2103 fan controller missing".to_string());
+                mining_block_reason = Some(BlockReason::FanMissing);
                 error!("Expected EMC2103 fan controller missing — mining disabled");
             }
         }
@@ -2914,8 +3024,8 @@ fn main() {
                     }
                     Err(e) => {
                         mining_permitted = false;
-                        mining_block_reason =
-                            Some(format!("Expander power-sequence setup failed: {}", e));
+                        mining_block_reason = Some(BlockReason::RailExpander);
+                        error!("Expander power-sequence setup failed: {}", e);
                         fail_closed_power_off(
                             "Expander power-sequence setup failed",
                             &state,
@@ -2928,8 +3038,8 @@ fn main() {
                 },
                 Err(e) => {
                     mining_permitted = false;
-                    mining_block_reason =
-                        Some(format!("Rail expander not found at 0x{:02X}: {}", addr, e));
+                    mining_block_reason = Some(BlockReason::RailExpander);
+                    error!("Rail expander not found at 0x{:02X}: {}", addr, e);
                     fail_closed_power_off(
                         "Rail expander not found",
                         &state,
@@ -2986,7 +3096,8 @@ fn main() {
                 }
                 Err(e) => {
                     mining_permitted = false;
-                    mining_block_reason = Some(format!("Expander ASIC LDO enable failed: {}", e));
+                    mining_block_reason = Some(BlockReason::RailLdo);
+                    error!("Expander ASIC LDO enable failed: {}", e);
                     fail_closed_power_off(
                         "Expander ASIC LDO enable failed",
                         &state,
@@ -3011,7 +3122,8 @@ fn main() {
             }
             Err(e) => {
                 mining_permitted = false;
-                mining_block_reason = Some(format!("ASIC LDO enable failed: {}", e));
+                mining_block_reason = Some(BlockReason::RailLdo);
+                error!("ASIC LDO enable failed: {}", e);
                 fail_closed_power_off(
                     "ASIC LDO enable failed",
                     &state,
@@ -3043,7 +3155,8 @@ fn main() {
             dcentaxe_hal::board::RailBringup::EnableGpio => {
                 if let Err(e) = gpio_ctrl.enable_buck(true) {
                     mining_permitted = false;
-                    mining_block_reason = Some(format!("Buck enable failed: {}", e));
+                    mining_block_reason = Some(BlockReason::RailBuck);
+                    error!("Buck enable failed: {}", e);
                     fail_closed_power_off(
                         "Buck enable failed",
                         &state,
@@ -3087,10 +3200,7 @@ fn main() {
             // can raise or lower this rail, so nothing can cut it either.
             dcentaxe_hal::board::RailBringup::NoActuator => {
                 mining_permitted = false;
-                mining_block_reason = Some(
-                    "Board has no rail actuator: no enable GPIO and no commandable regulator"
-                        .to_string(),
-                );
+                mining_block_reason = Some(BlockReason::RailNoActuator);
                 fail_closed_power_off(
                     "No rail actuator (no enable GPIO, no commandable regulator)",
                     &state,
@@ -3136,7 +3246,7 @@ fn main() {
                         std::thread::sleep(Duration::from_millis(100));
                     } else if board_config.model.has_voltage_control() {
                         mining_permitted = false;
-                        mining_block_reason = Some(format!("Power init failed: {:?}", e));
+                        mining_block_reason = Some(BlockReason::PowerInit);
                         error!(
                             "PowerManager init failed after 3 attempts: {:?} — mining disabled",
                             e
@@ -3180,7 +3290,8 @@ fn main() {
             ),
             Err(e) => {
                 mining_permitted = false;
-                mining_block_reason = Some(format!("Deferred buck enable failed: {}", e));
+                mining_block_reason = Some(BlockReason::RailBuck);
+                error!("Deferred buck enable failed: {}", e);
                 fail_closed_power_off(
                     "Deferred buck enable failed",
                     &state,
@@ -3218,7 +3329,8 @@ fn main() {
                 ),
                 Err(e) => {
                     mining_permitted = false;
-                    mining_block_reason = Some(format!("Deferred expander enable failed: {}", e));
+                    mining_block_reason = Some(BlockReason::RailExpander);
+                    error!("Deferred expander enable failed: {}", e);
                     fail_closed_power_off(
                         "Deferred expander enable failed",
                         &state,
@@ -3258,10 +3370,11 @@ fn main() {
             );
         } else {
             mining_permitted = false;
-            mining_block_reason = Some(format!(
+            mining_block_reason = Some(BlockReason::RailNoI2cCut);
+            error!(
                 "Board has no enable GPIO and its regulator ({:?}) cannot cut the rail over I2C",
                 power_mgr.regulator_type()
-            ));
+            );
             fail_closed_power_off(
                 "No enable GPIO and no I2C-cuttable regulator",
                 &state,
@@ -3275,7 +3388,7 @@ fn main() {
     if mining_permitted && board_config.model.has_voltage_control() {
         if let Err(e) = power_mgr.set_voltage(&mut i2c, config.target_voltage_mv) {
             mining_permitted = false;
-            mining_block_reason = Some(format!("Set voltage failed: {}", e));
+            mining_block_reason = Some(BlockReason::PowerSetVoltage);
             error!("Set voltage failed: {} — mining disabled", e);
             fail_closed_power_off(
                 "Set voltage failed after rail enable",
@@ -3314,6 +3427,39 @@ fn main() {
                 .collect::<Vec<_>>()
                 .join(" ")
         );
+
+        // ── XPSAFE-12: this diagnostic scan POKES the regulator ────────────
+        //
+        // `I2cBus::probe` is a ZERO-BYTE write — fine for an EEPROM or a fan
+        // controller, but to a PMBus part a write that carries no command byte
+        // is malformed, and the TPS546 records it as `STATUS_CML = 0x40`
+        // ("invalid or unsupported data received"). The scan runs AFTER
+        // `PowerManager::new`, so it re-dirtied a status word that init had just
+        // cleared.
+        //
+        // Nothing noticed for seventeen seconds, and then the supervisor's first
+        // fault check read `STATUS_WORD = 0x0202` and executed the unconditional
+        // POWER FAULT hard-kill — on a rail measuring 3.646 V / 11.7 V in /
+        // 20.1 A / 48 C, while the board was mining and submitting accepted
+        // shares. Diagnosed live on a Hex Supra, 2026-09-03.
+        //
+        // The flag is cleared here, immediately, by the code that caused it.
+        // This is not a relaxation of the power-fault posture: the kill stays
+        // unconditional, and any CML the supervisor sees from now on was raised
+        // by something other than our own bus scan.
+        {
+            match power_mgr.clear_faults(&mut i2c) {
+                Ok(status) => info!(
+                    "I2C scan: cleared the regulator CML the zero-byte probe just set                      (STATUS_WORD now 0x{:04x})",
+                    status
+                ),
+                Err(e) => warn!(
+                    "I2C scan: could not clear regulator faults after probing: {:?} — a \
+                     self-inflicted CML may trip the power-fault kill",
+                    e
+                ),
+            }
+        }
     }
 
     let (mut tmp_primary, tmp_secondary) = if board_config.temp_sensor
@@ -3374,7 +3520,7 @@ fn main() {
         }
         if primary.is_none() || secondary.is_none() {
             mining_permitted = false;
-            mining_block_reason = Some("TMP1075 sensor init failed".to_string());
+            mining_block_reason = Some(BlockReason::ThermalBoardSensor);
         }
         (primary, secondary)
     } else {
@@ -3419,8 +3565,7 @@ fn main() {
             });
         if boot_trusted_temp.is_none() {
             mining_permitted = false;
-            mining_block_reason =
-                Some("No trusted thermal source returned data at boot".to_string());
+            mining_block_reason = Some(BlockReason::ThermalNoSource);
             fail_closed_power_off(
                 "No trusted thermal source returned data at boot",
                 &state,
@@ -3535,8 +3680,14 @@ fn main() {
                 display.show_status(
                     &mut i2c,
                     &format!("DCENT_axe v{}", VERSION),
-                    &format!("{} chips OK", n),
-                    &format!("IP: {}", device_ip),
+                    // P1-O2: permitted, chips found, no hashrate yet = READY,
+                    // the same rung the dashboard shows for this state.
+                    // Round 2 (critic finding 2): composed by rung_status_line,
+                    // which cannot exceed 21 columns for ANY chip count - the
+                    // raw format! this replaced was clipped by draw_text from
+                    // the right, silently, with no ellipsis.
+                    &rung_status_line(MiningRung::Ready.panel_word(), &format!("{} chips OK", n)),
+                    &ip_row(&device_ip),
                     "Connecting to pool...",
                 );
                 n
@@ -3546,25 +3697,47 @@ fn main() {
                 display.show_status(
                     &mut i2c,
                     &format!("DCENT_axe v{}", VERSION),
-                    "ASIC init FAILED",
-                    &format!("IP: {}", device_ip),
+                    // P1-O2: chips == 0 means mining is not permitted = STANDBY.
+                    // Round 2: 20 of 21 columns - the tightest rung line on the
+                    // panel, and the reason the composer is bounded rather than
+                    // trusted.
+                    &rung_status_line(MiningRung::Standby.panel_word(), "ASIC FAILED"),
+                    &ip_row(&device_ip),
                     "Dashboard active",
                 );
                 0
             }
         }
     } else {
-        let reason = mining_block_reason
-            .clone()
-            .unwrap_or_else(|| "Hardware safety gate".to_string());
-        display.show_status(
-            &mut i2c,
-            &format!("DCENT_axe v{}", VERSION),
-            "Mining disabled",
-            &reason,
-            &format!("IP: {}", device_ip),
+        let reason = mining_block_reason.unwrap_or(BlockReason::SafetyGate);
+        // P1-O2: the fail-closed screen names the shared rung, so "the panel
+        // says STANDBY" and "the dashboard says STANDBY" are the same
+        // sentence.
+        //
+        // P1-O1: and the other three rows now say something an operator can
+        // USE. They used to be the firmware version, a 30-80 character
+        // sentence that draw_text clipped mid-word at column 21 with no
+        // ellipsis, and the IP. All four rows are composed by the bounded
+        // helpers, so no row on this screen can be clipped for any reason,
+        // any watchdog count or any address. The version leaves THIS screen
+        // only - every other boot frame still carries it - because a version
+        // an operator cannot act on is worth less, here, than the action
+        // they can.
+        let blocked = blocked_screen(
+            &rung_status_line(MiningRung::Standby.panel_word(), "disabled"),
+            reason,
+            wdt_count,
+            &device_ip,
         );
-        warn!("Mining disabled before ASIC init: {}", reason);
+        display.show_status(&mut i2c, &blocked[0], &blocked[1], &blocked[2], &blocked[3]);
+        // The full sentence is not lost, it is just not on the glass: the
+        // log keeps it, beside the exact code the panel is showing.
+        warn!(
+            "Mining disabled before ASIC init: {} [{}] -> {}",
+            reason.summary(),
+            code_line(reason, wdt_count),
+            reason.action()
+        );
         0
     };
     let mining_enabled = mining_permitted && chips > 0;
@@ -3581,16 +3754,47 @@ fn main() {
     // human-maintained count can never silently exceed the cap (the class of bug
     // that boot-looped against the previous 64 cap). Do NOT lower MAX_URI_HANDLERS.
     //
-    // Registered-handler accounting (re-verified 2026-06-14 after WF-E dashboard
-    // route changes — counts of `.fn_handler(` / `register_static(`):
-    //   api.rs              54  (`.fn_handler(`; includes donation disclosure)
-    //   auth.rs              5
-    //   mcp.rs               2
-    //   dashboard.rs        12  (/, /index.html + 10 register_static /dashboard/*)
-    //   ─────────────────  ─────
-    //   total               73  (cgminer_tcp is a TCP listener, not a URI handler)
+    // Registered-handler accounting — counted by INVOCATION, not by text
+    // (re-verified 2026-09-03 by `tools/count_handlers.py`, lane P1-I3).
+    //
+    // WHY THE OLD NUMBER WAS WRONG: a `.fn_handler(` written inside a helper —
+    // a `fn` like `dashboard::register_static`, or a
+    // `let name = |path: &str, …| { … }` closure — is written ONCE in the source
+    // but EXECUTED once per call site. Counting occurrences of the *text*
+    // `.fn_handler(` therefore reports FEWER handlers than the firmware actually
+    // registers, which is the dangerous direction for a cap that fails at boot.
+    // The table below counts registrations, and names every helper that makes the
+    // two columns differ:
+    //
+    //   file             text sites   registrations   why they differ
+    //   api.rs                   54              57   3 closures invoked twice:
+    //                                                 `register` → /api/system/
+    //                                                 statistics{,/dashboard};
+    //                                                 `register_ota_get` →
+    //                                                 /api/system/OTA{,WWW} (GET);
+    //                                                 `register_manifest` →
+    //                                                 /api/system/update/
+    //                                                 {package-,}manifest
+    //   auth.rs                   5               5   all literal URIs
+    //   mcp.rs                    2               2   /mcp GET + /mcp POST
+    //   dashboard.rs              3              12   `register_static()` is ONE
+    //                                                 site invoked 10× for the
+    //                                                 /dashboard/* assets, plus
+    //                                                 / and /index.html
+    //   ───────────────  ──────────  ──────────────
+    //   TOTAL                    64              76   text-only under-counts by 12
+    //
+    // Not counted here, deliberately: `cgminer_tcp` is a raw TCP listener, not a
+    // URI handler; and `provisioning.rs` registers 10 URIs (1 + an 8-path
+    // captive-portal `for` loop + 1) on its OWN short-lived `EspHttpServer`, whose
+    // cap is `Configuration::default().max_uri_handlers` (32) — it never consumes
+    // a slot from MAX_URI_HANDLERS.
+    //
+    // Re-run `python tools/count_handlers.py` after ANY route change. The
+    // `dcentaxe-core` guard `registered_handler_count_under_cap` recomputes this
+    // total from the sources and fails if the const drifts from reality.
     const MAX_URI_HANDLERS: usize = 96;
-    const REGISTERED_HANDLER_ESTIMATE: usize = 73;
+    const REGISTERED_HANDLER_ESTIMATE: usize = 76;
     // Compile-time floor guard: the estimate must always stay under the cap.
     const _: () = assert!(REGISTERED_HANDLER_ESTIMATE < MAX_URI_HANDLERS);
     // Runtime tripwire if a future edit pushes the count near the cap.
@@ -3887,11 +4091,14 @@ fn main() {
     // supervisor ticks measured over the rated PowerLimits envelope × margin.
     let mut ina_oc_strikes: u8 = 0;
     let mut fan1_ever_seen: bool = false; // Track if fan1 ever reported RPM > 0
+    #[cfg(feature = "display-ssd1306")]
     let mut display_page: u8 = 0;
+    #[cfg(feature = "display-ssd1306")]
     let mut notification_cooldown: u8 = 0; // Force carousel pages between notifications
     let mut identify_notification_cooldown: u8 = 0; // Avoid swarm-locate OLED storms
                                                     // B-ESP-10: the OLED is a read surface — strip any user:pass@ creds from the
                                                     // pool URL (host stays visible for at-the-miner diagnostics).
+    #[cfg(feature = "display-ssd1306")]
     let pool_display = format!(
         "{}:{}",
         crate::shared::sanitize_pool_url(&config.stratum.url),
@@ -3900,28 +4107,36 @@ fn main() {
 
     // Gamification: track previous values to detect events for OLED notifications
     let mut prev_accepted: u64 = 0;
+    #[cfg(feature = "display-ssd1306")]
     let mut prev_rejected: u64 = 0;
+    #[cfg(feature = "display-ssd1306")]
     let mut prev_best_diff: f64 = 0.0;
+    #[cfg(feature = "display-ssd1306")]
     let mut prev_clean_jobs: u64 = 0;
     let mut prev_streak: u32 = 0;
     let mut last_notified_share_milestone: u64 = 0;
     let mut previous_failover_active = false;
     let mut thermal_notification_active = false;
+    #[cfg(feature = "display-ssd1306")]
     let mut diary_tick: u32 = 0; // counts up for mining diary rotation
+    #[cfg(feature = "display-ssd1306")]
     let mut last_transition_flash: bool = false; // alternate to trigger flash on page change
 
     // v3 state variables
-    let mut screensaver_x: i16 = 10; // bouncing Bitcoin screensaver position
-    let mut screensaver_y: i16 = 5;
-    let mut screensaver_dx: i16 = 1;
-    let mut screensaver_dy: i16 = 1;
     let mut led_heartbeat_phase: u8 = 0; // 0-3 for heartbeat pattern
     let mut prev_heartbeat_speed: u8 = 2; // track speed changes for phase reset
     let mut prev_block_height: u32 = 0; // for special block detection
+    #[cfg(feature = "display-ssd1306")]
     let mut comparison_idx: usize = 0; // hashrate comparison rotation
+    #[cfg(feature = "display-ssd1306")]
     let mut fortune_idx: usize = 0; // fortune cookie rotation
+    #[cfg(feature = "display-ssd1306")]
     let mut pixel_art_frame: u8 = 0; // animation frame counter
+    #[cfg(feature = "display-ssd1306")]
     let mut companion_visit: u8 = 0; // rotates companion room/full-screen variants
+    // Display-only strobe state: on headless boards there is nothing to strobe, so the whole
+    // machine (declaration, consumer, both producers) lives behind the panel feature (P1-O4 fix).
+    #[cfg(feature = "display-ssd1306")]
     let mut pending_flash: u8 = 0; // non-blocking flash state machine (decrements each tick)
     let mut share_flash_tick: u8 = 0; // lightning sprite after share accepted
     let mut achievement_flash_tick: u8 = 0; // rocket sprite after achievement
@@ -3992,6 +4207,7 @@ fn main() {
         }
 
         // ── Non-blocking flash state machine (evolution/special block effects) ──
+        #[cfg(feature = "display-ssd1306")]
         if pending_flash > 0 {
             display.invert_display(&mut i2c, true);
             std::thread::sleep(Duration::from_millis(30));
@@ -4483,11 +4699,16 @@ fn main() {
                 fan1_ever_seen = true;
             }
             // Expose fan 1 and fan 2 independently through telemetry.
-            // Fault detection below still treats either missing Hex fan as unsafe.
-            let rpm = rpm1;
-            // Hex-class boards require tach on both fans. Treat 0 RPM as a fault
-            // after the existing multi-loop confirmation window below.
-            let dead = fan_speed > 0 && (rpm1 == 0 || rpm2 == 0);
+            // XPSAFE-8: the primary reading follows the DECLARED population, so
+            // a unit with only header 2 fitted reports its real fan here instead
+            // of a hardcoded 0 that would both mis-render and poison the stall
+            // kill. Per-header telemetry (fan1/fan2) stays literal.
+            let rpm = board_config.primary_tach_rpm(rpm1, rpm2);
+            // Hex-class boards require tach on every fan the operator declared
+            // present. Treat 0 RPM on a declared fan as a fault after the
+            // existing multi-loop confirmation window below. An undeclared
+            // header's permanent 0 is not a stall.
+            let dead = fan_speed > 0 && board_config.declared_fan_tach_missing(rpm1, rpm2);
             (rpm, dead)
         } else if let Some(ref emc) = temp_emc {
             let rpm = emc.read_fan_rpm(&mut i2c).unwrap_or(0);
@@ -5367,6 +5588,7 @@ fn main() {
                 )
             })
             .unwrap_or_else(|| "N/A".into());
+        #[cfg_attr(feature = "display-none", allow(unused_variables))]
         let (
             hr,
             accepted,
@@ -5377,8 +5599,6 @@ fn main() {
             streak,
             streak_best,
             sparkline,
-            temp_sparkline,
-            mood_sparkline,
             mood_now,
         ) = {
             let mut s = state.stats.lock().unwrap_or_else(|e| e.into_inner());
@@ -5392,8 +5612,6 @@ fn main() {
             let mood = s.mood_score(max_temp, fan_target);
             s.push_mood_sample(mood);
             let snap = s.snapshot();
-            let ts = s.temp_sparkline();
-            let ms = s.mood_sparkline();
             (
                 snap.hashrate_5m_ghs,
                 snap.accepted_shares,
@@ -5404,8 +5622,6 @@ fn main() {
                 snap.accept_streak,
                 snap.best_streak,
                 snap.hashrate_sparkline,
-                ts,
-                ms,
                 mood,
             )
         };
@@ -5506,7 +5722,7 @@ fn main() {
             // Achievement: Best Day Ever
             if achievements & nvs_config::ACH_BEST_DAY == 0 {
                 achievements |= nvs_config::ACH_BEST_DAY;
-                display.notify(
+                oled_notify!(display,
                     "** ACHIEVEMENT! **",
                     "Best Day Ever!",
                     "New all-time best!",
@@ -5540,7 +5756,10 @@ fn main() {
         // and tells its own story on the OLED.
         // ══════════════════════════════════════════════════════════════
 
-        diary_tick += 1;
+        #[cfg(feature = "display-ssd1306")]
+        {
+            diary_tick += 1;
+        }
         let efficiency = if hr > 0.001 {
             watts as f64 / (hr / 1000.0)
         } else {
@@ -5562,27 +5781,31 @@ fn main() {
         }
 
         // ── Streak break detection ──
+        #[cfg(feature = "display-ssd1306")]
         if rejected > prev_rejected && prev_rejected > 0 && prev_streak > 5 {
-            display.notify(
+            oled_notify!(display,
                 "(T_T) STREAK BROKEN!",
                 &format!("Was {} in a row!", prev_streak),
                 &format!("Record: {}", best_streak_ever.max(streak_best)),
                 "Build it back up!",
             );
         }
-        prev_rejected = rejected;
+        #[cfg(feature = "display-ssd1306")]
+        {
+            prev_rejected = rejected;
+        }
 
         // ── Streak milestones ──
         if streak > prev_streak && streak > 0 {
             if streak == 25 {
-                display.notify(
+                oled_notify!(display,
                     "(^_^) 25 STREAK!",
                     "No errors! Smooth!",
                     "Keep it going...",
                     &format!("Record: {}", best_streak_ever.max(streak_best)),
                 );
             } else if streak == 50 {
-                display.notify(
+                oled_notify!(display,
                     "\\(^o^)/ 50 STREAK!",
                     "FLAWLESS mining!",
                     "Half a century!",
@@ -5591,7 +5814,7 @@ fn main() {
                 // Achievement: Streak Master
                 if achievements & nvs_config::ACH_STREAK_50 == 0 {
                     achievements |= nvs_config::ACH_STREAK_50;
-                    display.notify(
+                    oled_notify!(display,
                         "** ACHIEVEMENT! **",
                         "Streak Master!",
                         "50 shares, 0 errors",
@@ -5605,7 +5828,7 @@ fn main() {
                     nvs_save_achievements = true;
                 }
             } else if streak == 100 {
-                display.notify(
+                oled_notify!(display,
                     "*** 100 STREAK! ***",
                     "(!!!!) LEGENDARY!",
                     "Triple digits baby!",
@@ -5624,7 +5847,7 @@ fn main() {
         // First Share
         if accepted >= 1 && (achievements & nvs_config::ACH_FIRST_SHARE == 0) {
             achievements |= nvs_config::ACH_FIRST_SHARE;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "First Share!",
                 "Your mining journey",
@@ -5636,7 +5859,7 @@ fn main() {
         // Centurion
         if accepted >= 100 && (achievements & nvs_config::ACH_CENTURION == 0) {
             achievements |= nvs_config::ACH_CENTURION;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Centurion!",
                 "100 shares accepted!",
@@ -5652,7 +5875,7 @@ fn main() {
         // Kilohash
         if accepted >= 1000 && (achievements & nvs_config::ACH_KILOHASH == 0) {
             achievements |= nvs_config::ACH_KILOHASH;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "KILOHASH!",
                 "1000 shares!",
@@ -5668,7 +5891,7 @@ fn main() {
         // Marathon (24 hours)
         if uptime >= 86400 && (achievements & nvs_config::ACH_MARATHON == 0) {
             achievements |= nvs_config::ACH_MARATHON;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Marathon Runner!",
                 "24 hours non-stop!",
@@ -5684,7 +5907,7 @@ fn main() {
         // Hot Stuff (survived thermal warning)
         if max_temp > WARNING_TEMP_C && (achievements & nvs_config::ACH_HOT_STUFF == 0) {
             achievements |= nvs_config::ACH_HOT_STUFF;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Hot Stuff!",
                 "Survived a thermal!",
@@ -5700,7 +5923,7 @@ fn main() {
         // Block Witness (100 blocks)
         if clean_jobs >= 100 && (achievements & nvs_config::ACH_BLOCK_WITNESS == 0) {
             achievements |= nvs_config::ACH_BLOCK_WITNESS;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Block Witness!",
                 "100 blocks witnessed!",
@@ -5719,7 +5942,7 @@ fn main() {
         // Speed Demon (hardware-relative threshold: ~80% of rated peak GH/s)
         if hr > speed_demon_threshold && (achievements & nvs_config::ACH_SPEED_DEMON == 0) {
             achievements |= nvs_config::ACH_SPEED_DEMON;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "TERAHASH CLUB!",
                 "Over 1 TH/s!",
@@ -5736,7 +5959,7 @@ fn main() {
         let hash_king_threshold: f64 = speed_demon_threshold * 1.1;
         if hr > hash_king_threshold && (achievements & nvs_config::ACH_HASH_KING == 0) {
             achievements |= nvs_config::ACH_HASH_KING;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Hash King!",
                 "Peak performance!",
@@ -5752,7 +5975,7 @@ fn main() {
         // Chill Miner (1 hour under 65C)
         if chill_miner_secs >= 3600 && (achievements & nvs_config::ACH_CHILL_MINER == 0) {
             achievements |= nvs_config::ACH_CHILL_MINER;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Cool & Collected!",
                 "1 hour under 65C!",
@@ -5768,7 +5991,7 @@ fn main() {
         // Diff Hunter (share diff > 1M)
         if best_diff > 1_000_000.0 && (achievements & nvs_config::ACH_DIFF_HUNTER == 0) {
             achievements |= nvs_config::ACH_DIFF_HUNTER;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Million Diff Club!",
                 "Diff > 1,000,000!",
@@ -5784,7 +6007,7 @@ fn main() {
         // Night Owl (16+ hours uptime)
         if uptime >= 57600 && (achievements & nvs_config::ACH_NIGHT_OWL == 0) {
             achievements |= nvs_config::ACH_NIGHT_OWL;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Night Owl!",
                 "16h+ night shift!",
@@ -5800,7 +6023,7 @@ fn main() {
         // Half-K (500 shares)
         if accepted >= 500 && (achievements & nvs_config::ACH_HALF_K == 0) {
             achievements |= nvs_config::ACH_HALF_K;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Half-K!",
                 "500 shares accepted!",
@@ -5816,7 +6039,7 @@ fn main() {
         // Warm Day (8 hours continuous mining)
         if uptime >= 28800 && (achievements & nvs_config::ACH_WARM_DAY == 0) {
             achievements |= nvs_config::ACH_WARM_DAY;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Warm Day!",
                 "8 hours non-stop!",
@@ -5832,7 +6055,7 @@ fn main() {
         // Streak 100 (100 shares without rejection)
         if streak >= 100 && (achievements & nvs_config::ACH_STREAK_100 == 0) {
             achievements |= nvs_config::ACH_STREAK_100;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Perfect Century!",
                 "100 in a row!",
@@ -5850,7 +6073,7 @@ fn main() {
         // Early Adopter (auto-grant ~30s after first boot)
         if uptime > 30 && (achievements & nvs_config::ACH_EARLY_ADOPTER == 0) {
             achievements |= nvs_config::ACH_EARLY_ADOPTER;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Early Adopter!",
                 "DCENT_axe pioneer!",
@@ -5870,7 +6093,7 @@ fn main() {
             && (achievements & nvs_config::ACH_EFFICIENCY == 0)
         {
             achievements |= nvs_config::ACH_EFFICIENCY;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Efficiency Expert!",
                 "Under 20 J/TH!",
@@ -5886,7 +6109,7 @@ fn main() {
         // Diamond Hands (7 days = 604800s continuous uptime)
         if uptime >= 604800 && (achievements & nvs_config::ACH_DIAMOND_HANDS == 0) {
             achievements |= nvs_config::ACH_DIAMOND_HANDS;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Diamond Hands!",
                 "7 days straight!",
@@ -5902,7 +6125,7 @@ fn main() {
         // Lucky Strike (share diff > 10M)
         if best_diff > 10_000_000.0 && (achievements & nvs_config::ACH_LUCKY_STRIKE == 0) {
             achievements |= nvs_config::ACH_LUCKY_STRIKE;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Lucky Strike!",
                 "10M diff nonce!",
@@ -5918,7 +6141,7 @@ fn main() {
         // Power Miser (under 10W for 1 hour)
         if low_power_secs >= 3600 && (achievements & nvs_config::ACH_POWER_MISER == 0) {
             achievements |= nvs_config::ACH_POWER_MISER;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Power Miser!",
                 "1hr under 10W!",
@@ -5934,7 +6157,7 @@ fn main() {
         // Block Party (1000 blocks witnessed)
         if clean_jobs >= 1000 && (achievements & nvs_config::ACH_BLOCK_PARTY == 0) {
             achievements |= nvs_config::ACH_BLOCK_PARTY;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Block Party!",
                 "1000 blocks seen!",
@@ -5950,7 +6173,7 @@ fn main() {
         // Creature Legend (10K+ lifetime shares = Legend evolution tier)
         if lifetime_shares >= 10000 && (achievements & nvs_config::ACH_CREATURE_LEGEND == 0) {
             achievements |= nvs_config::ACH_CREATURE_LEGEND;
-            display.notify(
+            oled_notify!(display,
                 "** ACHIEVEMENT! **",
                 "Creature Legend!",
                 "10K lifetime!",
@@ -5969,7 +6192,7 @@ fn main() {
             && (achievements & nvs_config::ACH_COMPLETIONIST == 0)
         {
             achievements |= nvs_config::ACH_COMPLETIONIST;
-            display.notify(
+            oled_notify!(display,
                 "*** COMPLETIONIST ***",
                 "ALL achievements!",
                 "You are LEGENDARY!",
@@ -5986,6 +6209,7 @@ fn main() {
         // ── Daily Mining Summary (once after 24h) ──
         if uptime >= 86400 && !daily_summary_shown && accepted > 0 {
             daily_summary_shown = true;
+            #[cfg(feature = "display-ssd1306")]
             let eff_grade = if efficiency < 20.0 {
                 "S+"
             } else if efficiency < 30.0 {
@@ -5997,7 +6221,7 @@ fn main() {
             } else {
                 "D"
             };
-            display.notify(
+            oled_notify!(display,
                 "DAY 1 COMPLETE!",
                 &format!("{} shares mined", accepted),
                 &format!("Best diff: {}", fmt_num(best_diff as u64)),
@@ -6006,6 +6230,7 @@ fn main() {
         }
 
         // ── Mining Diary: rare companion flavor (every ~144 ticks = ~12 min) ──
+        #[cfg(feature = "display-ssd1306")]
         if diary_tick % 144 == 0 && uptime > 60 && accepted > 0 {
             let energy_wh = watts as f64 * (uptime as f64 / 3600.0);
             let cups_of_coffee = (energy_wh / 100.0) as u64; // ~100 Wh per cup
@@ -6024,43 +6249,43 @@ fn main() {
             let uptime_mins = (uptime % 3600) / 60;
 
             match (diary_tick / 144) % 16 {
-                0 => display.notify(
+                0 => oled_notify!(display,
                     "(^_~) MINING DIARY",
                     &format!("{} shares today!", accepted),
                     &format!("{:.1} Wh consumed", energy_wh),
                     &format!("= {} cups of coffee", cups_of_coffee.max(1)),
                 ),
-                1 => display.notify(
+                1 => oled_notify!(display,
                     "(^_^) FUN FACT!",
                     &format!("{:.1} J/TH efficiency", efficiency),
                     &format!("Grade: {} silicon!", eff_grade),
                     "How's your chip?",
                 ),
-                2 => display.notify(
+                2 => oled_notify!(display,
                     "(*_*) SHARE WORK",
                     &format!("{} accepted", fmt_num(accepted)),
                     &format!("Best: {}", fmt_num(best_diff as u64)),
                     "Proof, not guesses",
                 ),
-                3 => display.notify(
+                3 => oled_notify!(display,
                     "(^v^) UPTIME!",
                     &format!("{}h {}m so far!", uptime_hrs, uptime_mins),
                     "That's dedication!",
                     "Your miner thanks u",
                 ),
-                4 => display.notify(
+                4 => oled_notify!(display,
                     "(o_o) NONCE REPORT",
                     &format!("Best: {}", fmt_num(best_diff as u64)),
                     &format!("ATH: {}", fmt_num(best_ever as u64)),
                     "Keep hunting!",
                 ),
-                5 => display.notify(
+                5 => oled_notify!(display,
                     "(B) SHARE COUNTER",
                     &format!("OK:{} ER:{}", fmt_num(accepted), rejected),
                     &format!("Streak:{}", streak),
                     "Pool-confirmed work",
                 ),
-                6 => display.notify(
+                6 => oled_notify!(display,
                     "[>_]# HACKER LOG",
                     &format!("PID:{} temp:{:.0}C", accepted, max_temp),
                     &format!("fan:{}% pwr:{:.1}W", fan_ctrl.current_speed(), watts),
@@ -6080,14 +6305,14 @@ fn main() {
                         _ => (hr * 1_000_000_000.0 / 10.0) as u64,        // pocket calc
                     };
                     if comparison_idx % HASHRATE_COMPARISONS.len() == 3 {
-                        display.notify(
+                        oled_notify!(display,
                             "(*_*) YOUR HASHRATE",
                             &fmt_hashrate(hr),
                             &format!("Best diff {}", fmt_num(best_diff as u64)),
                             "Local telemetry",
                         );
                     } else {
-                        display.notify(
+                        oled_notify!(display,
                             "(*_*) YOUR HASHRATE",
                             &format!("= {} {}", fmt_num(val), comp),
                             "Think about THAT!",
@@ -6099,7 +6324,7 @@ fn main() {
                 8 => {
                     // Fortune cookie
                     let fortune = FORTUNE_COOKIES[fortune_idx % FORTUNE_COOKIES.len()];
-                    display.notify(
+                    oled_notify!(display,
                         "(^_~) FORTUNE COOKIE",
                         &format!("\"{}\"", fortune),
                         "",
@@ -6120,7 +6345,7 @@ fn main() {
                     };
                     if next_threshold > 0 {
                         let need = next_threshold.saturating_sub(lifetime_shares);
-                        display.notify(
+                        oled_notify!(display,
                             &format!("{} {}", face, stage),
                             &format!("Lifetime: {}", fmt_num(lifetime_shares as u64)),
                             &format!("Next: {}sh to evolve", fmt_num(need as u64)),
@@ -6130,7 +6355,7 @@ fn main() {
                             ),
                         );
                     } else {
-                        display.notify(
+                        oled_notify!(display,
                             &format!("{} LEGEND!", face),
                             &format!("{} lifetime!", fmt_num(lifetime_shares as u64)),
                             "MAX EVOLUTION!",
@@ -6138,7 +6363,7 @@ fn main() {
                         );
                     }
                 }
-                10 => display.notify(
+                10 => oled_notify!(display,
                     "(^_^) YOUR BITAXE",
                     "is the cutest miner",
                     "on the network!",
@@ -6147,14 +6372,14 @@ fn main() {
                 11 => {
                     // Hall of fame peek
                     if best_nonce_diff > 0.0 {
-                        display.notify(
+                        oled_notify!(display,
                             "HALL OF FAME",
                             &format!("Best: 0x{:08X}", best_nonce_val),
                             &format!("Diff: {}", fmt_num(best_nonce_diff as u64)),
                             "Your proof of work!",
                         );
                     } else {
-                        display.notify(
+                        oled_notify!(display,
                             "HALL OF FAME",
                             "No best nonce yet!",
                             "Keep mining to find",
@@ -6163,25 +6388,25 @@ fn main() {
                     }
                 }
                 // New v4 creature idle chatter
-                12 => display.notify(
+                12 => oled_notify!(display,
                     "(^_^) CREATURE CHAT",
                     "I love warm hashes",
                     "*purrs in SHA256*",
                     "Feed me more nonces!",
                 ),
-                13 => display.notify(
+                13 => oled_notify!(display,
                     "(^v^) CREATURE CHAT",
                     "Tick tock next block!",
                     "Is that a new block?",
                     "I dream in hex...",
                 ),
-                14 => display.notify(
+                14 => oled_notify!(display,
                     "(o_o) CREATURE CHAT",
                     "My bits are tingling!",
                     "Something big is",
                     "coming... I feel it!",
                 ),
-                _ => display.notify(
+                _ => oled_notify!(display,
                     "(*_*) CREATURE CHAT",
                     "01001000 01001001",
                     "(thats HI in binary)",
@@ -6194,7 +6419,7 @@ fn main() {
         if accepted > prev_accepted && prev_accepted > 0 {
             share_flash_tick = 4; // companion lightning/eating animation, no popup spam
             if accepted % 25 == 0 {
-                display.notify(
+                oled_notify!(display,
                     "SHARE MILESTONE",
                     &format!("{} accepted", accepted),
                     &format!("Streak:{} Best:{}", streak, fmt_num(best_diff as u64)),
@@ -6210,16 +6435,20 @@ fn main() {
 
             // Check if evolution stage changed
             let (old_stage, _) = nvs_config::evolution_stage(old_lifetime);
+            #[cfg_attr(feature = "display-none", allow(unused_variables))]
             let (new_stage, new_face) = nvs_config::evolution_stage(lifetime_shares);
             if old_stage != new_stage {
-                display.notify(
+                oled_notify!(display,
                     "*** EVOLUTION! ***",
                     &format!("{} -> {}", old_stage, new_stage),
                     &format!("{}", new_face),
                     &format!("{} lifetime!", fmt_num(lifetime_shares as u64)),
                 );
                 // Non-blocking double flash for evolution (compound if already flashing)
-                pending_flash = pending_flash.saturating_add(4);
+                #[cfg(feature = "display-ssd1306")]
+                {
+                    pending_flash = pending_flash.saturating_add(4);
+                }
             }
 
             // Save lifetime shares every 10 new shares (reduce flash wear)
@@ -6230,8 +6459,9 @@ fn main() {
 
         // ── Special block easter eggs ──
         if block_height > 0 && block_height != prev_block_height {
+            #[cfg(feature = "display-ssd1306")]
             if let Some(special_msg) = is_special_block(block_height) {
-                display.notify(
+                oled_notify!(display,
                     &format!("** {} **", special_msg),
                     &format!("Block #{}", block_height),
                     "RARE BLOCK EVENT!",
@@ -6244,21 +6474,22 @@ fn main() {
         }
 
         // ── New best difficulty: creature is ECSTATIC! ──
+        #[cfg(feature = "display-ssd1306")]
         if best_diff > prev_best_diff && prev_best_diff > 0.0 && best_diff > 1000.0 {
             match (best_diff as u64) % 3 {
-                0 => display.notify(
+                0 => oled_notify!(display,
                     "(!!!) NEW RECORD!!!",
                     &format!("(*o*) Diff: {:.0}", best_diff),
                     &format!("Was: {:.0}", prev_best_diff),
                     "Im the GOAT miner!!",
                 ),
-                1 => display.notify(
+                1 => oled_notify!(display,
                     "\\(!!!!)/ RECORD!",
                     &format!("Diff: {:.0}!", best_diff),
                     "Thats my best EVER!",
                     "Screenshot this!",
                 ),
-                _ => display.notify(
+                _ => oled_notify!(display,
                     "(!!!!) HOLY NONCE!",
                     &format!("{:.0} difficulty!", best_diff),
                     "New personal best!",
@@ -6266,30 +6497,34 @@ fn main() {
                 ),
             };
         }
-        prev_best_diff = best_diff;
+        #[cfg(feature = "display-ssd1306")]
+        {
+            prev_best_diff = best_diff;
+        }
 
         // ── Milestone celebrations ──
+        #[cfg(feature = "display-ssd1306")]
         if accepted > 0 && accepted % 100 == 0 && accepted > prev_accepted {
             match (accepted / 100) % 4 {
-                0 => display.notify(
+                0 => oled_notify!(display,
                     &format!("*** {} SHARES! ***", accepted),
                     "\\(^o^)/ LEVEL UP!",
                     "Achievement unlocked!",
                     "Stack sats. Stay humb",
                 ),
-                1 => display.notify(
+                1 => oled_notify!(display,
                     &format!("*** {} SHARES! ***", accepted),
                     "(^_^)b CENTURY!",
                     "100 more shares done!",
                     "WAGMI!",
                 ),
-                2 => display.notify(
+                2 => oled_notify!(display,
                     &format!("*** {} SHARES! ***", accepted),
                     "(*_*) MILESTONE!",
                     "Mining is a marathon",
                     "not a sprint!",
                 ),
-                _ => display.notify(
+                _ => oled_notify!(display,
                     &format!("*** {} SHARES! ***", accepted),
                     "(/^o^)/ LEGEND!",
                     "Still hashing!",
@@ -6342,34 +6577,40 @@ fn main() {
         }
 
         // ── New block on the network! ──
+        #[cfg(feature = "display-ssd1306")]
         if clean_jobs > prev_clean_jobs && prev_clean_jobs > 0 {
             let blk = if block_height > 1 {
                 format!("Block #{}", block_height - 1)
             } else {
                 "New block found!".to_string()
             };
-            display.notify(
+            oled_notify!(display,
                 "NEW BLOCK",
                 &blk,
                 "Fresh work from pool",
                 &format!("HR {}", fmt_hashrate(hr)),
             );
         }
-        prev_clean_jobs = clean_jobs;
+        #[cfg(feature = "display-ssd1306")]
+        {
+            prev_clean_jobs = clean_jobs;
+        }
 
         // ── Uptime milestones — you're part of something bigger! ──
+        #[cfg(feature = "display-ssd1306")]
         let uptime_mins = uptime / 60;
+        #[cfg(feature = "display-ssd1306")]
         if uptime_mins > 0 && uptime_mins % 60 == 0 && uptime % 60 < 5 {
             // Every hour celebration
             let hours = uptime_mins / 60;
             match hours {
-                1 => display.notify(
+                1 => oled_notify!(display,
                     "(^_^) 1 HOUR!",
                     "You've been mining",
                     "for a whole hour!",
                     "Legend in the making",
                 ),
-                _ => display.notify(
+                _ => oled_notify!(display,
                     &format!("(^_^) {} HOURS!", hours),
                     "Still hashing strong!",
                     &format!("{} shares this run", accepted),
@@ -6379,63 +6620,64 @@ fn main() {
         }
 
         // ── Random Bitcoin wisdom (rare: about every 10 minutes) ──
+        #[cfg(feature = "display-ssd1306")]
         if uptime > 120 && (uptime * 7 + accepted) % 120 == 0 {
             match (uptime / 5) % 10 {
-                0 => display.notify(
+                0 => oled_notify!(display,
                     "(^_~) BITCOIN WISDOM",
                     "\"Running Bitcoin\"",
                     "- Hal Finney, 2009",
                     "And so are you!",
                 ),
-                1 => display.notify(
+                1 => oled_notify!(display,
                     "(^_^) YOU MATTER!",
                     "Every hash you mine",
                     "makes Bitcoin more",
                     "decentralized!",
                 ),
-                2 => display.notify(
+                2 => oled_notify!(display,
                     "(*_*) FUN FACT:",
                     "Your BitAxe does 1T",
                     "hashes per second!",
                     "Thats 1 TRILLION/s!",
                 ),
-                3 => display.notify(
+                3 => oled_notify!(display,
                     "(o_o) THINK ABOUT IT",
                     "You are literally",
                     "writing history in",
                     "the blockchain!",
                 ),
-                4 => display.notify(
+                4 => oled_notify!(display,
                     "{^_^} CYPHERPUNK!",
                     "Your miner. Your",
                     "rules. Your hashes.",
                     "Thats sovereignty!",
                 ),
-                5 => display.notify(
+                5 => oled_notify!(display,
                     "(^v^) DID YOU KNOW?",
                     "Home miners like you",
                     "are Bitcoin's immune",
                     "system! Stay strong!",
                 ),
-                6 => display.notify(
+                6 => oled_notify!(display,
                     "(^_^) WARM & HASHING",
                     "Your BitAxe is also",
                     "a space heater!",
                     "Free heat + sats!",
                 ),
-                7 => display.notify(
+                7 => oled_notify!(display,
                     "(*o*) SOLO MINING:",
                     "Low odds, but if you",
                     "find a block = 3.125",
                     "BTC! Dream big!",
                 ),
-                8 => display.notify(
+                8 => oled_notify!(display,
                     "(^_~) REMEMBER:",
                     "Not your node,",
                     "not your rules.",
                     "Run your own hash!",
                 ),
-                _ => display.notify(
+                _ => oled_notify!(display,
                     "(@_@) NERD ALERT:",
                     "SHA256 was designed",
                     "by the NSA in 2001!",
@@ -6447,10 +6689,13 @@ fn main() {
         // ── OLED display carousel (notifications interleaved, not blocking) ──
         // Urgent safety notifications preempt immediately. Normal notifications are
         // sparse so hashrate/IP/block/companion pages remain the main OLED experience.
+        #[cfg(feature = "display-ssd1306")]
         if notification_cooldown > 0 {
             notification_cooldown -= 1;
         }
+        #[cfg(feature = "display-ssd1306")]
         let urgent_notification = display.has_urgent_notification();
+        #[cfg(feature = "display-ssd1306")]
         if (urgent_notification || notification_cooldown == 0)
             && display.show_notification_if_pending(&mut i2c)
         {
@@ -6463,39 +6708,76 @@ fn main() {
             notification_cooldown = if urgent_notification { 2 } else { 5 };
             continue;
         }
+        #[cfg(feature = "display-ssd1306")]
         let autotuner_enabled = state.autotuner.lock().map(|at| at.enabled).unwrap_or(false);
         // Carousel uses an anchor pattern: hashrate, IP, block, and companion repeat
         // frequently. Trivia/education pages are demoted so the OLED stays useful.
         // Logical pages: 0=mining, 1=device/IP, 2=weather, 3=halving, 4=autotuner,
         //                5=sats, 6=hall of fame, 7=companion (full-screen)
+        #[cfg(feature = "display-ssd1306")]
         let carousel: &[u8] = if autotuner_enabled {
             &[0, 7, 1, 0, 4, 7, 0, 2, 1, 7, 0, 2]
         } else {
             &[0, 7, 1, 0, 2, 7, 0, 1, 7, 5, 2, 6]
         };
+        #[cfg(feature = "display-ssd1306")]
         let page_count = carousel.len() as u8;
+        #[cfg(feature = "display-ssd1306")]
         let logical_page = carousel[display_page as usize % carousel.len()];
-
-        // ── Mining Creature with Evolution + Activity Poses ──
-        // Evolution stage provides the base face, activity overrides for special states
-        let (evo_stage_name, evo_face) = nvs_config::evolution_stage(lifetime_shares);
-        let creature = if !mining_enabled {
-            "(x_x)" // dead — no ASIC
-        } else if max_temp > 85.0 {
-            "(>_<)!!!" // overheating — overrides evolution
-        } else if hr < 1.0 && uptime > 30 {
-            "(-_-)zzZ" // sleeping (low hashrate)
-        } else if accepted > 0 && (uptime % 10) < 3 {
-            "(^_^)~~#" // eating hash (alternates every few ticks)
-        } else if streak > 20 {
-            "\\(^o^)/" // celebrating (big streak)
-        } else if pixel_art_frame % 2 == 0 {
-            evo_face // eyes open (breathing animation)
-        } else {
-            "(-.-)" // eyes closed (idle breathing)
+        // Standard Stratum jobs do not carry a network id; Bitcoin mainnet and
+        // testnet share the same 210,000-block subsidy interval, so the height
+        // of the last job is unambiguous on either. A solo-mesh job carries its
+        // configured chain, but mesh jobs share the pool's event channel, so
+        // `block_height` may belong to EITHER source: on a regtest mesh (150
+        // blocks) the interval is therefore unknowable and no bar is drawn
+        // (blind critic P1-O5, finding 2). The chain is read from the LIVE
+        // config like its two sibling readers, not the boot snapshot (finding 3).
+        #[cfg(feature = "display-ssd1306")]
+        let halving_interval: Option<u32> = {
+            #[cfg(feature = "lora")]
+            let chain = {
+                let live = state.config.lock().unwrap_or_else(|e| e.into_inner());
+                if live.mesh.solo_mesh_empty_active() {
+                    let configured = live.mesh.solo_chain.trim();
+                    if configured.eq_ignore_ascii_case("mainnet")
+                        || configured.eq_ignore_ascii_case("main")
+                    {
+                        ChainId::Mainnet
+                    } else if configured.eq_ignore_ascii_case("testnet")
+                        || configured.eq_ignore_ascii_case("test")
+                    {
+                        ChainId::Testnet
+                    } else {
+                        ChainId::Regtest
+                    }
+                } else {
+                    ChainId::Mainnet
+                }
+            };
+            #[cfg(not(feature = "lora"))]
+            let chain = ChainId::Mainnet;
+            if matches!(chain, ChainId::Regtest) {
+                None
+            } else {
+                Some(chain.subsidy_halving_interval())
+            }
         };
+        #[cfg(feature = "display-ssd1306")]
+        let halving = halving_interval.and_then(|interval| halving_progress(block_height, interval));
+
+        // ── Mining Creature: the evolution stage name (companion page) ──
+        // P1-O2: the ASCII face that used to be composed here was drawn on page
+        // 0 row 3, where the shared rung word now lives. It duplicated the 8x8
+        // pixel-art sprite already in that frame's top-left corner and the
+        // 16x16 companion that owns page 7 — and, the actual defect, it gated
+        // on the BOOT-TIME `mining_enabled` while the word beside it gated on
+        // the runtime state, so a board killed at runtime rendered a live face
+        // next to `OFF`. The sprites keep the companion; the word is now true.
+        #[cfg(feature = "display-ssd1306")]
+        let (evo_stage_name, _evo_face) = nvs_config::evolution_stage(lifetime_shares);
 
         // Select pixel art sprite based on mining state (lightning/rocket override)
+        #[cfg(feature = "display-ssd1306")]
         let active_sprite = if share_flash_tick > 0 {
             &SPRITE_LIGHTNING // flash after share accepted
         } else if achievement_flash_tick > 0 {
@@ -6524,7 +6806,10 @@ fn main() {
                 &SPRITE_COIN_3
             }
         };
-        pixel_art_frame = pixel_art_frame.wrapping_add(1);
+        #[cfg(feature = "display-ssd1306")]
+        {
+            pixel_art_frame = pixel_art_frame.wrapping_add(1);
+        }
 
         // ── Day/Night cycle (based on uptime) ──
         let day_phase = match uptime / 3600 {
@@ -6535,16 +6820,19 @@ fn main() {
         };
 
         // Screen transition flash effect (only on actual page change)
+        #[cfg(feature = "display-ssd1306")]
         if last_transition_flash {
             display.invert_display(&mut i2c, true);
             std::thread::sleep(Duration::from_millis(30));
             display.invert_display(&mut i2c, false);
             last_transition_flash = false;
         }
+        #[cfg(feature = "display-ssd1306")]
         if logical_page != 7 {
             display.set_contrast(&mut i2c, 0xCF);
         }
 
+        #[cfg(feature = "display-ssd1306")]
         match logical_page {
             0 => {
                 // Page 0: Mining HUD. Keep this dense enough to be useful, but not noisy.
@@ -6595,20 +6883,33 @@ fn main() {
                     );
                 }
 
-                // Line 3: companion state + current block, the two most requested anchors.
-                let pet_state = if !runtime_mining_active {
-                    "OFF"
-                } else if max_temp > 85.0 {
-                    "HOT"
-                } else if hr < 1.0 && uptime > 30 {
-                    "SLEEP"
-                } else if share_flash_tick > 0 {
-                    "FED"
-                } else if day_phase == "night" {
-                    "NITE"
-                } else {
-                    "HASH"
-                };
+                // Line 3: the SHARED mining rung, the block anchor, then any
+                // companion flavour that still fits.
+                //
+                // P1-O2: `MINING` / `READY` / `STANDBY` / `PENDING` are the web
+                // dashboard's own pill words, resolved by the one shared
+                // `resolve_rung`, so the panel can no longer contradict the
+                // browser (CRITIC_RUBRIC.md H7) and a permitted-but-idle board
+                // is finally distinguishable from a stopped one — both used to
+                // read `SLEEP`. `runtime_mining_active` is the discriminator on
+                // BOTH pages now; `true` is the first-data gate, which the
+                // carousel has already satisfied (it drew this tick's snapshot),
+                // so PENDING belongs to the boot screens. The old flavour words
+                // survive as DECORATIONS that `fit_line` drops first when the
+                // 21-column line is full — the truth is never what gets clipped.
+                //
+                // Round 2 (critic finding 6): the decoration comes from the ONE
+                // shared table, with the same four inputs the companion page
+                // passes. Two chains used to diverge here - this page knew
+                // about nightfall and the companion page did not, so the same
+                // tick could decorate one and leave the other bare.
+                let rung = resolve_rung(true, runtime_mining_active, hr > 0.0);
+                let deco = rung_decoration(
+                    max_temp > 85.0,
+                    share_flash_tick > 0,
+                    achievement_flash_tick > 0,
+                    day_phase == "night",
+                );
                 let block_short = if block_height > 0 {
                     format!("B:{}", block_height)
                 } else {
@@ -6617,7 +6918,7 @@ fn main() {
                 display.draw_text(
                     0,
                     24,
-                    &format!("{} {} {}", creature, pet_state, block_short),
+                    &fit_line(&[rung.panel_word(), &block_short], deco, TEXT_COLUMNS),
                 );
 
                 let _ = display.flush(&mut i2c);
@@ -6645,13 +6946,14 @@ fn main() {
                 );
             }
             2 => {
-                // Page 2: Block Progress + Temperature Weather
-                let block_str = if block_height > 0 {
-                    format!("BLOCK #{}", block_height)
+                // Page 2: height-derived halving progress + temperature weather.
+                // Unknown height means no bar: an empty bar would still look
+                // like a measured zero and recreate the lie this lane removes.
+                let halving_line = if let Some((_, blocks_to_halving)) = halving {
+                    format!("HALVING: {} LEFT", blocks_to_halving)
                 } else {
-                    "BLOCK #???".to_string()
+                    "HALVING: ---".to_string()
                 };
-                let progress = ((uptime % 600) as f32) / 600.0;
 
                 let weather = if max_temp > 85.0 {
                     "SCORCHING!"
@@ -6667,9 +6969,12 @@ fn main() {
                 let forecast = if max_temp > 70.0 { "Fan:MAX" } else { "Stable" };
 
                 display.clear();
-                display.draw_centered(0, &block_str);
-                display.draw_progress_bar(2, 9, 80, progress);
-                display.draw_text(86, 8, &format!("{:.0}%", progress * 100.0));
+                display.draw_centered(0, &halving_line);
+                if let Some((progress, _)) = halving {
+                    display.draw_progress_bar(2, 9, 80, progress);
+                    // Floor, never round: 209,999/210,000 must not read "100%" beside "1 LEFT".
+                    display.draw_text(86, 8, &format!("{}%", (progress * 100.0).floor() as u32));
+                }
                 display.draw_centered(16, &format!("{} {:.0}C", weather, max_temp));
                 display.draw_text(
                     0,
@@ -6677,50 +6982,6 @@ fn main() {
                     &format!("Fan:{}% {}", fan_ctrl.current_speed(), forecast),
                 );
                 let _ = display.flush(&mut i2c);
-            }
-            3 => {
-                // Page 3: Halving Countdown + Difficulty Epoch
-                if block_height > 0 {
-                    let next_halving = ((block_height / 210_000) + 1) * 210_000;
-                    let halving_progress = (block_height % 210_000) as f32 / 210_000.0;
-                    let blocks_remaining = next_halving - block_height;
-                    let days_remaining = blocks_remaining as f32 * 10.0 / 1440.0; // ~10 min/block
-
-                    // Difficulty epoch (2016 blocks)
-                    let epoch_num = block_height / 2016;
-                    let epoch_progress = (block_height % 2016) as f32 / 2016.0;
-                    let epoch_blocks_left = 2016 - (block_height % 2016);
-                    let epoch_days = epoch_blocks_left as f32 * 10.0 / 1440.0;
-
-                    display.clear();
-                    display.draw_text(
-                        0,
-                        0,
-                        &format!(
-                            "HALVING #{} in {}d",
-                            next_halving / 210_000,
-                            days_remaining as u32
-                        ),
-                    );
-                    display.draw_progress_bar(2, 9, 90, halving_progress);
-                    display.draw_text(96, 8, &format!("{:.0}%", halving_progress * 100.0));
-                    display.draw_text(
-                        0,
-                        16,
-                        &format!("EPOCH #{} ~{}d left", epoch_num, epoch_days as u32),
-                    );
-                    display.draw_progress_bar(2, 25, 90, epoch_progress);
-                    display.draw_text(96, 24, &format!("{:.0}%", epoch_progress * 100.0));
-                    let _ = display.flush(&mut i2c);
-                } else {
-                    display.show_status(
-                        &mut i2c,
-                        "HALVING COUNTDOWN",
-                        "Waiting for block...",
-                        "Need block height",
-                        "from pool first",
-                    );
-                }
             }
             4 if autotuner_enabled => {
                 // Page 4: Autotuner (only when enabled)
@@ -6771,52 +7032,32 @@ fn main() {
                 );
             }
             6 => {
-                // Hall of Fame + Bitcoin Timeline OR Network hashrate
-                if (uptime / 5) % 2 == 0 {
-                    // Hall of Fame
-                    display.clear();
-                    display.draw_centered(0, "-- HALL OF FAME --");
-                    if best_nonce_diff > 0.0 {
-                        display.draw_text(0, 8, &format!("Best: 0x{:08X}", best_nonce_val));
-                        display.draw_text(
-                            0,
-                            16,
-                            &format!("Diff: {}", fmt_num(best_nonce_diff as u64)),
-                        );
-                    } else {
-                        display.draw_text(0, 8, "No trophy yet!");
-                        display.draw_text(0, 16, "Mine to earn one!");
-                    }
-                    // Bitcoin timeline: genesis 2009 → last BTC ~2140
-                    let timeline_pct = 0.13_f32;
+                // Hall of Fame: the operator's own best-ever share, honestly.
+                //
+                // P1-O5: this page used to alternate every 5s with two
+                // fabricated sub-pages — a Bitcoin-supply-schedule progress
+                // bar driven by a hardcoded constant with no data behind it,
+                // and a network-hashrate comparison line (no such field
+                // exists anywhere in this firmware; confirmed by a
+                // workspace-wide grep). Both are removed rather than
+                // replaced: the honest reachable form of the same
+                // halving/epoch math already lives on page 2 (P1-O4's dead
+                // page-3 arm), so this page does not need a second,
+                // redundant copy of it.
+                display.clear();
+                display.draw_centered(0, "-- HALL OF FAME --");
+                if best_nonce_diff > 0.0 {
+                    display.draw_text(0, 8, &format!("Best: 0x{:08X}", best_nonce_val));
                     display.draw_text(
                         0,
-                        24,
-                        &format!("BTC Timeline: {:.0}%", timeline_pct * 100.0),
+                        16,
+                        &format!("Diff: {}", fmt_num(best_nonce_diff as u64)),
                     );
-                    display.draw_progress_bar(78, 25, 48, timeline_pct);
-                    let _ = display.flush(&mut i2c);
                 } else {
-                    // Smarter network context page
-                    let tagline = match (uptime / 5) % 6 {
-                        1 => "David vs Goliath!",
-                        3 => "But you MATTER!",
-                        5 => "Decentralization!",
-                        _ => "Every hash counts!",
-                    };
-                    display.clear();
-                    display.draw_centered(0, "- YOU vs THE WORLD -");
-                    // Draw a bar representing the network, with one bright pixel = you
-                    display.draw_hline(2, 14, 124);
-                    display.draw_hline(2, 18, 124);
-                    display.set_pixel(3, 15, true);
-                    display.set_pixel(3, 16, true);
-                    display.set_pixel(3, 17, true);
-                    display.draw_text(0, 8, "^you");
-                    display.draw_text(74, 8, "^600EH/s");
-                    display.draw_centered(24, tagline);
-                    let _ = display.flush(&mut i2c);
+                    display.draw_text(0, 8, "No trophy yet!");
+                    display.draw_text(0, 16, "Mine to earn one!");
                 }
+                let _ = display.flush(&mut i2c);
             }
             7 => {
                 // Companion page: mostly Tamagotchi pet room, with periodic full-height moments.
@@ -6862,19 +7103,26 @@ fn main() {
                 } else {
                     "BLK:---".to_string()
                 };
-                let activity = if !runtime_mining_active {
-                    "Offline"
-                } else if max_temp > 85.0 {
-                    "TOO HOT"
-                } else if hr < 1.0 {
-                    "Zzz..."
-                } else if share_flash_tick > 0 {
-                    "Nom nonce"
-                } else if achievement_flash_tick > 0 {
-                    "Proud!"
-                } else {
-                    "Mining hard"
-                };
+                // P1-O2: the companion page reads the SAME rung as page 0 and
+                // as the dashboard — one resolver, one vocabulary, one
+                // discriminator. This string lands in two slots of different
+                // widths (15 columns in the full-pet layout at x=36, 11 in the
+                // pet room at x=22 with the wattage at x=90), so it is fitted
+                // against the TIGHTER of the two and the rung word is never the
+                // part that gets clipped.
+                //
+                // Round 2 (critic finding 6): one table, same four inputs as
+                // page 0 - byte-identical argument list, pinned by a
+                // dcentaxe-core source contract, so the two pages can no longer
+                // describe the same tick differently.
+                let pet_rung = resolve_rung(true, runtime_mining_active, hr > 0.0);
+                let pet_deco = rung_decoration(
+                    max_temp > 85.0,
+                    share_flash_tick > 0,
+                    achievement_flash_tick > 0,
+                    day_phase == "night",
+                );
+                let activity = fit_line(&[pet_rung.panel_word()], pet_deco, PET_ACTIVITY_COLUMNS);
 
                 let full_pet = share_flash_tick > 0
                     || achievement_flash_tick > 0
@@ -6887,7 +7135,7 @@ fn main() {
                     // 32px-tall creature owns the screen; right side keeps key status.
                     display.draw_bitmap_2x(0, 0, creature_sprite, 16, 16);
                     display.draw_text(36, 0, creature_name);
-                    display.draw_text(36, 8, activity);
+                    display.draw_text(36, 8, &activity);
                     display.draw_text(36, 16, &format!("{} {}", hr_str, temp_str));
                     display.draw_text(36, 24, &block_str);
                 } else {
@@ -6909,97 +7157,40 @@ fn main() {
                         }
                     }
                     display.draw_text(64, 16, &format!("OK:{}", fmt_num(accepted)));
-                    display.draw_text(22, 25, activity);
+                    display.draw_text(22, 25, &activity);
                     display.draw_text(90, 24, &format!("{:.0}W", watts));
                 }
 
                 let _ = display.flush(&mut i2c);
             }
-            _ => {
-                // Screensaver: Bouncing Bitcoin OR Mood/Thermal
-                if (uptime / 5) % 2 == 0 {
-                    // Bouncing Bitcoin screensaver (like DVD logo)
-                    display.clear();
-                    // Update position (clamp first, then bounce detect)
-                    screensaver_x += screensaver_dx * 3;
-                    screensaver_y += screensaver_dy * 2;
-                    screensaver_x = screensaver_x.clamp(0, 118);
-                    screensaver_y = screensaver_y.clamp(0, 24);
-                    if screensaver_x <= 0 || screensaver_x >= 118 {
-                        screensaver_dx = -screensaver_dx;
-                    }
-                    if screensaver_y <= 0 || screensaver_y >= 24 {
-                        screensaver_dy = -screensaver_dy;
-                    }
-                    // Draw Bitcoin coin sprite at bouncing position
-                    let coin_frame = if (uptime / 2) % 3 == 0 {
-                        &SPRITE_COIN_1
-                    } else if (uptime / 2) % 3 == 1 {
-                        &SPRITE_COIN_2
-                    } else {
-                        &SPRITE_COIN_3
-                    };
-                    display.draw_bitmap(
-                        screensaver_x as usize,
-                        screensaver_y as usize,
-                        coin_frame,
-                        8,
-                        8,
-                    );
-                    // Small text overlay
-                    display.draw_text(0, 0, "BTC");
-                    let _ = display.flush(&mut i2c);
-                } else {
-                    // Mood + Thermal sparkline page (dual stacked sparklines)
-                    let mood_label = match mood_now {
-                        9..=10 => "ECSTATIC",
-                        7..=8 => "HAPPY",
-                        5..=6 => "CONTENT",
-                        3..=4 => "MEH",
-                        1..=2 => "SAD",
-                        _ => "DEAD",
-                    };
-                    let trend = if temp_sparkline[15] > temp_sparkline[12] + 2.0 {
-                        "RISING"
-                    } else if temp_sparkline[15] < temp_sparkline[12] - 2.0 {
-                        "FALLING"
-                    } else {
-                        "STABLE"
-                    };
-                    display.clear();
-                    display.draw_text(0, 0, &format!("MOOD:{} {}/10", mood_label, mood_now));
-
-                    // Mood sparkline (normalize 0-10 to 0.0-1.0)
-                    let mut mood_norm = [0.0f32; 16];
-                    for i in 0..16 {
-                        mood_norm[i] = mood_sparkline[i] as f32 / 10.0;
-                    }
-                    display.draw_sparkline(0, 8, &mood_norm, 2);
-
-                    display.draw_text(0, 16, &format!("TEMP:{:.0}C {}", max_temp, trend));
-
-                    // Thermal sparkline
-                    let temp_max = temp_sparkline
-                        .iter()
-                        .cloned()
-                        .fold(0.0_f32, f32::max)
-                        .max(1.0);
-                    let mut temp_norm = [0.0f32; 16];
-                    for i in 0..16 {
-                        temp_norm[i] = temp_sparkline[i] / temp_max;
-                    }
-                    display.draw_sparkline(0, 24, &temp_norm, 2);
-
-                    let _ = display.flush(&mut i2c);
-                }
-            }
+            // Unreachable by construction, and kept only because `match` on a
+            // `u8` must be exhaustive. `logical_page` is read out of one of the
+            // two `carousel` arrays above; between them they hold only
+            // 0,1,2,4,5,6,7, and `4` appears only in the array chosen when
+            // `autotuner_enabled` is true — the same local the guarded arm
+            // tests — so the guard above can never fall through to here.
+            //
+            // P1-O4 deleted the two bodies that used to sit behind this fact:
+            // page 3 (halving/difficulty-epoch countdown) and the bouncing
+            // Bitcoin / mood-sparkline screensaver. Neither page id was in
+            // either array, so neither had ever been drawn on a panel; both
+            // were compiled into every SSD1306 image and, before this lane's
+            // cfg gate, into every headless image too. `dcentaxe-core`'s
+            // `p1_o4_headless_carousel_guards` pins the arrays against the arms
+            // so a dead page cannot come back unnoticed.
+            _ => {}
         }
+        #[cfg(feature = "display-ssd1306")]
         let next_page = (display_page + 1) % page_count;
         // Only flash on full-rotation wrap (return to page 0), not every page change
+        #[cfg(feature = "display-ssd1306")]
         if next_page == 0 && display_page != 0 {
             last_transition_flash = true;
         }
-        display_page = next_page;
+        #[cfg(feature = "display-ssd1306")]
+        {
+            display_page = next_page;
+        }
 
         // ── LED heartbeat pattern (replaces simple toggle) ──
         // Pattern: ON(100ms) OFF(100ms) ON(100ms) OFF(700ms) — like a real heartbeat

@@ -9,6 +9,7 @@ import { api } from './api/client';
 import type { SetupStatusResponse } from './api/types';
 import { SetupWizard } from './components/wizard/SetupWizard';
 import { AppShell } from './components/AppShell';
+import { useHashRoute } from './utils/router';
 import { AlertBanner } from './components/common/AlertBanner';
 import { DaemonStatusBanner } from './components/common/DaemonStatusBanner';
 import { BootPhaseBanner } from './components/common/BootPhaseBanner';
@@ -38,6 +39,8 @@ export default function App() {
   const settings = useMinerStore(s => s.settings);
   const updateSettings = useMinerStore(s => s.updateSettings);
   const currentPage = useMinerStore(s => s.currentPage);
+  const setCurrentPage = useMinerStore(s => s.setCurrentPage);
+  useHashRoute(setCurrentPage);
   const betaView = useBetaView();
   const dashboardVersion = useDashboardVersion();
   const [loading, setLoading] = useState(true);
@@ -108,6 +111,10 @@ export default function App() {
       cancelled = true;
     };
   }, [updateSettings]);
+
+  if (currentPage.split('/')[0] === 'help') {
+    return <AppShell />;
+  }
 
   if (loading) {
     /* F1 wave5 splash — premium first-paint identity (glass plinth, warm

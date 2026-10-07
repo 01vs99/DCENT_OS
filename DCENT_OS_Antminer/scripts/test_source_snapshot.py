@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from typing import Optional
 
 
@@ -52,6 +53,31 @@ class SourceSnapshotTests(unittest.TestCase):
 
     def create(self, **kwargs):
         return SNAPSHOT.create_snapshot(self.repo, self.commit, self.base, **kwargs)
+
+    def test_release_common_directory_resolves_linked_worktree_on_host(self):
+        from release_source_git import read_source
+        linked = self.base / "linked"
+        run_git(self.repo, "worktree", "add", "--detach", str(linked), self.commit)
+        self.assertTrue(pathlib.Path(read_source(linked, "git-common-dir")).samefile(self.repo / ".git"))
+        self.assertEqual(read_source(linked, "commit"), self.commit)
+        self.assertTrue(read_source(linked, "epoch", self.commit).isdigit())
+
+    @unittest.skipUnless(os.name == "posix", "Windows-created linked worktree under WSL")
+    def test_windows_git_fallback_retains_exact_root_and_same_object_reader(self):
+        answers = [
+            subprocess.CompletedProcess([], 128, b"", b"not a git repository"),
+            subprocess.CompletedProcess([], 0, b"D:/linked/repo\n", b""),
+            subprocess.CompletedProcess([], 0, str(self.repo).encode() + b"\n", b""),
+            subprocess.CompletedProcess([], 0, b"sha1\n", b""),
+        ]
+        with patch.object(SNAPSHOT.shutil, "which", return_value="git.exe"), patch.object(SNAPSHOT.subprocess, "run", side_effect=answers) as run:
+            objects = SNAPSHOT.GitObjects(self.repo)
+        self.assertEqual([call.args[0][0] for call in run.call_args_list], ["git", "git.exe", "wslpath", "git.exe"])
+        self.assertEqual(objects.git_program, "git.exe")
+        with patch.object(SNAPSHOT.subprocess, "Popen") as popen:
+            objects.__enter__()
+        self.assertEqual(popen.call_args.args[0], ("git.exe", "cat-file", "--batch"))
+        self.assertEqual(popen.call_args.kwargs["cwd"], self.repo)
 
     def test_snapshot_uses_objects_not_mutated_worktree_and_preserves_modes(self) -> None:
         (self.repo / "plain.txt").write_bytes(b"live mutation\n")
@@ -119,6 +145,94 @@ class SourceSnapshotTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 with self.assertRaises(SNAPSHOT.SnapshotError):
                     SNAPSHOT._parse_tree(raw, 20, "")
+
+    def _commit_release_mirror(self):
+        mirror = self.repo / "public-releases"
+        mirror.mkdir()
+        (mirror / "old-binary.txt").write_bytes(b"published mirror, not build source\n")
+        run_git(self.repo, "add", "public-releases/old-binary.txt")
+        # The submodule object is deliberately unavailable in this repository.
+        run_git(self.repo, "update-index", "--add", "--cacheinfo", "160000", "ab" * 20, "public-releases/unrelated")
+        run_git(self.repo, "commit", "-qm", "unrelated release mirror")
+        self.commit = run_git(self.repo, "rev-parse", "HEAD").decode().strip()
+
+    def test_release_projection_omits_only_mirror_and_authenticates_original_commit(self):
+        self._commit_release_mirror()
+        with self.assertRaisesRegex(SNAPSHOT.SnapshotError, "Gitlinks"):
+            self.create()
+        first = self.create(profile=SNAPSHOT.RELEASE_PROFILE)
+        second = self.create(profile=SNAPSHOT.RELEASE_PROFILE)
+        try:
+            self.assertEqual(first.snapshot.read_bytes(), second.snapshot.read_bytes())
+            descriptor = SNAPSHOT.verify_snapshot(first.snapshot, self.commit)
+            proof = SNAPSHOT.verify_against_git(self.repo, self.commit, first.snapshot)
+            self.assertEqual(proof["commit_oid"], self.commit)
+            self.assertEqual(descriptor["schema"], SNAPSHOT.RELEASE_SCHEMA)
+            self.assertEqual(descriptor["scope"]["claim"], SNAPSHOT.RELEASE_CLAIM)
+            self.assertEqual(descriptor["projection"], {
+                "profile": SNAPSHOT.RELEASE_PROFILE,
+                "excluded_roots": ["public-releases"],
+                "omitted_trees": [{"path": "public-releases", "git_mode": "040000", "tree_oid": run_git(self.repo, "rev-parse", "HEAD:public-releases").decode().strip()}],
+            })
+            self.assertFalse((first.tree / "public-releases").exists())
+            self.assertEqual((first.tree / "plain.txt").read_bytes(), b"committed\n")
+            retained = self.base / "retained.json"
+            retained.write_bytes(first.snapshot.read_bytes())
+            self.assertEqual(SNAPSHOT.verify_descriptor_against_git(self.repo, self.commit, retained)["snapshot_id"], first.snapshot_id)
+            descriptor["projection"]["omitted_trees"][0]["tree_oid"] = "cd" * 20
+            body = dict(descriptor); body.pop("snapshot_id")
+            descriptor["snapshot_id"] = SNAPSHOT.sha256_bytes(SNAPSHOT.canonical_bytes(body))
+            retained.write_bytes(SNAPSHOT.canonical_bytes(descriptor))
+            with self.assertRaisesRegex(SNAPSHOT.SnapshotError, "trusted Git objects"):
+                SNAPSHOT.verify_descriptor_against_git(self.repo, self.commit, retained)
+        finally:
+            SNAPSHOT.destroy_snapshot(first.snapshot, first.destroy_token)
+            SNAPSHOT.destroy_snapshot(second.snapshot, second.destroy_token)
+
+    def test_release_projection_retains_included_gitlink_and_symlink_refusals(self):
+        self._commit_release_mirror()
+        run_git(self.repo, "update-index", "--add", "--cacheinfo", "160000", "ab" * 20, "DCENT_OS_Antminer/hidden-module")
+        run_git(self.repo, "commit", "-qm", "included unsupported submodule")
+        commit = run_git(self.repo, "rev-parse", "HEAD").decode().strip()
+        with self.assertRaisesRegex(SNAPSHOT.SnapshotError, "Gitlinks"):
+            SNAPSHOT.create_snapshot(self.repo, commit, self.base, profile=SNAPSHOT.RELEASE_PROFILE)
+        run_git(self.repo, "update-index", "--force-remove", "DCENT_OS_Antminer/hidden-module")
+        blob = run_git(self.repo, "hash-object", "-w", "--stdin", input_bytes=b"../../public-releases/old-binary.txt").decode().strip()
+        run_git(self.repo, "update-index", "--add", "--cacheinfo", "120000", blob, "DCENT_OS_Antminer/escape")
+        run_git(self.repo, "commit", "-qm", "included unsupported symlink")
+        commit = run_git(self.repo, "rev-parse", "HEAD").decode().strip()
+        with self.assertRaisesRegex(SNAPSHOT.SnapshotError, "symlinks"):
+            SNAPSHOT.create_snapshot(self.repo, commit, self.base, profile=SNAPSHOT.RELEASE_PROFILE)
+
+    def test_release_projection_cannot_widen_exclusions_or_claim_full_tree(self):
+        created = self.create(profile=SNAPSHOT.RELEASE_PROFILE)
+        try:
+            descriptor = json.loads(created.snapshot.read_bytes())
+            for mutation in ("scope", "excluded_roots", "schema"):
+                forged = json.loads(json.dumps(descriptor))
+                if mutation == "scope":
+                    forged["scope"]["claim"] = SNAPSHOT.SNAPSHOT_CLAIM
+                elif mutation == "excluded_roots":
+                    forged["projection"]["excluded_roots"].append("projects")
+                else:
+                    forged["schema"] = SNAPSHOT.SCHEMA
+                body = dict(forged); body.pop("snapshot_id")
+                forged["snapshot_id"] = SNAPSHOT.sha256_bytes(SNAPSHOT.canonical_bytes(body))
+                with self.subTest(mutation=mutation), self.assertRaises(SNAPSHOT.SnapshotError):
+                    SNAPSHOT._validate_descriptor(forged)
+        finally:
+            SNAPSHOT.destroy_snapshot(created.snapshot, created.destroy_token)
+
+    def test_release_projection_refuses_non_tree_or_case_alias_at_excluded_root(self):
+        blob = run_git(self.repo, "hash-object", "-w", "--stdin", input_bytes=b"file, not subtree").decode().strip()
+        for mode, kind, oid, path in (
+            ("100644", "blob", blob, "public-releases"),
+            ("160000", "commit", self.commit, "public-releases"),
+            ("100644", "blob", blob, "Public-Releases"),
+        ):
+            commit = self._commit_tree_entry(mode, kind, oid, path)
+            with self.subTest(mode=mode, path=path), self.assertRaises(SNAPSHOT.SnapshotError):
+                SNAPSHOT.create_snapshot(self.repo, commit, self.base, profile=SNAPSHOT.RELEASE_PROFILE)
 
     def test_portable_case_collision_is_rejected(self) -> None:
         oid = bytes.fromhex("22" * 20)
@@ -236,6 +350,74 @@ class SourceSnapshotTests(unittest.TestCase):
         self.assertEqual(queried, verified_result["descriptor_sha256"])
         subprocess.run((sys.executable, os.fspath(TOOL), "destroy", "--token", result["destroy_token"], result["snapshot"]), check=True)
         self.assertFalse(pathlib.Path(result["stage"]).exists())
+
+
+
+class WindowsBridgeFilesystemTests(unittest.TestCase):
+    """_windows_bridge_filesystem drives the NTFS-mount mode relaxation."""
+
+    def _table(self, tmpdir, lines):
+        table = pathlib.Path(tmpdir) / "mounts"
+        table.write_text(
+            chr(10).join(lines) + chr(10), encoding="utf-8"
+        )
+        return table
+
+    def test_drvfs_mount_is_detected_longest_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = pathlib.Path(tmp) / "stage"
+            stage.mkdir()
+            table = self._table(
+                tmp,
+                [
+                    "overlay / overlay rw 0 0",
+                    "drvfs " + stage.parent.as_posix() + " drvfs rw 0 0",
+                ],
+            )
+            self.assertTrue(
+                SNAPSHOT._windows_bridge_filesystem(stage, mount_table=table)
+            )
+
+    def test_native_ext4_keeps_exact_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = pathlib.Path(tmp) / "stage"
+            stage.mkdir()
+            table = self._table(
+                tmp,
+                [
+                    "overlay / overlay rw 0 0",
+                    "/dev/sda1 / ext4 rw 0 0",
+                ],
+            )
+            self.assertFalse(
+                SNAPSHOT._windows_bridge_filesystem(stage, mount_table=table)
+            )
+
+    def test_missing_mount_table_fails_closed_to_exact_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = pathlib.Path(tmp) / "stage"
+            stage.mkdir()
+            self.assertFalse(
+                SNAPSHOT._windows_bridge_filesystem(
+                    stage, mount_table=pathlib.Path(tmp) / "absent"
+                )
+            )
+
+    def test_nested_mount_prefix_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = pathlib.Path(tmp) / "a" / "stage"
+            stage.mkdir(parents=True)
+            table = self._table(
+                tmp,
+                [
+                    "drvfs " + stage.parent.as_posix() + " drvfs rw 0 0",
+                    "/dev/sda1 / ext4 rw 0 0",
+                ],
+            )
+            self.assertTrue(
+                SNAPSHOT._windows_bridge_filesystem(stage, mount_table=table)
+            )
+
 
 
 if __name__ == "__main__":

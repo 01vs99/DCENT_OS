@@ -1,0 +1,126 @@
+{
+  "source_receipt_sha256": "8d40486588c769aebd9f63b2ca68dc236ba6123e5fd9345c774e4e63eb0e6ca9",
+  "source_elf_sha256": "386b88490154b1007ca15d0f529749664ec641743d7f132127ec078c196df1df",
+  "cases": [
+    {
+      "response_hex": "55aa3a00000000",
+      "raw_adc_be16": 0,
+      "voltage_bits": 0
+    },
+    {
+      "response_hex": "00ff100000ff89",
+      "raw_adc_be16": 0,
+      "voltage_bits": 0
+    },
+    {
+      "response_hex": "55aa3a00010000",
+      "raw_adc_be16": 1,
+      "voltage_bits": 4582574750436065018
+    },
+    {
+      "response_hex": "00ff100001ff89",
+      "raw_adc_be16": 1,
+      "voltage_bits": 4582574750436065018
+    },
+    {
+      "response_hex": "55aa3a00ff0000",
+      "raw_adc_be16": 255,
+      "voltage_bits": 4618671101449439543
+    },
+    {
+      "response_hex": "00ff1000ffff89",
+      "raw_adc_be16": 255,
+      "voltage_bits": 4618671101449439543
+    },
+    {
+      "response_hex": "55aa3a01000000",
+      "raw_adc_be16": 256,
+      "voltage_bits": 4618698123047203766
+    },
+    {
+      "response_hex": "00ff100100ff89",
+      "raw_adc_be16": 256,
+      "voltage_bits": 4618698123047203766
+    },
+    {
+      "response_hex": "55aa3a01ff0000",
+      "raw_adc_be16": 511,
+      "voltage_bits": 4623188774825645572
+    },
+    {
+      "response_hex": "00ff1001ffff89",
+      "raw_adc_be16": 511,
+      "voltage_bits": 4623188774825645572
+    },
+    {
+      "response_hex": "55aa3a02000000",
+      "raw_adc_be16": 512,
+      "voltage_bits": 4623202285624527684
+    },
+    {
+      "response_hex": "00ff100200ff89",
+      "raw_adc_be16": 512,
+      "voltage_bits": 4623202285624527684
+    },
+    {
+      "response_hex": "55aa3a02010000",
+      "raw_adc_be16": 513,
+      "voltage_bits": 4623215796423409795
+    },
+    {
+      "response_hex": "00ff100201ff89",
+      "raw_adc_be16": 513,
+      "voltage_bits": 4623215796423409795
+    },
+    {
+      "response_hex": "55aa3a03ff0000",
+      "raw_adc_be16": 1023,
+      "voltage_bits": 4627699129852457124
+    },
+    {
+      "response_hex": "00ff1003ffff89",
+      "raw_adc_be16": 1023,
+      "voltage_bits": 4627699129852457124
+    },
+    {
+      "response_hex": "55aa3a04000000",
+      "raw_adc_be16": 1024,
+      "voltage_bits": 4627706166726874890
+    },
+    {
+      "response_hex": "00ff100400ff89",
+      "raw_adc_be16": 1024,
+      "voltage_bits": 4627706166726874890
+    },
+    {
+      "response_hex": "55aa3affff0000",
+      "raw_adc_be16": 65535,
+      "voltage_bits": 4654727654539935089
+    },
+    {
+      "response_hex": "00ff10ffffff89",
+      "raw_adc_be16": 65535,
+      "voltage_bits": 4654727654539935089
+    }
+  ],
+  "request_hex": "55aa043a003e",
+  "sleep_nanoseconds": [
+    50000000,
+    20000000,
+    20000000,
+    20000000,
+    20000000,
+    20000000,
+    20000000,
+    20000000
+  ],
+  "read_indices": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ]
+}

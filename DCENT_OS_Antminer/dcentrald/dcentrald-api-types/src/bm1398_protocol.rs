@@ -214,6 +214,146 @@ pub const S19_PRO_NBP1901_CHAIN_SPEC: Nbp1901S19ProChainSpec = Nbp1901S19ProChai
     production_uart_relay_writes: &S19_PRO_NBP1901_PRODUCTION_UART_RELAY_WRITES,
 };
 
+/// First-party stock per-board geometry for one BM1398-family hashboard
+/// bin (Gauntlet B6, 2026-09-02).
+///
+/// Geometry ONLY. Unlike [`Nbp1901S19ProChainSpec`], this type carries no
+/// core-register or UART-relay dialect: those arrays are recovered from
+/// the stock **NBP1901** miner binary and are not proven for the other
+/// bins' separate stock builds. Nothing here authorizes a runtime — the
+/// Lane-F identity-joined admission and fail-closed energize intercept
+/// stay the only path to a native runtime, and the post-energize
+/// GetAddress confirmation stays sealed to NBP1901's 114-frame window
+/// (a 76-chip bin's window expectation is recorded as data below, with
+/// no admission consumer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Bm1398BoardGeometry {
+    /// Stock `topol.conf` `machine` field (hashboard bin name).
+    pub board_name: &'static str,
+    pub model: &'static str,
+    /// Stock `chain.chain_asic_num`.
+    pub expected_chip_count: u16,
+    /// Stock `chain.chain_row` × `chain.chain_column` placement grid.
+    pub chain_row: u8,
+    pub chain_column: u8,
+    /// Stock `chain.chain_domain_num`.
+    pub voltage_domain_count: u8,
+    /// Stock `chain.domain_asic_num`.
+    pub chips_per_voltage_domain: u8,
+    /// Stock `asic.asic_addr_interval`.
+    pub address_interval: u8,
+    pub address_plan: LinearAddressPlan,
+}
+
+/// The shared 76-chip / interval-3 address plan for the two 76-chip BM1398
+/// air bins (S19 NBS1902 and T19 NBT1903 — identical geometry, different
+/// boards). One const so both bins provably use the same plan.
+pub const BM1398_76CHIP_INTERVAL3_ADDRESS_PLAN: LinearAddressPlan =
+    match LinearAddressPlan::try_new(0, 76, 3) {
+        Ok(plan) => plan,
+        Err(_) => panic!("invalid built-in 76-chip interval-3 address plan"),
+    };
+
+/// S19 classic (NBS1902): 76 BM1398P/chain, 8×10 grid, 38 domains × 2,
+/// address interval 3. First-party source: stock
+/// `s19-20211116/components/minerfs.image.gz.tree/etc/topol.conf`
+/// (asicminingsupplies mirror, Phase A §3.7) — the settle for the
+/// dossier's "76-hint vs 114" divergence: the two boards are genuinely
+/// different bins shipped under one model line.
+pub const S19_NBS1902_BOARD_GEOMETRY: Bm1398BoardGeometry = Bm1398BoardGeometry {
+    board_name: "NBS1902",
+    model: "S19",
+    expected_chip_count: 76,
+    chain_row: 8,
+    chain_column: 10,
+    voltage_domain_count: 38,
+    chips_per_voltage_domain: 2,
+    address_interval: 3,
+    address_plan: BM1398_76CHIP_INTERVAL3_ADDRESS_PLAN,
+};
+
+/// S19 Pro (NBP1901): 114 BM1398P/chain, 12×10 grid, 38 domains × 3,
+/// interval 2 — the geometry row of the fully-RE'd
+/// [`S19_PRO_NBP1901_CHAIN_SPEC`], restated here so all three bins share
+/// one first-party-sourced table.
+pub const S19_PRO_NBP1901_BOARD_GEOMETRY: Bm1398BoardGeometry = Bm1398BoardGeometry {
+    board_name: "NBP1901",
+    model: "S19 Pro",
+    expected_chip_count: 114,
+    chain_row: 12,
+    chain_column: 10,
+    voltage_domain_count: 38,
+    chips_per_voltage_domain: 3,
+    address_interval: 2,
+    address_plan: S19_PRO_NBP1901_ADDRESS_PLAN,
+};
+
+/// T19 (NBT1903): 76 BM1398P/chain, 8×10 grid, 38 domains × 2, interval
+/// 3 — the same physical bin family as S19 NBS1902 under the T19 model.
+/// First-party source: stock
+/// `t19-20230320/components/minerfs.image.gz.tree/etc/topol.conf`
+/// (Phase A §3.7). This settles the dossier's G7 T19 row desk-side; the
+/// VNish "3×76" chain-population reading stays a live-capture question.
+pub const T19_NBT1903_BOARD_GEOMETRY: Bm1398BoardGeometry = Bm1398BoardGeometry {
+    board_name: "NBT1903",
+    model: "T19",
+    expected_chip_count: 76,
+    chain_row: 8,
+    chain_column: 10,
+    voltage_domain_count: 38,
+    chips_per_voltage_domain: 2,
+    address_interval: 3,
+    address_plan: BM1398_76CHIP_INTERVAL3_ADDRESS_PLAN,
+};
+
+/// Exact BHB28611 stock topology, from Bitmain S19a 20221206
+/// `components/minerfs.image.gz.tree/etc/topol.conf`. BM1398S has four
+/// internal ASIC domains; the PCB has nine series domains of eight chips.
+/// Neither quantity may be replaced by the NBS1902 38-by-two layout.
+pub const S19A_BHB28611_BOARD_GEOMETRY: Bm1398BoardGeometry = Bm1398BoardGeometry {
+    board_name: "BHB28611",
+    model: "S19a",
+    expected_chip_count: 72,
+    chain_row: 9,
+    chain_column: 8,
+    voltage_domain_count: 9,
+    chips_per_voltage_domain: 8,
+    address_interval: 3,
+    address_plan: match LinearAddressPlan::try_new(0, 72, 3) {
+        Ok(plan) => plan,
+        Err(_) => panic!("invalid BHB28611 address plan"),
+    },
+};
+
+/// Exact S19+ model-info from the held VNish rc5 hwscan constructor 0x7ed14
+/// and serializer 0x22310: BHB28701, three chains of 80, interval 3,
+/// num_rows=8 / num_cols=10, ten domains of eight. Bitmain's maintenance
+/// guide independently states the 80-chip / ten-domain topology. Neither
+/// source establishes a measured physical EEPROM page or runtime result.
+pub const S19_PLUS_BHB28701_BOARD_GEOMETRY: Bm1398BoardGeometry = Bm1398BoardGeometry {
+    board_name: "BHB28701",
+    model: "S19+",
+    expected_chip_count: 80,
+    chain_row: 8,
+    chain_column: 10,
+    voltage_domain_count: 10,
+    chips_per_voltage_domain: 8,
+    address_interval: 3,
+    address_plan: match LinearAddressPlan::try_new(0, 80, 3) {
+        Ok(plan) => plan,
+        Err(_) => panic!("invalid BHB28701 address plan"),
+    },
+};
+
+/// Exact vendor topology rows. These data alone grant no energization.
+pub const BM1398_AIR_BOARD_GEOMETRIES: [Bm1398BoardGeometry; 5] = [
+    S19_NBS1902_BOARD_GEOMETRY,
+    S19_PRO_NBP1901_BOARD_GEOMETRY,
+    T19_NBT1903_BOARD_GEOMETRY,
+    S19A_BHB28611_BOARD_GEOMETRY,
+    S19_PLUS_BHB28701_BOARD_GEOMETRY,
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Bm1398FpgaMidstateMode {
@@ -592,6 +732,103 @@ pub const BM1398_JIG_PRE_OPEN_CORE_FIXTURE_MILLIVOLTS: u16 = 15_000;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Gauntlet B6 (2026-09-02): the three first-party stock bins. Every
+    /// row is pinned to the stock `topol.conf` values verbatim (Phase A
+    /// §3.7), and the NBP1901 row must agree exactly with the fully-RE'd
+    /// [`S19_PRO_NBP1901_CHAIN_SPEC`] so the two tables can never drift.
+    #[test]
+    fn air_board_geometries_match_first_party_stock_topol() {
+        let s19 = S19_NBS1902_BOARD_GEOMETRY;
+        assert_eq!(
+            (s19.expected_chip_count, s19.chain_row, s19.chain_column),
+            (76, 8, 10)
+        );
+        assert_eq!(
+            (
+                s19.voltage_domain_count,
+                s19.chips_per_voltage_domain,
+                s19.address_interval
+            ),
+            (38, 2, 3)
+        );
+        // row × column is the physical PLACEMENT GRID (80 positions,
+        // 76 populated — the topol `domain` coordinate table skips the
+        // empty slots); domains × per-domain is the populated count.
+        assert_eq!(s19.chain_row as u16 * s19.chain_column as u16, 80);
+        assert_eq!(
+            s19.voltage_domain_count as u16 * s19.chips_per_voltage_domain as u16,
+            s19.expected_chip_count
+        );
+        let pro = S19_PRO_NBP1901_BOARD_GEOMETRY;
+        assert_eq!(
+            (pro.expected_chip_count, pro.chain_row, pro.chain_column),
+            (114, 12, 10)
+        );
+        assert_eq!(
+            (
+                pro.voltage_domain_count,
+                pro.chips_per_voltage_domain,
+                pro.address_interval
+            ),
+            (38, 3, 2)
+        );
+        let t19 = T19_NBT1903_BOARD_GEOMETRY;
+        assert_eq!(
+            (t19.expected_chip_count, t19.chain_row, t19.chain_column),
+            (76, 8, 10)
+        );
+        assert_eq!(
+            (
+                t19.voltage_domain_count,
+                t19.chips_per_voltage_domain,
+                t19.address_interval
+            ),
+            (38, 2, 3)
+        );
+        // T19 shares the S19 physical bin geometry but is its own board.
+        assert_eq!(t19.board_name, "NBT1903");
+        assert_ne!(t19.board_name, s19.board_name);
+        let s19a = S19A_BHB28611_BOARD_GEOMETRY;
+        assert_eq!(
+            (s19a.expected_chip_count, s19a.chain_row, s19a.chain_column),
+            (72, 9, 8)
+        );
+        assert_eq!(
+            (
+                s19a.voltage_domain_count,
+                s19a.chips_per_voltage_domain,
+                s19a.address_interval
+            ),
+            (9, 8, 3)
+        );
+        assert_eq!(s19a.address_plan.hardware_address(71), Some(213));
+        assert_eq!(s19a.address_plan.hardware_address(72), None);
+    }
+
+    /// The NBP1901 geometry row must be exactly the RE-confirmed spec's
+    /// geometry — a mismatch here means one of the two tables went stale.
+    #[test]
+    fn nbp1901_geometry_row_agrees_with_the_re_chain_spec() {
+        let spec = &S19_PRO_NBP1901_CHAIN_SPEC;
+        let geo = &S19_PRO_NBP1901_BOARD_GEOMETRY;
+        assert_eq!(geo.expected_chip_count, spec.expected_chip_count);
+        assert_eq!(geo.voltage_domain_count, spec.voltage_domain_count);
+        assert_eq!(geo.chips_per_voltage_domain, spec.chips_per_voltage_domain);
+        assert_eq!(geo.address_plan, spec.address_plan);
+    }
+
+    /// The 76-chip bins' address plans end at 75×3 = 225 with interval 3
+    /// (the NBP1901 plan is interval 2 — deliberately NOT reused).
+    #[test]
+    fn seventy_six_chip_bins_use_interval_three_plans() {
+        for geo in [S19_NBS1902_BOARD_GEOMETRY, T19_NBT1903_BOARD_GEOMETRY] {
+            assert_eq!(geo.address_plan.hardware_address(0), Some(0x00));
+            assert_eq!(geo.address_plan.hardware_address(75), Some(225));
+            assert_eq!(geo.address_plan.hardware_address(1), Some(3));
+            assert_eq!(geo.address_plan.hardware_address(76), None);
+        }
+    }
 
     /// The two core-write encoders must reproduce the already-shipped, .129-cold-boot-
     /// proven magic constants for the AMTC config. This ties the opaque constants to

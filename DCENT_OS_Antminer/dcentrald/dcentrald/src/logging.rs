@@ -88,6 +88,67 @@ fn emit_rtc_unsynced_banner_if_needed() {
     }
 }
 
+/// DCENTRALD_LOG augments defaults with supported module shorthand. RUST_LOG
+/// retains tracing's full-filter semantics when no DCENTRALD_LOG is supplied.
+/// Parse the whole override strictly: malformed directives never partially apply.
+fn logging_filter(level: &str, dcent: Option<&str>, rust: Option<&str>) -> (EnvFilter, bool) {
+    let level = level
+        .parse::<tracing::level_filters::LevelFilter>()
+        .unwrap_or(tracing::level_filters::LevelFilter::INFO);
+    let defaults = format!(
+        "dcentrald={level},dcentrald_hal={level},dcentrald_asic={level},dcentrald_stratum={level},dcentrald_thermal={level},dcentrald_diagnostics={level},dcentrald_api={level},boot={level},hyper=warn,tower=warn,axum=warn"
+    );
+    let fallback = || EnvFilter::new(&defaults);
+    if let Some(value) = dcent.filter(|v| !v.trim().is_empty()) {
+        if value
+            .trim()
+            .parse::<tracing::level_filters::LevelFilter>()
+            .is_ok()
+        {
+            return logging_filter(value.trim(), None, None);
+        }
+        let expanded = value
+            .split(',')
+            .map(|directive| {
+                let directive = directive.trim();
+                match directive.split_once('=') {
+                    Some((module, level))
+                        if matches!(
+                            module.trim(),
+                            "hal"
+                                | "asic"
+                                | "stratum"
+                                | "thermal"
+                                | "diagnostics"
+                                | "api"
+                                | "common"
+                        ) =>
+                    {
+                        format!("dcentrald_{}={}", module.trim(), level.trim())
+                    }
+                    _ => directive.to_owned(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        // Reject an empty member too; otherwise the parser silently ignores it.
+        if value.split(',').any(|v| v.trim().is_empty()) {
+            return (fallback(), true);
+        }
+        return match EnvFilter::try_new(format!("{defaults},{expanded}")) {
+            Ok(filter) => (filter, false),
+            Err(_) => (fallback(), true),
+        };
+    }
+    match rust.filter(|v| !v.trim().is_empty()) {
+        Some(value) => match EnvFilter::try_new(value) {
+            Ok(filter) => (filter, false),
+            Err(_) => (fallback(), true),
+        },
+        None => (fallback(), false),
+    }
+}
+
 /// Initialize the tracing subscriber with the given log level.
 ///
 /// Sets up console output with:
@@ -98,18 +159,14 @@ fn emit_rtc_unsynced_banner_if_needed() {
 /// The env filter applies the configured level to all dcentrald crates while
 /// keeping noisy dependencies (tokio, hyper, axum) at warn level.
 pub fn init_logging(level: &str) -> Result<()> {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| {
-            // Apply the user's log level to all dcentrald crates,
-            // but keep framework noise at warn to avoid log spam
-            EnvFilter::new(format!(
-                //  W5: include `boot={level}` so structured boot-phase
-                // tracing (target="boot") routed through DCENT_OS_TIMELINE
-                // reaches the journal under the default filter. Without this,
-                // EnvFilter's directive-list semantics drop unmatched targets.
-                "dcentrald={level},dcentrald_hal={level},dcentrald_asic={level},dcentrald_stratum={level},dcentrald_thermal={level},dcentrald_diagnostics={level},dcentrald_api={level},boot={level},hyper=warn,tower=warn,axum=warn"
-            ))
-        });
+    let (env_filter, invalid_override) = logging_filter(
+        level,
+        std::env::var("DCENTRALD_LOG").ok().as_deref(),
+        std::env::var("RUST_LOG").ok().as_deref(),
+    );
+    if invalid_override {
+        eprintln!("dcentrald: invalid log filter; using configured defaults");
+    }
 
     let ansi = dcentrald_common::s19k_am3_install::s19k_track1_tracing_ansi_enabled(
         std::env::var("RUST_LOG_STYLE").ok().as_deref(),
@@ -157,8 +214,55 @@ pub fn init_logging(level: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{rtc_looks_synced, RTC_SANE_EPOCH_SECS};
+    use super::{logging_filter, rtc_looks_synced, RTC_SANE_EPOCH_SECS};
     use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn shorthand_keeps_boot_defaults_and_overrides_only_selected_module() {
+        let (filter, invalid) = logging_filter("info", Some("stratum=debug"), Some("off"));
+        assert!(!invalid);
+        let subscriber = tracing_subscriber::fmt().with_env_filter(filter).finish();
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(tracing::enabled!(target: "boot", tracing::Level::INFO));
+            assert!(tracing::enabled!(target: "dcentrald_stratum", tracing::Level::DEBUG));
+            assert!(!tracing::enabled!(target: "dcentrald_hal", tracing::Level::DEBUG));
+            assert!(!tracing::enabled!(target: "hyper", tracing::Level::INFO));
+        });
+    }
+
+    #[test]
+    fn bare_level_applies_to_project_and_boot_with_quiet_dependencies() {
+        let (filter, invalid) = logging_filter("info", Some("debug"), None);
+        assert!(!invalid);
+        let subscriber = tracing_subscriber::fmt().with_env_filter(filter).finish();
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(tracing::enabled!(target: "boot", tracing::Level::DEBUG));
+            assert!(tracing::enabled!(target: "dcentrald_stratum", tracing::Level::DEBUG));
+            assert!(!tracing::enabled!(target: "hyper", tracing::Level::DEBUG));
+        });
+    }
+
+    #[test]
+    fn malformed_override_cannot_partially_enable_wire_tracing() {
+        let (filter, invalid) = logging_filter("info", Some("stratum=trace,hal=bogus"), None);
+        assert!(invalid);
+        let subscriber = tracing_subscriber::fmt().with_env_filter(filter).finish();
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(tracing::enabled!(target: "boot", tracing::Level::INFO));
+            assert!(!tracing::enabled!(target: "dcentrald_stratum", tracing::Level::TRACE));
+        });
+        assert!(logging_filter("info", Some("stratum=trace,"), None).1);
+    }
+
+    #[test]
+    fn rust_log_retains_full_filter_behavior_and_empty_dcent_does_not_shadow_it() {
+        let (filter, invalid) = logging_filter("info", Some(" "), Some("off"));
+        assert!(!invalid);
+        let subscriber = tracing_subscriber::fmt().with_env_filter(filter).finish();
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(!tracing::enabled!(target: "boot", tracing::Level::ERROR));
+        });
+    }
 
     #[test]
     fn pre_2020_clock_reads_as_unsynced() {

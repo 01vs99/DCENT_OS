@@ -7,6 +7,7 @@ import argparse
 import copy
 import importlib.util
 import json
+import re
 from pathlib import Path
 import subprocess
 import struct
@@ -59,6 +60,46 @@ def synthetic_arm_elf(*, flags: int = 0x0500_0400, machine: int = 40) -> bytes:
     )
     blob[84:] = bytes(range(16))
     return bytes(blob)
+
+
+REAL_ADMISSION_SOURCE = (
+    Path(__file__).resolve().parents[1]
+    / "dcentrald"
+    / helper.JOURNAL_ADMISSION_SOURCE
+)
+REAL_RUNNER = Path(__file__).resolve().parent / "dcentrald_s19k_tmp_remote_run.sh"
+
+
+def admission_source_text() -> str:
+    """The real S19K_EPHEMERAL_JOURNAL_TRIAL_DESTINATIONS block, so the fixture
+    tracks the daemon's admission set instead of a stale copy."""
+    text = REAL_ADMISSION_SOURCE.read_text(encoding="utf-8")
+    start = text.index(helper.JOURNAL_ADMISSION_MARKER)
+    end = text.index("];", start) + 2
+    return text[start:end] + "\n"
+
+
+def admitted_journal_names() -> list[str]:
+    return re.findall(r'"([a-z0-9_]+)"', admission_source_text())
+
+
+def journal_string_payload(names: list[str] | None = None) -> bytes:
+    names = admitted_journal_names() if names is None else names
+    return b"\0".join(name.encode("ascii") for name in names) + b"\0" + helper.JOURNAL_REFUSAL + b"\0"
+
+
+def synthetic_sealed_elf(names: list[str] | None = None) -> bytes:
+    """A synthetic ARM ELF whose trailing bytes carry the publisher strings."""
+    return synthetic_arm_elf() + journal_string_payload(names)
+
+
+def install_journal_sources(dcentrald_root: Path) -> None:
+    source = dcentrald_root / helper.JOURNAL_ADMISSION_SOURCE
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(admission_source_text(), encoding="utf-8")
+    runner = dcentrald_root.parent / helper.RUNNER_SCRIPT
+    runner.parent.mkdir(parents=True, exist_ok=True)
+    runner.write_bytes(REAL_RUNNER.read_bytes())
 
 
 def source_descriptor() -> dict[str, object]:
@@ -191,7 +232,8 @@ class BuildReceiptTests(unittest.TestCase):
         self.binary = self.workspace / helper.EXPECTED_ARTIFACT
         self.inventory.mkdir(parents=True)
         self.binary.parent.mkdir(parents=True)
-        self.binary.write_bytes(synthetic_arm_elf())
+        self.binary.write_bytes(synthetic_sealed_elf())
+        install_journal_sources(self.workspace)
 
         source = source_descriptor()
         self.source = self.inventory / "s19k-tmp.source.json"
@@ -270,6 +312,42 @@ class BuildReceiptTests(unittest.TestCase):
         self.assertTrue(receipt["source_endpoints_identical"])
         self.assertEqual(receipt["artifact_path"], helper.EXPECTED_ARTIFACT)
         self.assertEqual(receipt["artifact"]["sha256"], helper.sha256_bytes(self.binary.read_bytes()))
+
+    def test_rejects_artifact_missing_a_runner_journal_destination(self) -> None:
+        # The 2026-09-01 receipt-fix-v7 shape: the daemon bytes lack the
+        # post-SafeOff receipt names the runner publishes.
+        names = admitted_journal_names()
+        self.assertIn("runtime_bounded_work_transcript", names)
+        self.binary.write_bytes(
+            synthetic_sealed_elf(
+                [name for name in names if name != "runtime_bounded_work_transcript"]
+            )
+        )
+        with self.assertRaises(helper.BuildArtifactError) as raised:
+            helper.verify_build(self.args())
+        self.assertIn("runtime_bounded_work_transcript", str(raised.exception))
+        self.assertIn("would refuse those receipts on the bench", str(raised.exception))
+
+    def test_rejects_runner_destination_outside_the_daemon_set(self) -> None:
+        runner = self.workspace.parent / helper.RUNNER_SCRIPT
+        text = runner.read_text(encoding="utf-8")
+        mutated = text.replace(
+            'BOUNDED_TRANSCRIPT_RECEIPT="$TRIAL_DIR/runtime_bounded_work_transcript"',
+            'BOUNDED_TRANSCRIPT_RECEIPT="$TRIAL_DIR/runtime_bounded_work_transcript_v2"',
+        )
+        self.assertNotEqual(mutated, text)
+        runner.write_text(mutated, encoding="utf-8", newline="\n")
+        with self.assertRaises(helper.BuildArtifactError) as raised:
+            helper.verify_build(self.args())
+        self.assertIn("runtime_bounded_work_transcript_v2", str(raised.exception))
+
+    def test_rejects_artifact_without_publisher_refusal_string(self) -> None:
+        self.binary.write_bytes(
+            synthetic_arm_elf() + b"\0".join(n.encode() for n in admitted_journal_names()) + b"\0"
+        )
+        with self.assertRaises(helper.BuildArtifactError) as raised:
+            helper.verify_build(self.args())
+        self.assertIn("refusal string", str(raised.exception))
 
     def test_rejects_changed_source_endpoint(self) -> None:
         changed = source_descriptor()

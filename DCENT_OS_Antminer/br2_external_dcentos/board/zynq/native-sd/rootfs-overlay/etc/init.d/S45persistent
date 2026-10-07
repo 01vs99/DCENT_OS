@@ -1,0 +1,18 @@
+#!/bin/sh
+# SD data only. The root startup completed before normal PID1 services began.
+set -eu
+case "${1:-}" in
+    start|stop)
+        [ -f /run/dcentos/native-zynq-sd-ready ] &&
+            [ ! -L /run/dcentos/native-zynq-sd-ready ] || exit 1
+        [ "$(cat /run/dcentos/native-zynq-sd-ready)" = \
+          "$(cat /proc/sys/kernel/random/boot_id)" ] || exit 1
+        /usr/bin/python3 /usr/libexec/dcentos/native-zynq-sd-storage.py --verify
+        if [ "$1" = stop ] && [ -x /usr/sbin/seed-entropy ]; then
+            /usr/sbin/seed-entropy --initialize-if-missing /data/keys/random-seed
+            sync
+        fi
+        ;;
+    restart) exec "$0" start ;;
+    *) exit 1 ;;
+esac

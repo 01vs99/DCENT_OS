@@ -1,45 +1,24 @@
 #!/bin/sh
-# SPDX-FileCopyrightText: 2026 D-Central Technologies <dev@d-central.tech>
 # SPDX-License-Identifier: GPL-3.0-only
-#
-# Image-side S19k post-install witness. The helper has no install/reboot/NAND
-# authority. A missing preinstall envelope is expected to fail; the following
-# board-specific S50dropbear independently rechecks the gate and stays closed.
-
-NAME=s19k-postinstall-witness
-HELPER=/usr/sbin/dcent-s19k-postinstall-witness.py
+# Exact persistent-owner check before operator SSH. Historical filename retained
+# for init ordering; no per-unit witness, receipt or signing key is consumed.
 DATA_HELPER=/usr/sbin/dcent-s19k-data-mount
-
-start() {
-    printf 'Starting %s: ' "$NAME"
-    if [ ! -f /etc/dcentos/release-image ]; then
-        echo "SKIP (dev/lab image)"
-        return 0
-    fi
-    if [ ! -x "$HELPER" ]; then
-        echo "BLOCKED (helper missing)"
-        return 1
-    fi
-    if [ ! -x "$DATA_HELPER" ] || ! "$DATA_HELPER" verify >/dev/null 2>&1; then
-        echo "BLOCKED (persistent /data not exactly admitted)"
-        return 1
-    fi
-    if "$HELPER" firstboot; then
-        echo "OK (release_ready=false)"
-        return 0
-    fi
-    echo "BLOCKED (signed per-unit envelope absent, stale, or untrusted)"
-    return 1
+RELEASE_MARKER=/etc/dcentos/release-image
+SSH_INIT=/etc/init.d/S50dropbear
+verify() {
+    [ -e "$RELEASE_MARKER" ] || [ -L "$RELEASE_MARKER" ] || return 0
+    [ -x "$DATA_HELPER" ] && "$DATA_HELPER" verify
 }
-
 case "${1:-start}" in
-    start) start ;;
+    start)
+        if verify && { [ ! -e "$RELEASE_MARKER" ] || "$SSH_INIT" prepare; }; then
+            echo 'S19k persistent access: OK; SSH requires operator credentials'
+        else
+            echo 'S19k persistent access: BLOCKED (exact /data owner refused)' >&2
+            exit 1
+        fi
+        ;;
+    status) verify ;;
     stop) : ;;
-    status)
-        "$HELPER" verify-ssh-gate >/dev/null 2>&1
-        ;;
-    *)
-        echo "Usage: $0 {start|stop|status}" >&2
-        exit 2
-        ;;
+    *) echo "Usage: $0 {start|stop|status}" >&2; exit 2 ;;
 esac

@@ -62,26 +62,24 @@ chown 0:0 "${TARGET_DIR}/data/dcent" 2>/dev/null || true
 # Make init scripts executable (from either overlay layer)
 chmod +x "${TARGET_DIR}"/etc/init.d/* 2>/dev/null || true
 
-# S19k release reconnect is owned by the signed per-unit witness helper. The
-# unsigned length-prefixed S46 payload has no admissible role on this SKU and
-# is removed entirely. The board overlay supplies an S49 first-boot signer and
-# an S50 Dropbear override that rechecks the durable admission before SSH.
+# S19k access uses operator credentials after exact persistent-data admission.
+# Historical per-unit witness construction is a desk fixture, not a boot role.
 rm -f "${TARGET_DIR}/etc/init.d/S46post-install"
+rm -f "${TARGET_DIR}/usr/sbin/dcent-s19k-postinstall-witness.py"
 S19K_DATA_HELPER="${TARGET_DIR}/usr/sbin/dcent-s19k-data-mount"
 S19K_DATA_INIT="${TARGET_DIR}/etc/init.d/S38s19k-data"
-S19K_WITNESS_HELPER="${TARGET_DIR}/usr/sbin/dcent-s19k-postinstall-witness.py"
 S19K_WITNESS_INIT="${TARGET_DIR}/etc/init.d/S49s19k-postinstall-witness"
 S19K_DROPBEAR_INIT="${TARGET_DIR}/etc/init.d/S50dropbear"
 for witness_file in "$S19K_DATA_HELPER" "$S19K_DATA_INIT" \
-    "$S19K_WITNESS_HELPER" "$S19K_WITNESS_INIT" "$S19K_DROPBEAR_INIT"
+    "$S19K_WITNESS_INIT" "$S19K_DROPBEAR_INIT"
 do
     [ -f "$witness_file" ] && [ ! -L "$witness_file" ] || {
-        echo "DCENTos post-build (am3-s19kpro): ERROR: target witness component missing or indirect: $witness_file" >&2
+        echo "DCENTos post-build (am3-s19kpro): ERROR: persistent access component missing or indirect: $witness_file" >&2
         exit 1
     }
     chmod 0755 "$witness_file"
 done
-echo "DCENTos post-build (am3-s19kpro): installed fail-closed S38/S49/S50 durable postinstall witness boundary; removed unsigned S46"
+echo "DCENTos post-build (am3-s19kpro): installed S38/S49/S50 persistent owner and operator SSH; removed unsigned S46 and historical witness executable"
 
 # Remote access is Dropbear SSH only. Buildroot's default BusyBox config can
 # install S50telnet + telnet applets; remove them from am3 images so port 23
@@ -311,6 +309,9 @@ fi
 echo "DCENTos post-build (am3-s19kpro): directories, permissions, and board identity set."
 
 # Production-readiness matrix §7 #1 (public-image trust boundary): release-image
-# marker + first-boot SSH posture when DCENT_RELEASE_IMAGE=1. NO-OP on DEV/LAB.
+# marker + first-boot SSH posture on the RELEASE posture — the DEFAULT since
+# WS-A4 (2026-09-01; canonical resolution scripts/lib/release_posture.sh).
+# NO-OP on an explicit DEV/LAB opt-out (DCENT_DEV_IMAGE=1).
 . "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/release_image_provision.sh"
+python3 "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/provision_runtime_policy.py" "$TARGET_DIR"
 dcent_provision_release_image "$TARGET_DIR" "am3-s19kpro"

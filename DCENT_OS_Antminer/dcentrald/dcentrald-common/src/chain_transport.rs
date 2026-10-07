@@ -1522,14 +1522,20 @@ mod tests {
     }
 
     #[test]
-    fn stock_fpga_backend_refuses_bm1397plus_even_if_protocol_were_1397() {
-        // Stock AXI is BM1387 path — does not speak BM1397+ surface.
-        // Pairing BM1397 with StockFpga is protocol-transport incompatible first.
-        assert!(admit_protocol_over_transport(
+    fn stock_fpga_backend_admits_bm1397_work_but_refuses_generic_serial_commands() {
+        // The native S17 owner uses stock work FIFO framing. That admission
+        // cannot grant the distinct generic BM1397+ serial command surface.
+        let admission = admit_protocol_over_transport(
             AsicProtocolIdentity::Bm1397,
-            ChainTransportKind::StockFpga
+            ChainTransportKind::StockFpga,
         )
-        .is_err());
+        .unwrap();
+        assert_eq!(
+            admit_transport_op(admission, &TransportOp::SendGetAddressBm1397Plus),
+            Err(TransportOpError::BackendDoesNotSpeakBm1397Plus {
+                backend: TransportBackendClass::StockAxiFpga,
+            })
+        );
         assert!(!TransportBackendClass::StockAxiFpga.speaks_bm1397plus_command_surface());
     }
 

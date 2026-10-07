@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "expires_at": "2026-12-07T00:00:00Z",
+  "packages": [
+    {
+      "name": "rumqttc",
+      "version": "0.25.1",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "0feff8d882bff0b2fddaf99355a10336d43dd3ed44204f85ece28cf9626ab519"
+    },
+    {
+      "name": "rustls-pemfile",
+      "version": "2.2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+    },
+    {
+      "name": "rustls-webpki",
+      "version": "0.102.8",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "64ca1bc8749bd4cf37b5ce386cc146580777b4e8572c7b97baf22c83f444bee9"
+    }
+  ],
+  "rumqttc_source_sha256": "bfc53b4e0434163b6d8127324609306cd9b63559fffda97c32067e13d5ca88cd",
+  "rumqttc_manifest_sha256": "537a03168b2328ad87423bba12a9b83638b17859d3cad2cf76cad8c5474888f5",
+  "dcent_mqtt_adapter_sha256": "4b31267cfa1deaac787d22834e3c41b0f7efe1d9896e50b0a4fab815c4210242",
+  "findings": [
+    {
+      "advisory": "RUSTSEC-2026-0098",
+      "package": "rustls-webpki",
+      "version": "0.102.8",
+      "reason": "Only rumqttc uses this crate, solely for its Error enum. Verification uses rustls 0.23 and patched rustls-webpki 0.103. Reviewed source bytes and incoming graph edges are enforced."
+    },
+    {
+      "advisory": "RUSTSEC-2026-0099",
+      "package": "rustls-webpki",
+      "version": "0.102.8",
+      "reason": "Only rumqttc uses this crate, solely for its Error enum. Verification uses rustls 0.23 and patched rustls-webpki 0.103. Reviewed source bytes and incoming graph edges are enforced."
+    },
+    {
+      "advisory": "RUSTSEC-2026-0049",
+      "package": "rustls-webpki",
+      "version": "0.102.8",
+      "reason": "Only rumqttc uses this crate, solely for its Error enum. Verification uses rustls 0.23 and patched rustls-webpki 0.103. Reviewed source bytes and incoming graph edges are enforced."
+    },
+    {
+      "advisory": "RUSTSEC-2026-0104",
+      "package": "rustls-webpki",
+      "version": "0.102.8",
+      "reason": "Only rumqttc uses this crate, solely for its Error enum. Verification uses rustls 0.23 and patched rustls-webpki 0.103. Reviewed source bytes and incoming graph edges are enforced."
+    },
+    {
+      "advisory": "RUSTSEC-2025-0134",
+      "package": "rustls-pemfile",
+      "version": "2.2.0",
+      "reason": "Unmaintained helper is used only by rumqttc Simple configuration. DCENT injects TlsConfiguration::Rustls; exact adapter and upstream source bytes are enforced."
+    }
+  ]
+}

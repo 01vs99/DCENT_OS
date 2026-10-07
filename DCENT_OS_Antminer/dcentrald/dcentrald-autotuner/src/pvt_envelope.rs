@@ -466,7 +466,7 @@ fn sku_static_id(id: &str) -> &'static str {
 /// to pre-B9 behavior). Mirrors the B2 `DCENT_AM2_STRICT_SKU_REFUSE`
 /// rollout discipline: prove the decision on live `a lab unit` before promoting.
 pub fn strict_pvt_clamp_enabled() -> bool {
-    std::env::var("DCENT_AM2_STRICT_PVT_CLAMP")
+    dcentrald_common::lab_env::var("DCENT_AM2_STRICT_PVT_CLAMP")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -502,7 +502,7 @@ pub fn strict_pvt_clamp_enabled() -> bool {
 /// behavior (still takes the OutsidePvt branch, still freq-snaps, still
 /// suppresses voltage, still emits the WARN).
 pub fn axis_aware_pvt_clamp_enabled() -> bool {
-    std::env::var("DCENT_AM2_AXIS_AWARE_PVT_CLAMP")
+    dcentrald_common::lab_env::var("DCENT_AM2_AXIS_AWARE_PVT_CLAMP")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }

@@ -38,19 +38,12 @@ CONFIGS_DIR = (
 
 # Current-truth docs whose defconfig mentions are capability claims.
 AUTHORITATIVE_DOCS = (
-    REPO_ROOT
-    / "docs"
-    / "dev"
-    / "2026-07-09-install-path-release"
-    / "INSTALL_PATH_MATRIX.md",
+    REPO_ROOT / "SUPPORT_MATRIX.md",
     REPO_ROOT
     / "projects"
     / "dcentos"
-    / "br2_external_dcentos"
-    / "board"
-    / "cvitek"
-    / "cv1835-s19jpro"
-    / "README.md",
+    / "docs"
+    / "CV1835_STATUS.md",
     CONFIGS_DIR / "README_KERNEL_VERSIONS.md",
 )
 

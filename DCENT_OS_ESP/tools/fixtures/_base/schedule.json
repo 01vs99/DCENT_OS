@@ -1,0 +1,12 @@
+{
+ "active": null,
+ "activeIndex": null,
+ "currentHour": 7,
+ "currentMinute": 22,
+ "currentMinuteOfDay": 442,
+ "enabled": true,
+ "entries": [],
+ "nextChangeMinutes": null,
+ "timeSource": "wall_clock",
+ "timezoneOffsetMinutes": 0
+}

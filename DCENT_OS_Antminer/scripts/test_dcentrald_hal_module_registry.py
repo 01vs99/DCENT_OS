@@ -29,7 +29,7 @@ EXPECTED_DEFAULT_COUNTS = {
     "chain_backend": 0,
     "epic_umc_psu_v1": 7,
     "fan": 17,
-    "fpga_chain": 17,
+    "fpga_chain": 18,
     "fpga_chain_backend": 12,
     "fpga_uart_relay": 7,
     "glitch_monitor": 8,
@@ -37,10 +37,10 @@ EXPECTED_DEFAULT_COUNTS = {
     "gpio_name_resolver": 0,
     "i2c": 79,
     "ina226": 3,
-    "led": 0,
+    "led": 2,
     "led_patterns": 0,
     "libgpiod": 2,
-    "platform": 277,
+    "platform": 279,
     "pl_surface": 7,
     "pmbus": 32,
     "psu": 33,
@@ -53,7 +53,7 @@ EXPECTED_DEFAULT_COUNTS = {
     "psu_gpio_i2c": 12,
     "psu_routing": 1,
     "serial": 27,
-    "serial_chain": 24,
+    "serial_chain": 28,
     "stock_bc_execute": 13,
     "stock_fpga": 3,
     "stock_fpga_axi_mmap": 10,
@@ -67,13 +67,26 @@ EXPECTED_DEFAULT_COUNTS = {
     "xadc": 2,
 }
 EXPECTED_FEATURE_ONLY = {"stock_fpga_axi_ioctl": 6}
+# The 717/723 harness counts below remain the historical observation. These
+# newly registered public helpers add a separate lexical source inventory;
+# neither arithmetic nor a query plan establishes a current full-suite result.
+ADDITIVE_PUBLIC_SOURCE_TEST_ATTRIBUTES = {
+    "bb_pic_application": 0,
+    "bb_pic_heartbeat": 3,
+    "bb_pic_rail": 4,
+    "bb_management_runtime": 0,
+}
 
 
 class DcentraldHalModuleRegistryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
-        cls.modules = {row["module"]: row for row in cls.registry["modules"]}
+        cls.historical_modules = {row["module"]: row for row in cls.registry["modules"]}
+        cls.additive_modules = {
+            row["module"]: row for row in cls.registry["additive_public_source_modules"]
+        }
+        cls.modules = {**cls.historical_modules, **cls.additive_modules}
         ledger = json.loads(LEDGER_PATH.read_text(encoding="utf-8"))
         cls.ledger = {entry["id"]: entry for entry in ledger["entries"]}
 
@@ -82,13 +95,26 @@ class DcentraldHalModuleRegistryTests(unittest.TestCase):
     ) -> None:
         lib_rs = (HAL_ROOT / "src" / "lib.rs").read_text(encoding="utf-8")
         declared = set(re.findall(r"^pub mod ([A-Za-z0-9_]+);", lib_rs, re.M))
-        expected = set(EXPECTED_DEFAULT_COUNTS) | set(EXPECTED_FEATURE_ONLY)
+        expected = (set(EXPECTED_DEFAULT_COUNTS) | set(EXPECTED_FEATURE_ONLY)
+                    | set(ADDITIVE_PUBLIC_SOURCE_TEST_ATTRIBUTES))
         self.assertEqual(declared, expected)
         self.assertEqual(set(self.modules), declared)
         self.assertEqual(
             {name for name, row in self.modules.items() if row["default_enabled"]},
-            set(EXPECTED_DEFAULT_COUNTS),
+            set(EXPECTED_DEFAULT_COUNTS) | set(ADDITIVE_PUBLIC_SOURCE_TEST_ATTRIBUTES),
         )
+        self.assertTrue(set(self.historical_modules).isdisjoint(self.additive_modules))
+        self.assertEqual(set(self.additive_modules), set(ADDITIVE_PUBLIC_SOURCE_TEST_ATTRIBUTES))
+        self.assertEqual(self.registry["current_declared_public_modules"], len(declared))
+        self.assertEqual(self.registry["current_default_enabled_modules"], 45)
+        for name, expected_tests in ADDITIVE_PUBLIC_SOURCE_TEST_ATTRIBUTES.items():
+            row = self.additive_modules[name]
+            text = (REPO_ROOT / row["source"]).read_text(encoding="utf-8")
+            self.assertEqual(len(re.findall(r"^\s*#\[test\]\s*$", text, re.M)), expected_tests)
+            self.assertEqual(row["lexical_test_attributes"], expected_tests)
+            self.assertIsNone(row["new_full_suite_execution"])
+        self.assertIn("historical", self.registry["test_count_scope"])
+        self.assertIn("not a new full-suite", self.registry["test_count_scope"])
         self.assertRegex(
             lib_rs,
             r'#\[cfg\(feature = "axi-ioctl-debug"\)\]\s+pub mod stock_fpga_axi_ioctl;',
@@ -113,24 +139,24 @@ class DcentraldHalModuleRegistryTests(unittest.TestCase):
     def test_default_zero_and_debug_feature_test_accounting_is_exact(self) -> None:
         default_observed = {
             name: row["default_tests"]
-            for name, row in self.modules.items()
+            for name, row in self.historical_modules.items()
             if row["default_enabled"]
         }
         self.assertEqual(default_observed, EXPECTED_DEFAULT_COUNTS)
-        self.assertEqual(sum(EXPECTED_DEFAULT_COUNTS.values()), 708)
+        self.assertEqual(sum(EXPECTED_DEFAULT_COUNTS.values()), 717)
         zero_prefixes = sorted(
             name for name, tests in EXPECTED_DEFAULT_COUNTS.items() if tests == 0
         )
         self.assertEqual(self.registry["default_zero_test_prefixes"], zero_prefixes)
         self.assertEqual(
-            sum(tests > 0 for tests in EXPECTED_DEFAULT_COUNTS.values()), 36
+            sum(tests > 0 for tests in EXPECTED_DEFAULT_COUNTS.values()), 37
         )
         ioctl = self.modules["stock_fpga_axi_ioctl"]
         self.assertEqual(ioctl["required_feature"], "axi-ioctl-debug")
         self.assertEqual(ioctl["default_tests"], 0)
         self.assertEqual(ioctl["feature_tests"], 6)
-        self.assertEqual(self.registry["default_tests"], 708)
-        self.assertEqual(self.registry["axi_ioctl_debug_listed_tests"], 714)
+        self.assertEqual(self.registry["default_tests"], 717)
+        self.assertEqual(self.registry["axi_ioctl_debug_listed_tests"], 723)
         self.assertEqual(
             self.registry["axi_ioctl_debug_full_profile_expected_failures"], 3
         )
@@ -186,8 +212,10 @@ class DcentraldHalModuleRegistryTests(unittest.TestCase):
         self.assertIn("A mismatch must refuse CTRL/BAUD/FIFO", sources["pl_surface"])
         self.assertIn("LIVE_DISPATCH_AVAILABLE: bool = false", sources["psu_apw9"])
         self.assertIn("SET voltage is refused. No opcode, no LSB, no I/O", sources["psu_routing"])
-        self.assertIn('parse_psu_gpio_engaged("0", true)', sources["amlogic"])
-        self.assertIn('parse_psu_gpio_engaged("1", false)', sources["amlogic"])
+        self.assertIn('parse_psu_gpio_engaged("0\\n", recipe)', sources["amlogic"])
+        self.assertIn('parse_psu_gpio_engaged("1\\n", recipe)', sources["amlogic"])
+        self.assertIn('fn parse_psu_gpio_engaged(value: &str, recipe: Gpio437DriveRecipe)', sources["amlogic"])
+        self.assertIn('psu_polarity_is_bound_to_the_exact_admitted_profile', sources["amlogic"])
 
     def test_registry_keeps_host_coverage_separate_from_hardware_authority(
         self,

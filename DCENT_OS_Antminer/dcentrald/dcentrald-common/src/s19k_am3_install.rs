@@ -8453,17 +8453,23 @@ mtd5: 09900000 00020000 \"system\"
         );
         assert!(safe < flash);
         assert!(S37.contains("am3-s19k|am3-s19kpro|am3-aml-s19kpro)"));
-        assert!(S37.contains("set_gpio_value_checked \"$PWR_GPIO\" 1"));
+        let recipe = crate::amlogic_gpio437::resolve_drive_recipe("am3-s19k").unwrap();
+        assert_eq!((recipe.on_raw(), recipe.off_raw(), recipe.off_direction()), (0, 1, "high"));
+        assert!(S37.contains("dcent_gpio437_drive_levels \"$BOARD_TARGET\""));
+        assert!(S37.contains("PWR_OFF_VALUE=$2"));
+        assert!(S37.contains("PWR_OFF_DIRECTION=$3"));
+        assert!(S37.contains("set_gpio_value_checked \"$PWR_GPIO\" \"$PWR_OFF_VALUE\""));
         assert!(S37.contains("IDENTITY_ROOT/board_target"));
         assert!(S37.contains("GPIO437 refuse: missing or unsealed board_target="));
-        assert!(S37.contains("commanded_value=1"));
-        assert!(S37.contains("receipt_field_is commanded_value 1"));
+        assert!(S37.contains("printf 'commanded_value=%s\\n' \"$PWR_OFF_VALUE\""));
+        assert!(S37.contains("receipt_field_is commanded_value \"$PWR_OFF_VALUE\""));
         assert!(
-            HAL_AML.contains("s19k_board_target_is_live_alias"),
-            "HAL boot-safe parser must require commanded_value=1 on live S19k aliases"
+            HAL_AML.contains("amlogic_gpio437::resolve_boot_policy(fields[\"board_target\"])")
+                && HAL_AML.contains("require(\"commanded_value\", &recipe.off_raw().to_string())?"),
+            "HAL boot-safe parser must use the same exact table OFF value"
         );
         assert!(HAL_AML.contains("boot_safe_handoff_s19k_requires_commanded_value_1"));
-        assert!(HAL_AML.contains("amlogic_board_target_is_s19k"));
+        assert!(HAL_AML.contains("amlogic_handoff_identity_matches_profile"));
         let revert_safe = REVERT
             .find("gpio437 SafeOff")
             .expect("s19k revert must SafeOff before nandwrite");

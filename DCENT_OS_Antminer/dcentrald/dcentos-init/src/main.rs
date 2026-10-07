@@ -57,6 +57,33 @@ const EXTERNAL_MEDIA_SERVICES: &[&str] = &[
 ];
 const GETTY_TTY: &str = "ttyPS0";
 const GETTY_BAUD: &str = "115200";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ConsoleProfile {
+    tty: &'static str,
+    baud: &'static str,
+}
+
+fn console_profile(board_target: &str) -> ConsoleProfile {
+    if matches!(
+        board_target.trim(),
+        "am3-s19jpro-aml" | "am3-s19jproa" | "am3-s19jproplus"
+    ) {
+        // Exact held Classic, A126 and Plus120 AML inittabs use console/baud0;
+        // source pins: evidence/r10/nopic-aml-image-source-map-v1.json.
+        // Let its kernel bind the console instead of guessing a UART name
+        // that could select one of the three separately owned ASIC ports.
+        ConsoleProfile {
+            tty: "console",
+            baud: "0",
+        }
+    } else {
+        ConsoleProfile {
+            tty: GETTY_TTY,
+            baud: GETTY_BAUD,
+        }
+    }
+}
 /// Upper bound for an orderly shutdown before PID 1 invokes the kernel's
 /// emergency reboot path.  S82dcentrald alone permits a 30-second typed
 /// teardown, so the former 30-second global deadline could kill the machine
@@ -118,7 +145,7 @@ fn main() {
         "DCENTos Init v{} — D-Central Technologies",
         env!("CARGO_PKG_VERSION")
     );
-    println!("PID 1 starting on BraiinsOS 4.4.0-xilinx kernel");
+    println!("PID 1 starting on the native Linux kernel");
 
     // Phase 1: Mount essential virtual filesystems
     // /proc and /sys are needed by dcentos-early-init.sh and everything else
@@ -130,7 +157,7 @@ fn main() {
     println!("[init] Phase 2: Running early init...");
     let early_init_succeeded =
         run_early_init(external_media_marker != ExternalMediaMarkerState::Absent);
-    let mut service_posture = service_posture(external_media_marker, early_init_succeeded);
+    let service_posture = service_posture(external_media_marker, early_init_succeeded);
     let mut external_started_services = Vec::new();
 
     // Phase 3: Run S## init scripts in order
@@ -149,18 +176,19 @@ fn main() {
             let result = run_init_scripts("start", service_posture);
             external_started_services = result.succeeded;
             if !result.external_gate_admitted {
-                eprintln!("[init] Phase 3: External-media readiness gate failed; console only");
-                service_posture = ServicePosture::ConsoleOnly;
+                eprintln!("[init] Phase 3: /etc/init.d/S45persistent refused readiness; ExternalRestricted retains zero service authority. Repair external media offline.");
             }
         }
     }
 
     // Phase 4: Spawn getty for serial console
-    println!("[init] Phase 4: Spawning getty on {}...", GETTY_TTY);
-    let mut getty_pid = spawn_getty();
+    let console =
+        console_profile(&fs::read_to_string("/etc/dcentos/board_target").unwrap_or_default());
+    println!("[init] Phase 4: Spawning getty on {}...", console.tty);
+    let mut getty_pid = spawn_getty(console);
 
     println!("[init] Boot complete. Entering main loop.");
-    println!("[init] Console: {} @ {} baud", GETTY_TTY, GETTY_BAUD);
+    println!("[init] Console: {} @ {} baud", console.tty, console.baud);
 
     // Main loop: reap zombies, respawn getty, handle shutdown
     loop {
@@ -188,7 +216,7 @@ fn main() {
             // Check if it was getty that died — respawn it
             if waited == getty_pid && !SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
                 // Respawn getty (like inittab ::respawn::)
-                getty_pid = spawn_getty();
+                getty_pid = spawn_getty(console);
             }
             // Any other child: just reap (zombie prevention)
         }
@@ -623,25 +651,25 @@ fn run_init_scripts_from(
         );
     }
 
-    // Before starting anything, prove that the complete pinned external-media
-    // set is present and executable. In particular, a missing/non-executable
-    // S45persistent must not let the later network and Dropbear entries run.
+    // Storage isolation is mandatory; optional recovery services are independent
+    // once that proof succeeds. A missing NTP script must not strand recovery.
     if posture == ServicePosture::ExternalRestricted && action == "start" {
-        let complete_set = scripts.len() == EXTERNAL_MEDIA_SERVICES.len()
-            && scripts
-                .iter()
-                .map(String::as_str)
-                .eq(EXTERNAL_MEDIA_SERVICES.iter().copied());
-        let all_executable = complete_set
-            && scripts
-                .iter()
-                .all(|script| is_exact_executable_regular_file(&init_d.join(script)));
-        if !all_executable {
-            eprintln!(
-                "  [FAIL] External-media startup preflight refused service pass; exact executable policy set is required"
-            );
+        let gate = init_d.join("S45persistent");
+        if !is_exact_executable_regular_file(&gate) {
+            eprintln!("  [FAIL] ExternalRestricted: {} is absent or unsafe; all services remain barred", gate.display());
             return ServicePassResult::default();
         }
+        let mut succeeded = execute_init_scripts(init_d, &["S45persistent".into()], action, true);
+        if succeeded.is_empty() { return ServicePassResult::default(); }
+        for name in EXTERNAL_MEDIA_SERVICES.iter().skip(1) {
+            let path = init_d.join(name);
+            if !is_exact_executable_regular_file(&path) {
+                eprintln!("  [RESTRICTED] {} is absent or unsafe; skipping this service", path.display());
+                continue;
+            }
+            succeeded.extend(execute_init_scripts(init_d, &[(*name).into()], action, false));
+        }
+        return ServicePassResult { succeeded, external_gate_admitted: true };
     }
 
     let fail_fast = posture == ServicePosture::ExternalRestricted && action == "start";
@@ -687,11 +715,11 @@ fn execute_init_scripts(
                 true
             }
             Ok(s) => {
-                eprintln!("  [WARN] {} exited {:?}", script, s.code());
+                eprintln!("  [WARN] {} exited {:?}", path.display(), s.code());
                 false
             }
             Err(e) => {
-                eprintln!("  [FAIL] {} error: {}", script, e);
+                eprintln!("  [FAIL] {} error: {}", path.display(), e);
                 false
             }
         };
@@ -738,8 +766,8 @@ fn execute_init_scripts(
 ///      other's syntax.
 ///   3. A bare login shell on the console — last resort so a stuck unit still
 ///      gets an interactive prompt.
-fn spawn_getty() -> i32 {
-    let tty_path = format!("/dev/{}", GETTY_TTY);
+fn spawn_getty(console: ConsoleProfile) -> i32 {
+    let tty_path = format!("/dev/{}", console.tty);
 
     // 1) Preferred: passwordless root login directly on the console.
     //    `login -f root` skips authentication entirely, so a corrupted or
@@ -756,7 +784,7 @@ fn spawn_getty() -> i32 {
         if Path::new(prog).exists() {
             match fork_exec_with_tty(prog, args, &tty_path) {
                 Ok(pid) => {
-                    println!("  [OK] {} -f root on {} (PID {})", prog, GETTY_TTY, pid);
+                    println!("  [OK] {} -f root on {} (PID {})", prog, console.tty, pid);
                     return pid;
                 }
                 Err(e) => eprintln!("  [WARN] {} failed: {}", prog, e),
@@ -769,7 +797,7 @@ fn spawn_getty() -> i32 {
     let getty_paths = ["/sbin/getty", "/bin/getty", "/usr/sbin/getty"];
     for getty in &getty_paths {
         if Path::new(getty).exists() {
-            let args = getty_args(getty_is_busybox(getty));
+            let args = getty_args(getty_is_busybox(getty), console);
             let argv: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             match fork_exec(getty, &argv) {
                 Ok(pid) => {
@@ -786,7 +814,7 @@ fn spawn_getty() -> i32 {
     for bb in &busybox_paths {
         if Path::new(bb).exists() {
             let mut args = vec!["getty".to_string()];
-            args.extend(getty_args(true)); // busybox order
+            args.extend(getty_args(true, console)); // busybox order
             let argv: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             match fork_exec(bb, &argv) {
                 Ok(pid) => {
@@ -805,7 +833,7 @@ fn spawn_getty() -> i32 {
     let shell = find_shell();
     match fork_exec_with_tty(&shell, &["-l"], &tty_path) {
         Ok(pid) => {
-            println!("  [OK] Recovery shell on {} (PID {})", GETTY_TTY, pid);
+            println!("  [OK] Recovery shell on {} (PID {})", console.tty, pid);
             pid
         }
         Err(e) => {
@@ -861,19 +889,19 @@ fn getty_is_busybox_with_candidates(path: &str, busybox_paths: &[&str]) -> bool 
 ///
 /// `-L` = local line / do not require carrier-detect, correct for the Zynq
 /// UART on both implementations. The TERM positional is `vt100` either way.
-fn getty_args(is_busybox: bool) -> Vec<String> {
+fn getty_args(is_busybox: bool, console: ConsoleProfile) -> Vec<String> {
     if is_busybox {
         vec![
             "-L".to_string(),
-            GETTY_BAUD.to_string(),
-            GETTY_TTY.to_string(),
+            console.baud.to_string(),
+            console.tty.to_string(),
             "vt100".to_string(),
         ]
     } else {
         vec![
             "-L".to_string(),
-            GETTY_TTY.to_string(),
-            GETTY_BAUD.to_string(),
+            console.tty.to_string(),
+            console.baud.to_string(),
             "vt100".to_string(),
         ]
     }
@@ -1515,6 +1543,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn optional_external_failure_retains_network_but_never_starts_mining() {
+        let directory = TestDir::new("external-optional-failure");
+        let witness = directory.path().join("services");
+        let target = witness.to_string_lossy();
+        write_executable_script(directory.path(), "S45persistent", "exit 0");
+        write_executable_script(directory.path(), "S01syslogd", "exit 9");
+        for name in ["S40network", "S50dropbear", "S82dcentrald", "S46reset-settings"] {
+            write_executable_script(directory.path(), name, &format!("echo {name} >> '{target}'"));
+        }
+        let result = run_init_scripts_from(directory.path(), "start", ServicePosture::ExternalRestricted);
+        assert!(result.external_gate_admitted);
+        assert_eq!(fs::read_to_string(witness).unwrap(), "S40network\nS50dropbear\n");
+        assert_eq!(result.succeeded, ["S45persistent", "S40network", "S50dropbear"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn external_nonexecutable_readiness_gate_refuses_the_whole_pass() {
         let directory = TestDir::new("external-gate-nonexec");
         let witness = directory.path().join("service-ran");
@@ -1701,7 +1746,7 @@ mod tests {
     #[test]
     fn getty_args_busybox_order_is_baud_then_tty() {
         // BusyBox: `getty [opts] BAUD TTY [TERM]`
-        let args = getty_args(true);
+        let args = getty_args(true, console_profile("am1-s15"));
         assert_eq!(
             args,
             vec![
@@ -1720,7 +1765,7 @@ mod tests {
     #[test]
     fn getty_args_agetty_order_is_tty_then_baud() {
         // util-linux agetty: `agetty [opts] TTY BAUD [TERM]`
-        let args = getty_args(false);
+        let args = getty_args(false, console_profile("am1-s15"));
         assert_eq!(
             args,
             vec![
@@ -1741,10 +1786,45 @@ mod tests {
         // the same vector to both binaries (the original bug) would make these
         // equal again.
         assert_ne!(
-            getty_args(true),
-            getty_args(false),
+            getty_args(true, console_profile("am1-s15")),
+            getty_args(false, console_profile("am1-s15")),
             "BusyBox and agetty argument orders must never collapse to the same vector"
         );
+    }
+
+    #[test]
+    fn exact_bm1362_aml_uses_kernel_console_without_naming_an_asic_uart() {
+        for target in ["am3-s19jpro-aml\n", "am3-s19jproa\n", "am3-s19jproplus\n"] {
+            let profile = console_profile(target);
+            assert_eq!(
+                profile,
+                ConsoleProfile {
+                    tty: "console",
+                    baud: "0"
+                }
+            );
+            assert_eq!(getty_args(true, profile), ["-L", "0", "console", "vt100"]);
+            assert_eq!(getty_args(false, profile), ["-L", "console", "0", "vt100"]);
+        }
+        for other in [
+            "am1-s15",
+            "am1-t15",
+            "am1-s9",
+            "am3-s19jpro-aml-other",
+            "am3-s19jproa-other",
+            "am3-s19jproplus-other",
+            "am3-s19jpro-bb",
+            "",
+            "ttyS1",
+        ] {
+            assert_eq!(
+                console_profile(other),
+                ConsoleProfile {
+                    tty: GETTY_TTY,
+                    baud: GETTY_BAUD
+                }
+            );
+        }
     }
 
     #[test]

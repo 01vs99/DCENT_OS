@@ -146,6 +146,15 @@ pub mod hashboard_topology;
 /// 9: hashboard SKU catalog (BHB42601/42801/42611 + BHB56902 +
 /// legacy BHB-S9/S11/S17 placeholders).
 pub mod hashboards;
+/// B11 (2026-09-02): hydro/immersion fleet foundation — stock-pinned
+/// geometry for every hydro/immersion `machine` in the Phase A
+/// asicminingsupplies topol haul (plus the VNish-only boards no stock
+/// firmware is held for), the settled chain-count adjudication (2022-gen
+/// 4 · XP/S21-gen 3), and the hashboard-code cooling-medium discriminator
+/// the `board_desc.rs` doc comment points at
+/// (`cooling_medium_for_hashboard_code`). Data + typing only — no
+/// admission, no tuning fields, no invented thermal envelopes.
+pub mod hydro_fleet;
 /// Per-model power/efficiency operating-point catalog (S9 → S21).
 ///
 /// Harvested + cited companion to the per-chip `SiliconTable` step ladder.
@@ -181,6 +190,23 @@ pub mod registry;
 /// Fabric identity + LM75-before-probe + Has_Pic:false refuse; mining stays
 /// NOT IMPLEMENTED.
 pub mod s19k_nopic_admission;
+/// Gauntlet B5b (2026-09-02): S19-family stock topology transcribed
+/// byte-exactly from Bitmain's own firmware in the asicminingsupplies mirror
+/// (Phase A extractions). Pins NBS1902 76/chain + NBP1901 114/chain (the
+/// "deliberate divergence" is two real boards), NBT1903 76/chain (T19
+/// geometry settled desk-side), and BHB42701 108/chain BM1362 (S19j-classic
+/// identity: refutes the old BM1398 identity-only roster claim). Transcription
+/// + refusals only — no energization authority, no rival SiliconTable.
+pub mod s19_family_stock_topol;
+/// Gauntlet B6 (2026-09-02): first-party Bitmain stock-firmware + factory-jig
+/// evidence for the BM1398 air family (S19 NBS1902 / S19 Pro NBP1901 /
+/// T19 NBT1903): the factory XXTEA key tables (G1, AMTC jig VA `0x487a4` +
+/// stock NBP1901 `bmminer` VA `0x7e2ac`), the PSU-version-keyed
+/// rail-voltage→DAC-code law with its `55 AA 06 83` frame (G4), the
+/// observed PSU/PIC1704 framed command sets (G5), and the stock
+/// `levels.json` V/F ladders. Evidence + pure derivation only — no
+/// hardware authority lives here; every electrical use is bench-gated.
+pub mod s19_family_stock;
 /// Round-15 A5 (2026-08-07): Scrypt product-line (L3+ / L7 / L9) topology
 /// transcribed byte-exactly from authentic Bitmain stock images, plus the
 /// stock L3+ chain-UART baud whitelist decoded from its own termios mapper.
@@ -197,6 +223,30 @@ pub mod scrypt_stock_topology;
 pub mod sensor_topology;
 ///  tune-C: staggered chain power-up planner.
 pub mod staggered_powerup;
+/// Gauntlet B10 (2026-09-02): Antminer **S21 air family** (S21 / S21 Pro /
+/// S21 XP) stock-evidence contracts + the controller adjudication record.
+/// The air AML stock records are sealed code-9 `ANDROID!` images — this
+/// module transcribes their readable headers only — so the evidence base is
+/// Bitmain's own factory test jigs (BHB68603 bench config: BM1368
+/// 108/board 12 dom x 9; the S21pro/S21xp binaries: BM1370 + the
+/// PIC1704 HAL) plus the zynq-class hydro records as controller-platform
+/// cross-checks, and the live `a lab unit` PSU/fan datums. Transcription +
+/// adjudication only — no SiliconTable, no envelope, no energization, and
+/// NO `pic_type_hint` flip (the S21 verdict — part present, runtime idle —
+/// is evidence for the promotion-time DCENT_EE review, never a code
+/// change).
+pub mod s21_family_stock_topol;
+/// Gauntlet B9 (2026-09-02): Antminer T21 stock contracts transcribed
+/// byte-exactly from Bitmain's own `t21-merge-20240926` image (the
+/// asicminingsupplies mirror Phase A ingestion): BHB6870X geometry
+/// (BM1368, 3 chains x 108, 12 domains x 9, interval 2), the APW11A PSU
+/// dialect (@I2C 0x10, gpio 907, version keys), the PIC1704@0x20 chain-MCU
+/// label + EEPROM/sensor map, the 4-fan layout, the zynq7007 controller map
+/// (256 MiB DDR, 8-partition pl353 NAND), the stock S70/bmminer cold-init
+/// sequence, and the stock levels/strategy tokens. Transcription-only —
+/// no SiliconTable, no envelope, no energization; every electrical
+/// constant is bench-gated evidence, never a DCENT tuning datum.
+pub mod t21_stock_topol;
 /// Rank-31 (2026-08-03): VNish 1.2.7 thermal/hardware matrix — 77 models
 /// keyed by Bitmain `btm_model`, generated from the re-armada 2026-04-25
 /// extraction of 18 VNish firmware images. THIRD-PARTY TRANSCRIPTION

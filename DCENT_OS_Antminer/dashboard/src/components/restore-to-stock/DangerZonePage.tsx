@@ -10,9 +10,24 @@ import React, { useState } from 'react';
 import { RestoreToStockModal } from './RestoreToStockModal';
 import { HarvestModeBanner } from './HarvestModeBanner';
 import { InfoDot } from '../common/Tooltip';
+import { api } from '../../api/client';
 
 export function DangerZonePage() {
   const [restoreOpen, setRestoreOpen] = useState(false);
+  const [confirmation, setConfirmation] = useState('');
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetMessage, setResetMessage] = useState<string | null>(null);
+  const [resetError, setResetError] = useState<string | null>(null);
+  async function resetSettings() {
+    setResetBusy(true);
+    setResetError(null);
+    try {
+      const result = await api.resetSettings(confirmation);
+      setResetMessage(result.detail);
+    } catch (error) {
+      setResetError(error instanceof Error ? error.message : 'Settings reset could not be scheduled.');
+    } finally { setResetBusy(false); }
+  }
 
   return (
     <div className="page-content p4-danger-page">
@@ -25,13 +40,38 @@ export function DangerZonePage() {
         <InfoDot term="brick_anxiety" placement="bottom" label="Why these operations are gated" />
       </div>
       <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary, #8b8b9e)', maxWidth: 720, marginBottom: 16 }}>
-        Operations on this page <strong>permanently overwrite firmware slots</strong>. Each one
-        walks through an explicit multi-step confirm (typed serial + typed phrase + slider).
-        Backend re-checks every gate at the wire. You can back out of the modal until you submit
-        the final slider — after that point the flash is committed.
+        Read the scope of each operation before confirming. Settings reset clears your DCENT_OS
+        preferences and credentials. Flashing stock firmware has a separate preflight and confirmation.
       </div>
 
       <HarvestModeBanner />
+
+      <section className="section" aria-label="Reset DCENT_OS settings">
+        <h3>Reset DCENT_OS settings</h3>
+        <p>Stops mining through the checked shutdown owner, clears DCENT_OS configuration,
+          dashboard credentials, uploaded SSH keys and saved profiles, then reboots with mining disabled.
+          Vendor partitions and hardware safety records are preserved. A failed shutdown prevents reset.</p>
+        <label htmlFor="reset-settings-confirmation">Type RESET DCENT_OS SETTINGS</label>
+        <input id="reset-settings-confirmation" value={confirmation} autoComplete="off"
+          disabled={resetBusy || Boolean(resetMessage)} onChange={event => setConfirmation(event.target.value)} />
+        <button type="button" className="btn-danger" onClick={() => void resetSettings()}
+          disabled={resetBusy || Boolean(resetMessage) || confirmation !== 'RESET DCENT_OS SETTINGS'}>
+          {resetBusy ? 'Scheduling reset…' : 'Reset DCENT_OS settings'}
+        </button>
+        {resetMessage && <p role="status">{resetMessage}</p>}
+        {resetError && <p role="alert">{resetError}</p>}
+        <details style={{ marginTop: 12 }}>
+          <summary>Recover without a UART console</summary>
+          <p>No reset-button timing is qualified. On supported external SD media, power down and
+            use a Linux computer to place a root-owned <code>dcent/reset-settings</code> file
+            on the DCENT data partition, containing <code>RESET DCENT_OS SETTINGS</code> followed
+            by a newline. Use mode 0600 for the file and 0700 for its directory, unmount cleanly
+            and reinstall the card. The next boot validates the signed defaults and checked
+            shutdown before consuming the marker. This does not reset a separate NAND partition.</p>
+          <p>An interrupted reset remains fenced. Resolve the reported cause before repeating
+            the marker procedure. Never remove a hardware-session or crash journal to force startup.</p>
+        </details>
+      </section>
 
       <div className="section p4-restore-card">
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>

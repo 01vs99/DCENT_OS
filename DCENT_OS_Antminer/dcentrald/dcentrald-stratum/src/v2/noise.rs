@@ -18,7 +18,7 @@
 //!
 //! # ECDH operations
 //! - `ee` DH: BIP324 tagged EllSwift ECDH (`secp256k1_ellswift_xdh`)
-//! - `es` DH: Standard secp256k1 ECDH (server static key is not EllSwift-encoded)
+//! - `es` DH: BIP324 tagged EllSwift ECDH with the server static key
 //!
 //! # Certificate validation
 //! After handshake, the server sends SIGNATURE_NOISE_MESSAGE (encrypted).
@@ -94,26 +94,10 @@ impl SignatureNoiseMessage {
     ///           || not_valid_after(U32 LE) || server_static_key )
     /// ```
     ///
-    /// `server_static_key` is the **exact bytes the server committed to on
-    /// the wire** — in the current `…Secp256k1+EllSwift…` cipher suite that
-    /// is the **64-byte ElligatorSwift encoding** of the server static key
-    /// (the older `…25519…` suite used a 32-byte raw key — that form is not
-    /// what SRI/Braiins speak today). The verifier MUST sign over the wire
-    /// bytes; it cannot substitute the decoded point because EllSwift is a
-    /// one-way-on-the-wire commitment.
-    ///
-    /// The 32-byte digest is the BIP340 message `m` (the `secp256k1` crate's
-    /// `verify_schnorr` consumes a pre-reduced 32-byte `Message`, matching
-    /// SRI's `Message::from_hashed_data`-equivalent convention).
-    ///
-    /// Verification key is the **pool authority** x-only key (pinned from
-    /// the SV2 URL, see [`crate::v2::auth`]), NOT the server static key.
-    ///
-    /// # Arguments
-    /// * `authority_key` — pool authority public key (x-only, 32 bytes),
-    ///   parsed from the SV2 URL.
-    /// * `server_static_wire` — the server static key **as it appeared on
-    ///   the wire** (64-byte EllSwift encoding for this cipher suite).
+    /// Certificates sign the decoded 32-byte x-only static key (spec 4.3.1.1),
+    /// while the handshake carries its 64-byte ElligatorSwift encoding.
+    /// `server_static_wire` is decoded here before hashing the signed buffer.
+    /// Verification uses the pinned pool authority, never the server static key.
     pub fn verify_schnorr(
         &self,
         authority_key: &[u8; 32],
@@ -130,12 +114,19 @@ impl SignatureNoiseMessage {
             ));
         }
 
-        // Build the signed buffer: header fields (LE) || full wire static key.
-        let mut msg_data = Vec::with_capacity(2 + 4 + 4 + STATIC_KEY_SIZE);
+        // The Noise transcript already authenticates the wire encoding. The
+        // certificate commits to the underlying x-only key, as SRI does.
+        let mut wire = [0u8; STATIC_KEY_SIZE];
+        wire.copy_from_slice(server_static_wire);
+        let static_xonly = secp256k1::PublicKey::from_ellswift(ElligatorSwift::from_array(wire))
+            .x_only_public_key()
+            .0
+            .serialize();
+        let mut msg_data = Vec::with_capacity(2 + 4 + 4 + 32);
         msg_data.extend_from_slice(&self.version.to_le_bytes());
         msg_data.extend_from_slice(&self.valid_from.to_le_bytes());
         msg_data.extend_from_slice(&self.not_valid_after.to_le_bytes());
-        msg_data.extend_from_slice(server_static_wire);
+        msg_data.extend_from_slice(&static_xonly);
 
         let msg_hash = Sha256::digest(&msg_data);
         let message = Message::from_digest_slice(&msg_hash)
@@ -548,14 +539,8 @@ impl NoiseSession {
                 self.certificate_valid_from = cert.valid_from as u64;
                 self.certificate_not_after = cert.not_valid_after as u64;
 
-                // Verify BIP340 Schnorr signature when a pool authority key
-                // is pinned. The signed buffer is
-                //   version(U16 LE) || valid_from(U32 LE)
-                //     || not_valid_after(U32 LE) || server_static_wire
-                // where server_static_wire is the full 64-byte EllSwift
-                // encoding the server committed to on the wire (SV2 spec
-                // §4.5.2 / SRI noise_sv2). Verification key = pinned pool
-                // authority key (from the SV2 URL), NOT the server static.
+                // Verify SHA256(header || decoded 32-byte x-only static key)
+                // against the pinned pool authority (SV2 spec 4.3.1.1).
                 if let Some(ref authority_key) = self.pool_authority_key {
                     // Pinned authority — signature verification is MANDATORY
                     // and so is the validity window (SV2 spec: an expired or
@@ -1093,7 +1078,7 @@ mod tests {
     ///
     /// The cert is signed over the spec-exact buffer
     ///   SHA256( version_le16 || valid_from_le32 || not_valid_after_le32
-    ///           || server_static_wire(64-byte EllSwift) )
+    ///           || server_static_xonly(32 bytes) )
     /// with `authority_kp`. When `corrupt_sig` is true the serialized
     /// signature's first byte is flipped, simulating a MITM that re-signed
     /// with a key the client did not pin (verification MUST then fail).
@@ -1175,7 +1160,7 @@ mod tests {
         let es_bytes: [u8; 32] = es_shared.to_secret_bytes();
         let (ck_after_es, k_es) = NoiseSession::hkdf_sha256(&ck_after_ee, &es_bytes);
 
-        // Real BIP340 Schnorr cert over the actual server static wire bytes.
+        // BIP340 certificate over the decoded server static x-only key.
         let mut sig = sign_cert(
             authority_kp,
             cert_version,
@@ -1754,7 +1739,7 @@ mod tests {
     // These build a *genuine* BIP340 Schnorr signature with a real
     // secp256k1 authority keypair over the spec-exact signed buffer
     //   SHA256( version_le16 || valid_from_le32 || not_valid_after_le32
-    //           || server_static_wire(64 EllSwift) )
+    //           || server_static_xonly(32 bytes) )
     // and prove: valid → accepted, wrong key → rejected, tampered field →
     // rejected, validity-window enforced.
 
@@ -1770,7 +1755,12 @@ mod tests {
         buf.extend_from_slice(&version.to_le_bytes());
         buf.extend_from_slice(&valid_from.to_le_bytes());
         buf.extend_from_slice(&not_valid_after.to_le_bytes());
-        buf.extend_from_slice(server_static_wire);
+        buf.extend_from_slice(
+            &secp256k1::PublicKey::from_ellswift(ElligatorSwift::from_array(*server_static_wire))
+                .x_only_public_key()
+                .0
+                .serialize(),
+        );
         let digest = Sha256::digest(&buf);
         let msg = Message::from_digest_slice(&digest).unwrap();
         let secp = Secp256k1::new();

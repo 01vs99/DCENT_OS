@@ -4,6 +4,7 @@ import { useHeaterPresets } from '../../hooks/useHeaterPresets';
 import { api } from '../../api/client';
 import { wattsToBtu } from '../../utils/thermal';
 import { glossaryText } from '../../utils/glossary';
+import { heaterTargetFeedback } from '../../utils/heaterTarget';
 
 // Plain-language "what does this preset feel like" hover, by warm-tone bucket.
 // Reinforces the quiet-home posture without ever overstating noise.
@@ -51,11 +52,8 @@ function presetTone(name: string): 'eco' | 'quiet' | 'balanced' | 'max' | 'silen
 export function PowerPresets() {
   const currentPreset = useMinerStore(s => s.heaterStatus?.preset ?? '');
   const presets = useHeaterPresets();
-  // When the API never delivered presets, useHeaterPresets() transparently
-  // falls back to the built-in Quiet/Balanced/Max set. Detect that here so we
-  // can show a quiet "using defaults" note — the grid still renders fully, it
-  // never blanks.
-  const usingDefaultPresets = useMinerStore(s => s.heaterPresets.length === 0);
+  // The fallback is limited to an explicitly identified S9.
+  const usingDefaultPresets = useMinerStore(s => s.heaterPresets.length === 0 && s.heaterPresetScope?.family === 's9');
   const presetScope = useMinerStore(s => s.heaterPresetScope);
   const addToast = useMinerStore(s => s.addToast);
   const [applying, setApplying] = useState(false);
@@ -63,7 +61,9 @@ export function PowerPresets() {
   const handleSelect = async (name: string) => {
     try {
       setApplying(true);
-      await api.setHeaterTarget({ preset: name });
+      const result = await api.setHeaterTarget({ preset: name });
+      const feedback = heaterTargetFeedback(result);
+      addToast(feedback.message, feedback.tone);
     } catch {
       addToast('Failed to apply preset', 'error');
     } finally {
@@ -76,11 +76,12 @@ export function PowerPresets() {
 
   return (
     <div className="presets-section">
+      {presets.length === 0 && <p>No heater presets are available for this model and controller.</p>}
       <div className="presets-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
         {presets.map(p => {
           const isActive = currentPreset === p.name;
-          const wallW = estimateWallWatts(p.watts);
-          const btu = p.btu_h > 0 ? p.btu_h : wattsToBtu(wallW);
+          const btu = p.estimates_available === false ? null
+            : p.btu_h > 0 ? p.btu_h : wattsToBtu(p.wall_watts ?? estimateWallWatts(p.watts));
 
           const tone = presetTone(p.name);
           return (
@@ -88,11 +89,11 @@ export function PowerPresets() {
               key={p.name}
               className={`glass-card preset-btn${isActive ? ' active' : ''}${applying ? ' disabled' : ''}`}
               data-preset-tone={tone}
-              data-tooltip={PRESET_TONE_HELP[tone] ?? PRESET_TONE_HELP.balanced}
+              data-tooltip={p.estimates_available === false ? p.description : PRESET_TONE_HELP[tone] ?? PRESET_TONE_HELP.balanced}
               onClick={() => handleSelect(p.name)}
               disabled={applying}
               aria-pressed={isActive}
-              aria-label={`Set heater to ${p.display_name || p.name} preset, approximately ${p.watts} watts`}
+              aria-label={`Request ${p.display_name || p.name} preset, ${p.watts} watts`}
             >
               <div className="preset-btn-header">
                 <FlameIcon intensity={flameIntensity(p.watts)} />
@@ -102,7 +103,7 @@ export function PowerPresets() {
               </div>
               <span className="watts">{p.watts}W</span>
               <div className="preset-specs">
-                <span className="preset-btu">{btu.toLocaleString()} BTU/h</span>
+                <span className="preset-btu">{btu === null ? 'Power target; check live wall power' : `${btu.toLocaleString()} BTU/h`}</span>
               </div>
             </button>
           );
@@ -120,9 +121,10 @@ export function PowerPresets() {
       )}
       {presetScope && presetScope.universal === false && (
         <div className="presets-note">
-          Preset estimates shown for {presetScope.label}
+          Power requests for {presetScope.label}
         </div>
       )}
+      {presetScope?.control_note && <p role="status">{presetScope.control_note}</p>}
       <div
         className="presets-quiet-note"
         data-tooltip={glossaryText('cut_hash_before_noise')}

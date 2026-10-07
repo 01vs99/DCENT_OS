@@ -200,6 +200,7 @@ struct ActiveCustomJob {
 /// Declaration `probe_once` is a connectivity probe, not work injection.
 pub struct StratumV2Client {
     config: StratumConfig,
+    capacity_rx: Option<tokio::sync::watch::Receiver<crate::v1::policy::ActiveCapacity>>,
 
     /// Nominal device hashrate in GH/s. Used in OpenStandardMiningChannel
     /// so the pool can set appropriate initial difficulty.
@@ -223,6 +224,14 @@ pub struct StratumV2Client {
 }
 
 impl StratumV2Client {
+    pub fn with_capacity_rx(
+        mut self,
+        rx: tokio::sync::watch::Receiver<crate::v1::policy::ActiveCapacity>,
+    ) -> Self {
+        self.capacity_rx = Some(rx);
+        self
+    }
+
     fn active_sv2_pool(&self) -> PoolConfig {
         let mut pool = self.config.pool1.clone();
         if let Some(sv2_url) = &pool.sv2_url {
@@ -247,6 +256,7 @@ impl StratumV2Client {
     ) -> Self {
         Self {
             config,
+            capacity_rx: None,
             nominal_hashrate_ghs,
             job_tx,
             share_rx,
@@ -285,6 +295,7 @@ impl StratumV2Client {
 
         let Self {
             config,
+            capacity_rx,
             nominal_hashrate_ghs,
             job_tx,
             share_rx,
@@ -295,11 +306,17 @@ impl StratumV2Client {
         } = self;
 
         let v1_client = StratumV1Client::new(config, job_tx, share_rx, status_tx);
+        let v1_client = if let Some(rx) = capacity_rx.clone() {
+            v1_client.with_capacity_rx(rx)
+        } else {
+            v1_client
+        };
         let v1_client = v1_client.run_until_sv2_retry(retry_interval).await;
         let (config, job_tx, share_rx, status_tx) = v1_client.into_parts();
 
         let client = Self {
             config,
+            capacity_rx,
             nominal_hashrate_ghs,
             job_tx,
             share_rx,
@@ -639,21 +656,18 @@ impl StratumV2Client {
             .map_err(|e| format!("Failed to send Noise act1: {}", e))?;
 
         // Act 2: <- e, ee, s, es (read server response)
-        let mut hs_buf = vec![0u8; 512];
-        let hs_len = timeout(HANDSHAKE_TIMEOUT, reader.read(&mut hs_buf))
+        // Read precisely act2: TCP may split it or coalesce it with the first
+        // encrypted frame. A single read can truncate either protocol unit.
+        let mut hs_buf = [0u8; super::noise::MIN_SERVER_RESPONSE];
+        timeout(HANDSHAKE_TIMEOUT, reader.read_exact(&mut hs_buf))
             .await
             .map_err(|_| "Noise handshake timeout (15s)".to_string())?
-            .map_err(|e| format!("Failed to read Noise response: {}", e))?;
-
-        if hs_len == 0 {
-            return Err("Server closed connection during Noise handshake".into());
-        }
-
-        info!("SV2: Noise <- response ({} bytes)", hs_len);
+            .map_err(|e| format!("Failed to read complete Noise response: {}", e))?;
+        info!("SV2: Noise <- response ({} bytes)", hs_buf.len());
 
         channel
             .noise_session_mut()
-            .initiator_handshake_finish(&hs_buf[..hs_len])
+            .initiator_handshake_finish(&hs_buf)
             .map_err(|e| format!("Noise handshake finish failed: {}", e))?;
 
         info!("SV2: Noise_NX handshake COMPLETE -- encrypted transport active");

@@ -1,0 +1,12 @@
+# DCENTos Buildroot override - Antminer S19k Pro NoPic, Amlogic A113D.
+# Exact held identity: fw-info model=s19kpro/platform=aml/install_type=nand
+# (vnish 1.2.7 s19kpro NAND donor; kernel 4.9.113 AXG, BHB5690x hashboards,
+# TAS5782M kernel-managed voltage). Distinct from the legacy am3-s19k
+# runtime lane: this is the NoPic persistent-startup image target.
+BR2_TARGET_GENERIC_HOSTNAME="dcentos-s19kpro"
+BR2_TARGET_GENERIC_ISSUE="DCENTos Experimental package for exact S19k Pro Amlogic identity"
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_DCENTOS_PATH)/board/common/rootfs-overlay $(BR2_EXTERNAL_DCENTOS_PATH)/board/amlogic/rootfs-overlay $(BR2_EXTERNAL_DCENTOS_PATH)/board/amlogic/am3-s19kpro-nopic/rootfs-overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_DCENTOS_PATH)/board/amlogic/am3-s19kpro-nopic/post-build.sh $(BR2_EXTERNAL_DCENTOS_PATH)/board/common/prune-runtime-research-tools.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_DCENTOS_PATH)/board/amlogic/am3-s19kpro-nopic/post-image.sh"
+
+BR2_PACKAGE_MTD_UBIATTACH=y

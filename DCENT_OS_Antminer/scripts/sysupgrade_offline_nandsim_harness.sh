@@ -31,6 +31,15 @@ UBI_IDENTITY_HELPER="$PROJECT_DIR/br2_external_dcentos/board/zynq/rootfs-overlay
 ZYNQ_GEOMETRY_HELPER="$PROJECT_DIR/br2_external_dcentos/board/zynq/rootfs-overlay/usr/libexec/dcentos/sysupgrade-zynq-geometry.sh"
 UBOOT_ENV_ADMISSION_HELPER="$PROJECT_DIR/br2_external_dcentos/board/zynq/rootfs-overlay/usr/libexec/dcentos/sysupgrade-uboot-env-admission.sh"
 NANDSIM_GEOMETRY_HELPER="$PROJECT_DIR/scripts/lib/zynq_nandsim_geometry.sh"
+# 2026-09-15 (C1 adjudication, brief 1): the am2 writers hard-require the
+# native AM2 OTA participant (05124af24) even in -T mode. The deployed
+# participant (am2-native-ota.sh + am2_ota_boot.py + am2-nand-window) cannot
+# run offline — no signed FPGA package, no dual10 window writer — so the
+# offline stub keeps the env-snapshot/commit/apply custody real while
+# no-oping the fabric rung. The writers refuse these overrides on the
+# deployed /usr/sbin/sysupgrade path, so this stays an offline-proof-only
+# channel.
+AM2_OTA_OFFLINE_STUB="$PROJECT_DIR/scripts/lib/sysupgrade_am2_ota_offline_stub.sh"
 
 [ -r "$NANDSIM_GEOMETRY_HELPER" ] || {
     echo "ERROR: missing nandsim geometry helper: $NANDSIM_GEOMETRY_HELPER" >&2
@@ -1142,6 +1151,7 @@ ENV_ARGS=(
     "DCENT_SYSUPGRADE_UBI_IDENTITY_HELPER=$UBI_IDENTITY_HELPER"
     "DCENT_SYSUPGRADE_ZYNQ_GEOMETRY_HELPER=$ZYNQ_GEOMETRY_HELPER"
     "DCENT_SYSUPGRADE_UBOOT_ENV_ADMISSION_HELPER=$UBOOT_ENV_ADMISSION_HELPER"
+    "DCENT_SYSUPGRADE_AM2_OTA_HELPER=$AM2_OTA_OFFLINE_STUB"
     "DCENT_SYSUPGRADE_FW_ENV_CONFIG=$OFFLINE_FW_ENV_CONFIG"
     "DCENT_SYSUPGRADE_UBOOT_ENV_PROC_MTD=$OFFLINE_UBOOT_ENV_PROC_MTD"
     "DCENT_SYSUPGRADE_UBOOT_ENV_SYSFS_MTD_ROOT=$OFFLINE_UBOOT_ENV_SYSFS_MTD_ROOT"

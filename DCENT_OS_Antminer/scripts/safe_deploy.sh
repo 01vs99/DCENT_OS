@@ -43,7 +43,7 @@
 #   --verify             Poll /api/status for 15s after start, confirm HTTP 200
 #   --tail               After deploy, exec ssh tail -f /tmp/dcentrald.log
 #   --rollback-on-fail   If health check fails, restore backup and restart
-#   --json               Output JSON result (for Claude Code parsing)
+#   --json               Output JSON result (for tooling / automation)
 #
 # Wave B (2026-05-19): the --passthrough CLI flag was removed. The
 # [mining].passthrough = true knob in /data/dcentrald.toml is the canonical

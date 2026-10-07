@@ -1,3 +1,4 @@
+import { DCENT_FUND_CANONICAL_URL } from '../../utils/links';
 // DCENT_OS Setup Wizard — Donation step.
 //
 // Structural recreation of the kit `DonationStep` (ui_kits/wizard): the
@@ -30,7 +31,9 @@ interface DonationStepProps {
 }
 
 const PRESETS = [0, 0.5, 1, 2, 3, 5];
-const DEFAULT_PERCENT = 2;
+// C6 (2026-09-01): donation is opt-in (0% default). Toggling it on from a
+// zero percent presets the smallest honest opt-in — never a hidden take.
+const ENABLE_PERCENT = 1;
 const CYCLE_S = 3600;
 
 function clampPercent(v: number): number {
@@ -42,14 +45,14 @@ function fmt(v: number): string {
 
 export function DonationStep({ value, mode, onChange }: DonationStepProps) {
   const enabled = value.enabled;
-  const percent = clampPercent(value.percent ?? DEFAULT_PERCENT);
+  const percent = clampPercent(value.percent ?? 0);
   const donateS = Math.round((percent / 100) * CYCLE_S);
   const userS = CYCLE_S - donateS;
 
   const toggle = () =>
     onChange({
       enabled: !enabled,
-      percent: !enabled && percent <= 0 ? DEFAULT_PERCENT : percent,
+      percent: !enabled && percent <= 0 ? ENABLE_PERCENT : percent,
     });
   const setPercent = (p: number) => onChange({ enabled, percent: clampPercent(p) });
 
@@ -57,20 +60,28 @@ export function DonationStep({ value, mode, onChange }: DonationStepProps) {
     <div className="wiz-step-body wizard-step-pane">
       <h2 className="wiz-h2">Optional donation</h2>
       <p className="wiz-fld-hint">
-        optional, not mandatory: unlike a fee you cannot disable, you choose the amount and can disable it.
+        optional and off by default: DCENT_OS ships 0% fee — nothing is taken unless you turn this on.
       </p>
       <p className="wiz-lede">
-        DCENT_OS has <strong>no mandatory dev fee</strong>. The donation keeps the
-        firmware funded by briefly switching to DCENT_Pool — D-Central&apos;s
-        Solo/Guild pool — then returning to your pool. Unlike a fee you cannot
-        disable, you choose the amount, increase it up to 5%, set it to 0%, or
-        disable it entirely.
+        DCENT_OS is <strong>0% fee and open source — no mandatory fee, ever</strong>.
+        If you want to fund development, this optional donation briefly switches
+        to DCENT_Pool — D-Central&apos;s Solo/Guild pool — then returns to your
+        pool. You choose the amount (up to 5%), set it to 0%, or disable it
+        entirely at any time.
       </p>
 
-      <div className="wiz-info amber">
-        <strong>Please leave at least 1% enabled.</strong> This is the project&apos;s
-        revenue model. If the firmware helps your miner, the donation helps keep
-        open-source mining firmware maintained.
+      <div className="wiz-info">
+        <strong>Optional, visible, one tap off.</strong> When active, the
+        donation is a visible pool switch shown on the dashboard. Prefer to
+        support the project without touching hashrate?{' '}
+        <a
+          href={DCENT_FUND_CANONICAL_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: 'var(--wz-accent)' }}
+        >
+          d-central.tech/fund
+        </a>
       </div>
 
       <div className={`wiz-donation-toggle-row${enabled ? ' on' : ''}`}>
@@ -134,7 +145,7 @@ export function DonationStep({ value, mode, onChange }: DonationStepProps) {
               disabled={!enabled}
               aria-label={`Set donation to ${p} percent`}
             >
-              {p}%{p === 2 ? ' rec' : ''}
+              {p}%
             </button>
           ))}
         </div>
@@ -160,7 +171,7 @@ export function DonationStep({ value, mode, onChange }: DonationStepProps) {
         &quot;DONATING&quot; pill shows on the dashboard top bar so you can see
         exactly what&apos;s happening. The autotuner does not pay this donation;
         it is a separate, disableable take-rate.
-        {mode === 'heater' && <> At 2%, that&apos;s 72 seconds inside a 60-minute cycle.</>}
+        {mode === 'heater' && <> At an opted-in 2%, that&apos;s 72 seconds inside a 60-minute cycle.</>}
       </div>
 
       <p className="wiz-fld-hint">

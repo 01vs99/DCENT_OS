@@ -1,0 +1,38 @@
+{
+ "_fixture": "SYNTHESIZED, NOT A DEVICE CAPTURE (lane P1-W6, 2026-09-03). Every other fixture in this tree is a scrubbed read-only capture of the bench Hex Supra; this one is not — no device was contacted for it. It reproduces the EMPTY-HISTORY branch of api.rs::register_system_statistics (api.rs:1814-1861): when history.samples is empty the handler still answers with exactly ONE row built from the live snapshot, whose timestamp equals currentTimestamp. That is a live reading, not history, and it is the state a just-booted device is in — which is what the first-run scenario means. The row's values are taken from this scenario's own first-run/system_info.json (hashRate 0, power 12.5 W, temp 53.5625 C, 0 shares, pool not configured) so the two fixtures cannot disagree. The column order is the handler's fixed label order. This key is mock metadata: the firmware emits currentTimestamp/labels/statistics and nothing else.",
+ "currentTimestamp": 1788420180232,
+ "labels": [
+  "hashrate",
+  "hashrate_15s",
+  "hashrate_30s",
+  "power",
+  "asicTemp",
+  "localAcceptedShares",
+  "localRejectedShares",
+  "sharesSubmitted",
+  "poolAcceptedShares",
+  "poolRejectedShares",
+  "responseTime",
+  "failoverActive",
+  "connected",
+  "timestamp"
+ ],
+ "statistics": [
+  [
+   0,
+   0,
+   0,
+   12.5,
+   53.5625,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   1788420180232
+  ]
+ ]
+}

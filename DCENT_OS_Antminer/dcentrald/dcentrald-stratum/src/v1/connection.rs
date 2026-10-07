@@ -180,6 +180,9 @@ pub struct StratumConnection {
     /// Operational inbound-line byte cap (V1 inbound-line cap, strat-09).
     /// Always finite (see the two consts above).
     max_line_bytes: usize,
+    /// Persistent across select! cancellation; partial TCP frames must survive
+    /// a share, watchdog, or capacity update becoming ready before newline.
+    partial_line: Vec<u8>,
 }
 
 /// Pure over-cap predicate for the bounded V1 line read.
@@ -321,6 +324,7 @@ impl StratumConnection {
             port,
             tls,
             max_line_bytes: DEFAULT_V1_MAX_LINE_BYTES,
+            partial_line: Vec::new(),
         })
     }
 
@@ -341,7 +345,10 @@ impl StratumConnection {
     /// Returns None on EOF (connection closed).
     pub async fn read_line(&mut self) -> Result<Option<String>, ConnectionError> {
         let cap = self.max_line_bytes;
-        let mut buf: Vec<u8> = Vec::new();
+        let remaining = cap.saturating_sub(self.partial_line.len());
+        if remaining == 0 {
+            return Err(ConnectionError::LineTooLong { cap });
+        }
 
         // Bounded read (V1 inbound-line cap, strat-09): read at most
         // `cap` bytes looking for the newline. A hostile or merely buggy
@@ -351,19 +358,20 @@ impl StratumConnection {
         let n = tokio::time::timeout(
             Duration::from_secs(300),
             (&mut self.reader)
-                .take(cap as u64)
-                .read_until(b'\n', &mut buf),
+                .take(remaining as u64)
+                .read_until(b'\n', &mut self.partial_line),
         )
         .await
         .map_err(|_| ConnectionError::ReadTimeout)?
         .map_err(ConnectionError::Io)?;
 
-        if n == 0 {
+        if n == 0 && self.partial_line.is_empty() {
             return Ok(None); // EOF
         }
 
+        let buf = std::mem::take(&mut self.partial_line);
         let had_newline = buf.last() == Some(&b'\n');
-        if v1_line_over_cap(n, had_newline, cap) {
+        if v1_line_over_cap(buf.len(), had_newline, cap) {
             // Over-cap / never-terminated line → protocol violation on
             // THIS connection. Fail-closed into the EXISTING V1
             // reconnect/backoff (no parallel path — same discipline as
@@ -397,11 +405,13 @@ impl StratumConnection {
     /// Write a newline-terminated message to the pool.
     pub async fn write_line(&mut self, msg: &str) -> Result<(), ConnectionError> {
         debug!(msg = %sanitize_stratum_wire_log_line(msg), "Miner -> Pool");
-        self.writer
-            .write_all(msg.as_bytes())
-            .await
-            .map_err(ConnectionError::Io)?;
-        self.writer.flush().await.map_err(ConnectionError::Io)?;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            self.writer.write_all(msg.as_bytes()).await?;
+            self.writer.flush().await
+        })
+        .await
+        .map_err(|_| ConnectionError::Timeout)?
+        .map_err(ConnectionError::Io)?;
         Ok(())
     }
 
@@ -525,6 +535,36 @@ impl Default for Backoff {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn cancelled_partial_reads_preserve_bytes_and_total_budget() {
+        use tokio::io::AsyncWriteExt;
+        let (stream, mut peer) = tokio::io::duplex(1024);
+        let mut conn =
+            super::StratumConnection::from_stream(Box::new(stream), "loopback", 0, false).unwrap();
+        conn.set_max_line_bytes(16);
+        peer.write_all(b"first ").await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), conn.read_line())
+                .await
+                .is_err()
+        );
+        peer.write_all(b"line\n").await.unwrap();
+        assert_eq!(
+            conn.read_line().await.unwrap().as_deref(),
+            Some("first line")
+        );
+        peer.write_all(b"12345678").await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), conn.read_line())
+                .await
+                .is_err()
+        );
+        peer.write_all(b"90123456").await.unwrap();
+        assert!(matches!(
+            conn.read_line().await,
+            Err(super::ConnectionError::LineTooLong { cap: 16 })
+        ));
+    }
     use super::*;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;

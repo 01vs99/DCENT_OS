@@ -383,4 +383,27 @@ JSON
 grep -qi "NOT A NAND" "$TMP/pkg-ok/TESTER_README.txt" || fail "NAND disclaimer missing"
 pass "package_am2_sd_release accepts complete manifest"
 
+for flag in --allow-dev-image --allow-incomplete-lab; do
+  if DROP=1 "$PKG" --image "$COMP_IMG" --label beta --output-root "$TMP/beta-refused" "$flag" >"$TMP/beta-error" 2>&1; then
+    fail "Beta DROP must refuse $flag"
+  fi
+  grep -q 'Beta DROP cannot package' "$TMP/beta-error" || fail "Beta override refusal reason"
+  [ ! -e "$TMP/beta-refused" ] || fail "refused Beta package emitted output"
+done
+pass "Beta DROP refuses DEV and incomplete package overrides"
+
+# The legacy packager copies companions; the release result gate separately
+# verifies their actual image/runtime binding. These bytes are LAB fixtures.
+printf 'test runtime metadata\n' >"${COMP_IMG}.runtime-image.json"
+if "$PKG" --image "$COMP_IMG" --label broken-pair --output-root "$TMP/broken-pair" --allow-dev-image >"$TMP/pair-error" 2>&1; then
+  fail "incomplete runtime companion pair must refuse"
+fi
+[ ! -e "$TMP/broken-pair" ] || fail "incomplete companion pair emitted output"
+printf 'test runtime signature\n' >"${COMP_IMG}.runtime-image.sig"
+"$PKG" --image "$COMP_IMG" --label pair --output-root "$TMP/pair-ok" --allow-dev-image >/dev/null || fail "complete lab pair copy"
+cmp "${COMP_IMG}.runtime-image.json" "$TMP/pair-ok/dcentos-pair.img.runtime-image.json" || fail "metadata copy changed bytes"
+cmp "${COMP_IMG}.runtime-image.sig" "$TMP/pair-ok/dcentos-pair.img.runtime-image.sig" || fail "signature copy changed bytes"
+(cd "$TMP/pair-ok" && sha256sum -c SHA256SUMS >/dev/null) || fail "companion checksum inventory"
+pass "legacy packager preserves complete runtime companions and refuses partial pairs before output"
+
 echo "test_stage_am2_sd_artifacts_static: all passed"

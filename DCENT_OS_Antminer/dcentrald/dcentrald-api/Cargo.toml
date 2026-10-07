@@ -31,6 +31,7 @@ dcent-schema = { path = "../../../shared/dcent-schema" }
 
 tower-http = { version = "0.5", features = ["cors"] }
 sha2 = "0.10"
+semver = "1"
 argon2 = "0.5"
 #  W9-B (R3-HIGH free-space precheck): direct statvfs(3) FFI in
 # nand_backup() so the daemon can refuse before mkdir/dd if /data has
@@ -59,21 +60,25 @@ uuid.workspace = true
 anyhow.workspace = true
 toml.workspace = true
 rumqttc.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 [features]
+# Hardware environment overrides; excluded from signed Beta/Stable builds.
+lab = ["dcentrald-common/lab", "dcentrald-hal/lab", "dcentrald-asic/lab", "dcentrald-thermal/lab", "dcentrald-autotuner/lab", "dcentrald-silicon-profiles/lab"]
 # Test/fuzz-only surface for libFuzzer targets. Production builds leave this
 # off, so private parser helpers stay private to normal downstream crates.
 fuzzing = []
 # Offline/recovery research implementations that must never be reachable from
 # the normal daemon router. Enabling this feature does not mount the handlers;
 # a future repair image also needs an exclusive hardware-owner lifecycle.
-recovery-tool = []
+recovery-tool = ["dcentrald-common/lab"]
 # MQTT TLS (mqtts://). DEFAULT-OFF: production/default builds refuse mqtts://
 # rather than silently downgrade to plaintext (MQTT-TLS-DOWNGRADE-1). Opt in
 # with `--features mqtt-tls` (or the dcentrald crate passthrough). Re-enables
-# rumqttc's rustls transport which was stripped to avoid a second rustls stack.
-mqtt-tls = ["rumqttc/use-rustls"]
+# modern rustls transport using the existing ring provider, without AWS-LC.
+mqtt-tls = ["rumqttc/use-rustls-no-provider", "dep:rustls", "dep:rustls-native-certs"]
 
 [dev-dependencies]
 proptest = { workspace = true }

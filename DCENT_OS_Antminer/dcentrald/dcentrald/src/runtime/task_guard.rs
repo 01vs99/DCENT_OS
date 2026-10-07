@@ -148,6 +148,35 @@ impl RuntimeTaskGuard {
         self.shutdown.cancel();
     }
 
+    /// Read-only liveness observation for retained handles. A route must
+    /// separately require its complete roster; this grants no new ownership
+    /// or closeout authority, and a later task exit remains possible.
+    pub(crate) fn all_running(&self) -> bool {
+        !self.shutdown.is_cancelled()
+            && !self.tasks.is_empty()
+            && self.tasks.iter().all(|task| !task.handle.is_finished())
+    }
+
+    /// Adopt an already-running helper task without wrapping/detaching its
+    /// JoinHandle. Rejection returns the original handle to caller custody.
+    pub(crate) fn adopt(
+        &mut self,
+        name: impl Into<String>,
+        handle: JoinHandle<()>,
+    ) -> Result<(), JoinHandle<()>> {
+        let name = name.into();
+        if self.shutdown.is_cancelled() || self.tasks.iter().any(|task| task.name == name) {
+            return Err(handle);
+        }
+        self.tasks.push(NamedTask {
+            name,
+            handle,
+            abort_requested: false,
+            timeout_reported: false,
+        });
+        Ok(())
+    }
+
     /// Cancel and reclaim every task under one total deadline.
     ///
     /// Most of the deadline is reserved for cooperative cancellation. The
@@ -508,6 +537,38 @@ mod tests {
     use super::{
         RuntimeTaskGuard, StandardMiningActorSlot, StandardMiningTaskGuard, TaskStopOutcome,
     };
+
+    #[tokio::test]
+    async fn retained_running_observation_detects_finished_adopted_task_and_cancellation() {
+        let stop = CancellationToken::new();
+        let mut guard = RuntimeTaskGuard::new(stop.clone());
+        assert!(!guard.all_running());
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        assert!(guard
+            .adopt(
+                "observed",
+                tokio::spawn(async move {
+                    let _ = wait.await;
+                })
+            )
+            .is_ok());
+        assert!(guard.all_running());
+        release.send(()).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while guard.all_running() {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::task::yield_now().await;
+        }
+        assert!(guard.spawn("pending", std::future::pending()));
+        assert!(
+            !guard.all_running(),
+            "one exited sibling cannot be hidden by a live task"
+        );
+        stop.cancel();
+        assert!(!guard.all_running());
+        let closed = guard.stop_and_join(Duration::from_secs(1)).await;
+        assert!(!closed.any_timed_out() && !closed.any_panicked());
+    }
     use crate::runtime::safety_watchdog::{StandardWatchdogRunAdmission, WatchdogRunScope};
     use crate::runtime::source_contract::compact_rust_source;
 

@@ -13,7 +13,7 @@ TARGET_DIR=$1
 BOARD_NAME=$(sed -n 's/^[[:space:]]*//;s/[[:space:]]*$//;/^$/!{p;q;}' \
     "${TARGET_DIR}/etc/dcentos/board_target" 2>/dev/null || true)
 case "$BOARD_NAME" in
-    am3-s21|am3-s19xp|am3-s19jxp) ;;
+    am3-s21|am3-s19xp|am3-s19jxp|am3-s19jproa|am3-s19jproplus|am3-s19kpro) ;;
     *)
         echo "DCENTos A113D post-build: ERROR: unadmitted or missing board_target: ${BOARD_NAME:-<missing>}" >&2
         exit 1
@@ -147,17 +147,18 @@ fi
 echo "$PLATFORM_NAME" > "${TARGET_DIR}/etc/dcentos/board_family"
 echo "$PLATFORM_NAME" > "${TARGET_DIR}/etc/dcentos/platform"
 
+python3 "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/provision_runtime_policy.py" "$TARGET_DIR"
 MUTATION_POLICY=$(tr -d ' \t\r\n' < "${TARGET_DIR}/etc/dcentos/mutation_policy" 2>/dev/null || true)
 case "$BOARD_NAME" in
-    am3-s19xp|am3-s19jxp)
-        if [ "$MUTATION_POLICY" != management-only ]; then
-            echo "${LOG_PREFIX}: ERROR: X19 AML package is missing management-only mutation policy" >&2
+    am3-s19xp|am3-s19jxp|am3-s19jproa|am3-s19jproplus)
+        if ! grep -Fx daemon-hardware "${TARGET_DIR}/etc/dcentos/mutation_policy" >/dev/null; then
+            echo "${LOG_PREFIX}: ERROR: native AML beta is missing its generated daemon-hardware capability" >&2
             exit 1
         fi
         ;;
 esac
 
-if [ "$MUTATION_POLICY" != management-only ]; then
+if grep -Fx ota-storage "${TARGET_DIR}/etc/dcentos/mutation_policy" >/dev/null; then
     # The AM3 revert helpers source lib/am3_geometry.sh beside /usr/sbin.
     AM3_GEOMETRY_SRC="${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/am3_geometry.sh"
     if [ -f "$AM3_GEOMETRY_SRC" ]; then
@@ -210,6 +211,8 @@ fi
 echo "${LOG_PREFIX}: directories, permissions, and board identity set."
 
 # Production-readiness matrix §7 #1 (public-image trust boundary): release-image
-# marker + first-boot SSH posture when DCENT_RELEASE_IMAGE=1. NO-OP on DEV/LAB.
+# marker + first-boot SSH posture on the RELEASE posture — the DEFAULT since
+# WS-A4 (2026-09-01; canonical resolution scripts/lib/release_posture.sh).
+# NO-OP on an explicit DEV/LAB opt-out (DCENT_DEV_IMAGE=1).
 . "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/release_image_provision.sh"
 dcent_provision_release_image "$TARGET_DIR" "$BOARD_NAME"

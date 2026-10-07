@@ -499,6 +499,8 @@ pub struct WorkDispatcher {
     /// Retained, source-owned FPGA register snapshot for passive diagnostics.
     /// The dispatcher is the sole FPGA owner; REST receives only the watch copy.
     fpga_status_tx: Option<watch::Sender<Option<RuntimeOwnedFpgaTelemetry>>>,
+    /// Optional feed-forward pool hint stream; never authorizes hardware.
+    capacity_tx: Option<watch::Sender<dcentrald_stratum::v1::policy::ActiveCapacity>>,
     /// Broadcast channel for Hacker Mode mining-sync events.
     mining_sync_tx: broadcast::Sender<String>,
     /// Shutdown token.
@@ -681,6 +683,7 @@ impl WorkDispatcher {
             share_tx,
             state_tx,
             fpga_status_tx: None,
+            capacity_tx: None,
             mining_sync_tx,
             shutdown,
             worker_name,
@@ -733,6 +736,60 @@ impl WorkDispatcher {
     ///
     /// This grants no new hardware authority: the dispatcher already owns the
     /// chain transports, while consumers can only clone the retained value.
+    pub fn set_capacity_tx(
+        &mut self,
+        tx: watch::Sender<dcentrald_stratum::v1::policy::ActiveCapacity>,
+    ) {
+        self.capacity_tx = Some(tx);
+    }
+
+    /// Only dispatcher-owned, admitted chains and applied per-chip frequencies
+    /// contribute. Thermal/power/sleep revocation withdraws capacity; measured
+    /// share luck and configured fleet size are deliberately absent.
+    fn publish_active_capacity(&self) {
+        let Some(tx) = self.capacity_tx.as_ref() else {
+            return;
+        };
+        let mut hashes_per_second = 0.0;
+        if self.work_dispatch_admission.allow_work_commit()
+            && !self.curtailment_sleeping.load(Ordering::Acquire)
+            && !self.shutdown.is_cancelled()
+        {
+            for (index, chain) in self
+                .chains
+                .iter()
+                .enumerate()
+                .filter(|(_, chain)| chain.mining)
+            {
+                let Some(profile) = dcentrald_asic::drivers::MinerProfile::for_chip(chain.chip_id)
+                else {
+                    continue;
+                };
+                let Some(frequencies) = self.chip_frequencies.get(index) else {
+                    continue;
+                };
+                if frequencies.len() != chain.chip_count as usize {
+                    continue;
+                }
+                hashes_per_second += frequencies.iter().map(|freq| f64::from(*freq)).sum::<f64>()
+                    * f64::from(profile.ghs_per_mhz)
+                    * 1e9;
+            }
+        }
+        if let Some(capacity) =
+            dcentrald_stratum::v1::policy::ActiveCapacity::new(hashes_per_second)
+        {
+            tx.send_if_modified(|current| {
+                if *current == capacity {
+                    false
+                } else {
+                    *current = capacity;
+                    true
+                }
+            });
+        }
+    }
+
     pub fn set_fpga_status_tx(&mut self, tx: watch::Sender<Option<RuntimeOwnedFpgaTelemetry>>) {
         self.fpga_status_tx = Some(tx);
     }
@@ -989,10 +1046,12 @@ impl WorkDispatcher {
         }
 
         let chip_index = match chip_id {
+            // The BM1370 counter carries no fixed address. Keep valid shares
+            // in chain totals, but never feed guessed chip identities to the
+            // per-chip tuner or health tracker without a range witness.
+            0x1370 => return dcentrald_common::bm1370_work_geometry::bm1370_physical_chip_index(),
             0x1387 | 0x1362 => raw_chip_index,
-            0x1397 | 0x1398 | 0x1366 | 0x1368 | 0x1370 => {
-                address_plan?.dense_index(raw_chip_index)? as u8
-            }
+            0x1397 | 0x1398 | 0x1366 | 0x1368 => address_plan?.dense_index(raw_chip_index)? as u8,
             _ => raw_chip_index,
         };
 
@@ -1082,7 +1141,10 @@ impl WorkDispatcher {
             let mut rolled = base_version;
             let mut version_bits = Vec::with_capacity(midstate_count);
             for _ in 0..midstate_count {
-                version_bits.push(Some(format!("{:08x}", rolled ^ base_version)));
+                version_bits.push(dcentrald_stratum::work::bip310_version_bits(
+                    rolled,
+                    version_mask,
+                ));
                 rolled = dcentrald_stratum::work::increment_bitmask_pub(rolled, version_mask);
             }
             version_bits
@@ -1091,9 +1153,16 @@ impl WorkDispatcher {
         }
     }
 
-    fn rolled_version_from_bits(base_version: u32, version_bits: Option<&str>) -> u32 {
+    fn rolled_version_from_bits(
+        base_version: u32,
+        version_mask: u32,
+        version_bits: Option<&str>,
+    ) -> u32 {
         match version_bits {
-            Some(vb) => base_version ^ u32::from_str_radix(vb, 16).unwrap_or(0),
+            Some(vb) => {
+                (base_version & !version_mask)
+                    | (u32::from_str_radix(vb, 16).unwrap_or(base_version) & version_mask)
+            }
             None => base_version,
         }
     }
@@ -1752,7 +1821,7 @@ impl WorkDispatcher {
         // operator A/B on a platform whose I2C bus has headroom. Even in all-chains
         // mode we re-check `i2c_active` before EACH chain read and yield to PIC
         // heartbeats, so a heartbeat can still interrupt the batch.
-        let read_all_chains_per_tick = std::env::var("DCENT_THERMAL_READ_ALL_CHAINS_PER_TICK")
+        let read_all_chains_per_tick = dcentrald_common::lab_env::var("DCENT_THERMAL_READ_ALL_CHAINS_PER_TICK")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
@@ -1887,6 +1956,7 @@ impl WorkDispatcher {
             max_midstate_shift,
         );
 
+        let mut capacity_tick = tokio::time::interval(Duration::from_secs(1));
         let mut dispatcher_sleeping = self.curtailment_sleeping.load(Ordering::Acquire);
         let mut pending_dispatches = 0u32;
         let mut pending_nonces = 0u32;
@@ -1902,6 +1972,10 @@ impl WorkDispatcher {
 
         loop {
             tokio::select! {
+                _ = capacity_tick.tick(), if self.capacity_tx.is_some() => {
+                    self.publish_active_capacity();
+                }
+
                 _ = self.shutdown.cancelled() => {
                     info!("Work dispatcher stopping");
                     break;
@@ -2907,9 +2981,10 @@ impl WorkDispatcher {
                                 .cloned()
                                 .flatten();
 
-                            // Base version XOR version-bits delta = actual rolled header version.
+                            // Apply the BIP310 pool reconstruction rule to recover the actual header.
                             let full_version = Self::rolled_version_from_bits(
                                 work_entry.version,
+                                work_entry.pool_version_mask,
                                 share_version_bits.as_deref(),
                             );
 
@@ -4709,6 +4784,13 @@ mod tests {
             dcentrald_api_types::asic_command::LinearAddressPlan::from_truncated_byte_space(48)
                 .unwrap();
         let bm1398_plan = dcentrald_api_types::bm1398_protocol::S19_PRO_NBP1901_ADDRESS_PLAN;
+        for raw in [0, 5, 20, u8::MAX] {
+            assert_eq!(
+                WorkDispatcher::normalize_tracker_chip_index(0x1370, 65, Some(bm1397_plan), raw),
+                None,
+                "an address ladder cannot turn BM1370 counter bits into physical chip identity"
+            );
+        }
         assert_eq!(
             WorkDispatcher::normalize_tracker_chip_index(0x1387, 63, None, 12),
             Some(12)
@@ -5186,8 +5268,7 @@ mod tests {
     /// W17 regression: ASICBoost's three atomic changes cooperate end-to-end:
     /// 1. version_bits_per_midstate produces non-empty entries when host
     ///    version rolling is supported AND mask is non-zero.
-    /// 2. rolled_version_from_bits round-trips: rolling N bits then XOR-ing
-    ///    against base_version reproduces the rolled version stored in slot N.
+    /// 2. The BIP310 pool reconstruction reproduces the version in slot N.
     /// 3. With mask=0 (no rolling), all entries are None — and submit will
     ///    omit the BIP310 version_bits field per messages.rs.
     /// + .
@@ -5213,14 +5294,11 @@ mod tests {
         // Change 2 (round-trip): each rolled version reconstructed from bits
         // matches the corresponding slot
         for b in &bits {
-            let rolled = WorkDispatcher::rolled_version_from_bits(base_version, b.as_deref());
+            let rolled = WorkDispatcher::rolled_version_from_bits(base_version, mask, b.as_deref());
             // Bits outside the mask must be preserved
             assert_eq!(rolled & !mask, base_version & !mask);
-            // The XOR delta must equal the version_bits string
-            assert_eq!(
-                format!("{:08x}", rolled ^ base_version),
-                b.as_deref().unwrap()
-            );
+            // The masked full version must equal the submitted field
+            assert_eq!(format!("{:08x}", rolled & mask), b.as_deref().unwrap());
         }
 
         // Change 3: mask=0 (no rolling) -> all None -> submit drops version_bits
@@ -5237,21 +5315,31 @@ mod tests {
 
     #[test]
     fn version_bits_reconstruct_rolled_versions_by_midstate() {
-        let base_version = 0x2000_0000;
-        let version_mask = 0x1fff_e000;
+        let base_version = 0x2000_6001;
+        let version_mask = 0x0000_6000;
         let version_bits =
             WorkDispatcher::version_bits_per_midstate(0x1398, base_version, version_mask, 4);
-
-        assert_eq!(version_bits[0].as_deref(), Some("00000000"));
-        for bits in &version_bits {
-            let rolled = WorkDispatcher::rolled_version_from_bits(base_version, bits.as_deref());
-            assert_eq!(rolled & !version_mask, base_version & !version_mask);
+        let expected = [0x2000_6001, 0x2000_0001, 0x2000_2001, 0x2000_4001];
+        assert_eq!(version_bits[0].as_deref(), Some("00006000"));
+        assert_eq!(version_bits[1].as_deref(), Some("00000000"));
+        for (bits, full_version) in version_bits.iter().zip(expected) {
+            let submitted = u32::from_str_radix(bits.as_ref().unwrap(), 16).unwrap();
+            // Independently perform the BIP310 server operation, including carry to zero.
+            let server_version = (base_version & !version_mask) | (submitted & version_mask);
+            assert_eq!(server_version, full_version);
             assert_eq!(
-                rolled ^ base_version,
-                u32::from_str_radix(bits.as_ref().unwrap(), 16).unwrap()
+                WorkDispatcher::rolled_version_from_bits(
+                    base_version,
+                    version_mask,
+                    bits.as_deref()
+                ),
+                full_version
             );
         }
-        assert!(version_bits.windows(2).all(|pair| pair[0] != pair[1]));
+        assert_eq!(
+            WorkDispatcher::rolled_version_from_bits(base_version, 0, None),
+            base_version
+        );
     }
 
     #[test]
@@ -5416,10 +5504,10 @@ mod tests {
     /// path), every non-zero-delta midstate slot produces a (version_bits,
     /// version) pair where:
     ///
-    ///   `version == rolled_version_from_bits(base_version, version_bits)`
+    ///   `version == rolled_version_from_bits(base_version, mask, version_bits)`
     ///
     /// This is the integrity constraint the submit path relies on — if the two
-    /// fields drift apart the pool sees a version_bits XOR delta that does not
+    /// fields drift apart the pool sees a masked version field that does not
     /// match the header version, producing a reject.
     ///
     /// Additionally, the test confirms that:
@@ -5462,46 +5550,50 @@ mod tests {
         assert_eq!(
             bits[0].as_deref(),
             Some("00000000"),
-            "BM1398 slot 0: first midstate must carry zero-delta version_bits"
+            "BM1398 slot 0: first midstate must carry zero masked version_bits"
         );
-        let slot0_version =
-            WorkDispatcher::rolled_version_from_bits(base_version, bits[0].as_deref());
+        let slot0_version = WorkDispatcher::rolled_version_from_bits(
+            base_version,
+            version_mask,
+            bits[0].as_deref(),
+        );
         assert_eq!(
             slot0_version, base_version,
-            "BM1398 slot 0: rolled version must equal base_version when delta is zero"
+            "BM1398 slot 0: rolled version must equal base_version for this base with zero masked bits"
         );
 
-        // Slots 1..3: non-zero delta, and (version_bits, version) form a
+        // Slots 1..3: non-zero masked field, and (version_bits, version) form a
         // consistent pair via the same rolled_version_from_bits call the submit
         // path uses when it assembles ValidShare.
         for (idx, vb) in bits.iter().enumerate().skip(1) {
             let vb_str = vb.as_deref().unwrap();
 
-            // Non-zero delta for all non-zero slots.
+            // Non-zero masked field for all non-zero slots.
             assert_ne!(
                 vb_str, "00000000",
-                "BM1398 slot {idx}: non-zero midstate must carry non-zero version_bits delta"
+                "BM1398 slot {idx}: non-zero midstate must carry non-zero masked version_bits"
             );
 
             // Reconstruct the rolled version from the version_bits string —
             // this is the exact call the submit path makes when building the
             // ValidShare.version field.
             let rolled_version =
-                WorkDispatcher::rolled_version_from_bits(base_version, Some(vb_str));
+                WorkDispatcher::rolled_version_from_bits(base_version, version_mask, Some(vb_str));
 
-            // The two fields are consistent: version == base ^ delta.
-            let delta = u32::from_str_radix(vb_str, 16).expect("version_bits must be valid hex");
+            // The pool reconstructs the exact full version from the masked field.
+            let submitted_bits =
+                u32::from_str_radix(vb_str, 16).expect("version_bits must be valid hex");
             assert_eq!(
                 rolled_version,
-                base_version ^ delta,
-                "BM1398 slot {idx}: ValidShare.version must equal base ^ version_bits_delta"
+                (base_version & !version_mask) | (submitted_bits & version_mask),
+                "BM1398 slot {idx}: ValidShare.version must equal base with its negotiated bits replaced"
             );
 
-            // version_bits delta is strictly inside the BIP320 field (no spill).
+            // masked version_bits is strictly inside the BIP320 field (no spill).
             assert_eq!(
-                delta & !version_mask,
+                submitted_bits & !version_mask,
                 0,
-                "BM1398 slot {idx}: version_bits delta must not escape the BIP320 mask"
+                "BM1398 slot {idx}: masked version_bits must not escape the BIP320 mask"
             );
 
             // Outside-field bits of base_version are preserved in rolled_version.
@@ -5513,7 +5605,7 @@ mod tests {
 
             // Idempotent: reconstructing from the same string gives the same result.
             assert_eq!(
-                WorkDispatcher::rolled_version_from_bits(base_version, Some(vb_str)),
+                WorkDispatcher::rolled_version_from_bits(base_version, version_mask, Some(vb_str)),
                 rolled_version,
                 "BM1398 slot {idx}: rolled_version_from_bits must be a pure function"
             );
@@ -5524,7 +5616,9 @@ mod tests {
         // the BIP320 increment loop).
         let versions: Vec<u32> = bits
             .iter()
-            .map(|vb| WorkDispatcher::rolled_version_from_bits(base_version, vb.as_deref()))
+            .map(|vb| {
+                WorkDispatcher::rolled_version_from_bits(base_version, version_mask, vb.as_deref())
+            })
             .collect();
         let unique_versions: std::collections::HashSet<u32> = versions.iter().cloned().collect();
         assert_eq!(
@@ -5570,15 +5664,16 @@ mod tests {
         // Specifically: delta "00200000" → rolled = base ^ delta.
         let base_version: u32 = 0x2000_0000;
         let vb_str = "00200000"; // representative non-zero delta inside BIP320 mask
-        let rolled = WorkDispatcher::rolled_version_from_bits(base_version, Some(vb_str));
+        let rolled =
+            WorkDispatcher::rolled_version_from_bits(base_version, pool_mask, Some(vb_str));
         assert_ne!(
             rolled, base_version,
             "BM1398: non-zero version_bits must produce a rolled_version distinct from base"
         );
         assert_eq!(
             rolled,
-            base_version ^ 0x0020_0000,
-            "BM1398: rolled_version must equal base XOR delta"
+            (base_version & !pool_mask) | 0x0020_0000,
+            "BM1398: rolled_version must equal the pool base with masked version bits"
         );
 
         // BM1362-family chips (which DO use chip-internal rolling and whose
@@ -5628,3 +5723,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "sim-hal"))]
+#[path = "work_dispatcher_native_pool_tests.rs"]
+mod native_pool_tests;

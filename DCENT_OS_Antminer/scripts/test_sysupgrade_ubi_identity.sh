@@ -126,7 +126,7 @@ caller_has_identity_gate()
             absence_admissions++
             absence_admission_line = NR
         }
-        /^[[:space:]]*if ! dcent_ubi_attach_mtd "\$INACTIVE_MTD" 1 2>\/dev\/null; then$/ {
+        /^[[:space:]]*if ! dcent_ubi_attach_mtd "\$INACTIVE_MTD" 1( 2>\/dev\/null)?; then$/ {
             attaches++
             attach_line = NR
         }

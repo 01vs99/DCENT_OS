@@ -576,6 +576,78 @@ pub fn require_public_update_policy(board_target: &str) -> Result<&'static Board
     Ok(descriptor)
 }
 
+// A board may support NAND updates while its current SD image deliberately
+// omits that authority. The active root's policy can only restrict the typed
+// board policy; callers must still check require_public_update_policy.
+fn active_storage_policy_bytes(bytes: &[u8]) -> Result<(), String> {
+    if bytes.is_empty() || bytes.len() > 128 || !bytes.ends_with(b"\n") {
+        return Err("OTA policy: invalid active-media capability file".into());
+    }
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| "OTA policy: non-UTF8 active-media capability file".to_string())?;
+    let mut seen = std::collections::BTreeSet::new();
+    for token in text.strip_suffix('\n').unwrap_or(text).split('\n') {
+        if !matches!(token, "boot-safeoff" | "daemon-hardware" | "ota-storage")
+            || !seen.insert(token)
+        {
+            return Err("OTA policy: malformed active-media capabilities".into());
+        }
+    }
+    if !seen.contains("ota-storage") {
+        return Err("OTA policy: this boot medium does not permit persistent updates".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn require_active_storage_policy() -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open("/etc/dcentos/mutation_policy")
+            .map_err(|_| "OTA policy: active-media capabilities unavailable".to_string())?;
+        let meta = file.metadata().map_err(|_| "OTA policy: unreadable active-media metadata".to_string())?;
+        if !meta.is_file() || meta.uid() != 0 || meta.nlink() != 1
+            || !matches!(meta.mode() & 0o7777, 0o400 | 0o440 | 0o444 | 0o600 | 0o640 | 0o644)
+            || meta.len() == 0 || meta.len() > 128
+        {
+            return Err("OTA policy: untrusted active-media capability file".into());
+        }
+        let mut bytes = Vec::new();
+        file.take(129).read_to_end(&mut bytes)
+            .map_err(|_| "OTA policy: unreadable active-media capabilities".to_string())?;
+        if bytes.len() as u64 != meta.len() {
+            return Err("OTA policy: active-media capability file changed".into());
+        }
+        active_storage_policy_bytes(&bytes)
+    }
+    #[cfg(not(unix))]
+    Err("OTA policy: active boot-medium verification requires the target OS".into())
+}
+
+#[cfg(test)]
+mod active_storage_policy_tests {
+    use super::active_storage_policy_bytes;
+
+    #[test]
+    fn native_sd_policy_cannot_inherit_board_nand_capability() {
+        assert!(active_storage_policy_bytes(b"boot-safeoff\ndaemon-hardware\n").is_err());
+        assert!(active_storage_policy_bytes(b"boot-safeoff\ndaemon-hardware\nota-storage\n").is_ok());
+    }
+
+    #[test]
+    fn malformed_or_wildcard_media_policy_cannot_authorize_upload() {
+        for bytes in [b"".as_slice(), b"hardware-enabled\n", b"management-only\nota-storage\n",
+                      b"ota-storage", b"ota-storage\nota-storage\n", b"ota-storage\r\n",
+                      b"ota-storage\n\n", b"ota-storage\nunknown\n", b"ota-storage\0\n"] {
+            assert!(active_storage_policy_bytes(bytes).is_err(), "accepted {bytes:?}");
+        }
+        assert!(active_storage_policy_bytes(&[b'\n'; 129]).is_err());
+    }
+}
+
 pub const MAX_BOARD_TARGET_MARKER_BYTES: usize = 128;
 
 /// Parse `/etc/dcentos/board_target` without trimming arbitrary whitespace or
@@ -2854,10 +2926,22 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const TEST_SYSUPGRADE_METADATA: &[u8] = b"metadata";
+
+    /// Reuse the real signed package fixture from channel/worker tests. This
+    /// emits bytes, never an authority token or a production trust override.
+    pub(crate) fn channel_package_fixture(board: &str, version: &str) -> (Vec<u8>, [u8; 32]) {
+        let key = SigningKey::from_bytes(&[17; 32]);
+        let public = key.verifying_key().to_bytes();
+        let base = serde_json::to_vec(&serde_json::json!({"board_target": board, "board": board, "version": version})).unwrap();
+        let manifest = manifest_with_standard_payloads_and_key(&base, &public);
+        let signature = key.sign(&manifest).to_bytes();
+        (build_sysupgrade_tar_bytes(&manifest, Some(&signature), Some(&public)), public)
+    }
+
 
     #[test]
     fn classify_sysupgrade_tar_entry_rejects_all_hostile_member_names() {
@@ -3797,7 +3881,7 @@ mod tests {
         let am2 = require_public_update_policy("am2-s19j").expect("AM2 S19j public update policy");
         assert_eq!(am2.board_target, "am2-s19j");
         assert!(
-            !am2.public_beta_install && !am2.product_install_allowed(),
+            !am2.public_beta_install() && !am2.product_install_allowed(),
             "AM2 public update authority must not become vendor-source first-install authority"
         );
         for denied in ["am2-s19pro", "cv1835-s19jpro", "unknown"] {

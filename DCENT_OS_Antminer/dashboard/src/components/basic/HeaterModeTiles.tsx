@@ -3,6 +3,7 @@ import { useMinerStore } from '../../store/miner';
 import { useHeaterPresets } from '../../hooks/useHeaterPresets';
 import { api } from '../../api/client';
 import { glossaryText } from '../../utils/glossary';
+import { heaterTargetFeedback } from '../../utils/heaterTarget';
 import {
   NIGHT_FAN_PWM_SAFETY_CAP,
   NIGHT_FREQUENCY_DEFAULT_MHZ,
@@ -106,7 +107,8 @@ export function HeaterModeTiles() {
     if (!name) return;
     try {
       setBusy(label);
-      await api.setHeaterTarget({ preset: name });
+      const feedback = heaterTargetFeedback(await api.setHeaterTarget({ preset: name }));
+      addToast(feedback.message, feedback.tone);
     } catch {
       addToast(`Failed to apply ${label}`, 'error');
     } finally {
@@ -181,7 +183,7 @@ export function HeaterModeTiles() {
         onClick={() => applyPreset('Boost', maxPreset?.name)}
         disabled={busy !== null || !maxPreset}
         aria-pressed={boostActive}
-        data-tooltip="Run the highest-power preset for the most heat and the most Bitcoin work. Warmest room, highest draw and noise."
+        data-tooltip="Request the highest-power preset. Check the result for live application and actual power."
       >
         <span className="nest-mode-icon">{TileIcon.bolt}</span>
         <span className="nest-mode-label">Boost</span>
@@ -194,7 +196,7 @@ export function HeaterModeTiles() {
         onClick={() => applyPreset('Away', ecoPreset?.name)}
         disabled={busy !== null || !ecoPreset || ecoPreset.name === maxPreset?.name}
         aria-pressed={awayActive}
-        data-tooltip="Drop to the lowest-power preset while you're out. The miner keeps earning sats with lower heat and fan demand."
+        data-tooltip="Request the lowest-power preset. A saved request alone does not confirm lower power or noise."
       >
         <span className="nest-mode-icon">{TileIcon.home}</span>
         <span className="nest-mode-label">Away</span>

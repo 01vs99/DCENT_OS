@@ -1,0 +1,2 @@
+# C43 beta SSH uses operator-provisioned keys. Dashboard passwords are separate.
+DROPBEAR_ARGS="-s"

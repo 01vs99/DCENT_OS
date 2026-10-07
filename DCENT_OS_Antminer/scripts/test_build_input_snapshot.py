@@ -128,6 +128,32 @@ class SnapshotTests(unittest.TestCase):
         SNAPSHOT.destroy_snapshot(created.snapshot, created.destroy_token)
         self.created.remove(created)
 
+    def test_held_asset_override_preserves_canonical_selection_and_pins(self) -> None:
+        entries = self.s9_entries()
+        manifest = self.write_split_fixture(entries)
+        assets = self.base / "separate-held-assets"
+        for relative, value in entries.items():
+            path = assets.joinpath(*pathlib.PurePosixPath(relative).parts[1:])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(value)
+            (self.repo / relative).unlink()
+        created = self.create(manifest, selection_root=self.selection_root, assets=assets)
+        observed = SNAPSHOT.verify_snapshot(created.snapshot, "s9")
+        self.assertEqual({row["path"] for row in observed["files"]}, set(entries))
+        self.assertEqual({row["sha256"] for row in observed["files"]}, {digest(raw) for raw in entries.values()})
+        self.destroy(created)
+
+    def test_held_asset_override_does_not_fall_back_after_wrong_bytes(self) -> None:
+        entries = self.s9_entries()
+        manifest = self.write_split_fixture(entries)
+        assets = self.base / "separate-held-assets"
+        for relative in entries:
+            path = assets.joinpath(*pathlib.PurePosixPath(relative).parts[1:])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"wrong held bytes")
+        with self.assertRaises(SNAPSHOT.SnapshotError):
+            self.create(manifest, selection_root=self.selection_root, assets=assets)
+
     def rewrite_descriptor(self, created, mutate) -> None:
         os.chmod(created.stage, 0o700)
         os.chmod(created.snapshot, 0o600)
@@ -542,12 +568,16 @@ class SnapshotTests(unittest.TestCase):
             "s9": {"", ""},
             "am2-s19jpro": {"", ""},
             "am2-s19jpro-sd": {"", ""},
-            "am2-s19pro": {"", ""},
         }
         for target, paths in expected.items():
             created = self.create(manifest, target)
             descriptor = SNAPSHOT.verify_snapshot(created.snapshot, target)
             self.assertEqual({item["path"] for item in descriptor["files"]}, paths)
+
+    def test_native_s19pro_does_not_accept_the_old_s19j_research_shell_inputs(self) -> None:
+        manifest = self.write_fixture(self.supported_entries())
+        with self.assertRaisesRegex(SNAPSHOT.SnapshotError, "S17 donor"):
+            self.create(manifest, "am2-s19pro")
 
     def test_cargo_workspace_selection_is_explicitly_empty(self) -> None:
         manifest = self.write_split_fixture(self.supported_entries())

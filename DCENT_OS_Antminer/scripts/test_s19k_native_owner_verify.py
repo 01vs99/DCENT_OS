@@ -318,6 +318,29 @@ class NativeOwnerVerifierTests(unittest.TestCase):
             owner.HAL_SOURCE,
         )
 
+    def test_table_driven_platform_and_geometry_must_remain_bound(self) -> None:
+        # The owner now consults the dispatch-admitted common profile. An
+        # obsolete literal must not reject that implementation, but removing
+        # either target equality or its independent HAL geometry check must.
+        for needle in (
+            b"bm1366_dispatch_admitted_serial_platform(",
+            b"dispatch.board_target() == platform.board_target()",
+            b"dispatch.board_target() == platform_profile.board_target",
+            b"== dcentrald_hal::platform::amlogic::S19K_NATIVE_EXPECTED_CHIPS_PER_UART",
+        ):
+            self._changed_source(needle, b"REMOVED_REQUIRED_PLATFORM_BINDING", owner.SERIAL_SOURCE)
+
+    def test_native_identity_requires_full_decode_crc_and_slot_binding(self) -> None:
+        for needle in (
+            b"names[slot] = Some(decode_deployed_eeprom(page)?.board_name)",
+            b"platform.bind_population_polarity(service, names.each_ref().map(|name| name.as_deref()))?",
+            b"let identity = decode_deployed_eeprom(page)",
+            b"identity.region_1_crc5 == Crc5Check::Match",
+            b"S19kNativeBoardModel::parse(&identity.board_name)",
+            b"page.is_some() == populated[slot]",
+        ):
+            self._changed_source(needle, b"REMOVED_REQUIRED_IDENTITY_CHECK", owner.NATIVE_IDENTITY_SOURCE)
+
     def test_reset_safeoff_and_post_init_cancellation_drift_are_rejected(self) -> None:
         self._changed_source(
             b"for chain in 0..3u8",

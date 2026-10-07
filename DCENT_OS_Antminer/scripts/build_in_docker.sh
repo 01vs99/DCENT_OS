@@ -26,10 +26,17 @@
 # build-dcentrald.sh now fails fast if the pin is missing in a release
 # context instead of letting Phase 5 fail hours later.
 #
+# IMAGE POSTURE (WS-A4, 2026-09-01, operator T-OP-7): RELEASE is the DEFAULT.
+# A bare invocation builds the hardened customer posture (locked root, no
+# skip-password, no MCP autostart, /etc/dcentos/release-image stamped). DEV
+# and LAB builds must opt out EXPLICITLY: pass --lab-unsigned (which sets
+# DCENT_DEV_IMAGE=1) or export DCENT_DEV_IMAGE=1 / DCENT_RELEASE_IMAGE=0
+# yourself. An explicitly-set DCENT_RELEASE_IMAGE always wins over the alias.
+#
 # TOOLCHAIN SOURCING (BUG-3, 2026-07-09): releases.linaro.org deleted the
 # pinned Linaro 7.2-2017.11 binary releases (HTTP 404). Phase 5b sources the
 # toolchain from, in order: the persistent in-volume dl-cache
-# (/build/dcentos/dl-cache/, survives Buildroot re-clones), an
+# (/build/DCENT_OS_Antminer/dl-cache/, survives Buildroot re-clones), an
 # operator/CI-provided local dir (export DCENT_TOOLCHAIN_LOCAL_DIR=<dir
 # containing the tarball> — populate with scripts/provision_build_inputs.sh),
 # then network (original URL, then a hash-verified mirror). Every source is
@@ -61,17 +68,28 @@ export MSYS2_ARG_CONV_EXCL='*'
 # Keeps the S9 path bit-for-bit identical. Adding `--target am2-s19jpro`
 # switches the Buildroot defconfig, package board name, and output filename.
 TARGET="s9"
+TARGET_EXPLICIT=0
+PRODUCER=""
+PRODUCER_ARTIFACT_KIND=""
+PRODUCER_BOARD=""
 OUTPUT_DIR_OVERRIDE=""
 LAB_UNSIGNED=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --target)
+            TARGET_EXPLICIT=1
             TARGET="$2"
             shift 2
             ;;
         --target=*)
+            TARGET_EXPLICIT=1
             TARGET="${1#--target=}"
             shift
+            ;;
+        --producer)
+            [ "$#" -ge 2 ] && [ -z "$PRODUCER" ] || { echo "ERROR: exactly one --producer value is required" >&2; exit 2; }
+            PRODUCER="$2"
+            shift 2
             ;;
         --output-dir)
             OUTPUT_DIR_OVERRIDE="$2"
@@ -83,42 +101,21 @@ while [ $# -gt 0 ]; do
             ;;
         --lab-unsigned)
             LAB_UNSIGNED=1
+            # WS-A4 (2026-09-01): a lab-unsigned run is a DEV/LAB build.
+            # RELEASE is the default image posture now, so declare the
+            # canonical DEV opt-out here. An explicitly-exported
+            # DCENT_RELEASE_IMAGE still wins over this alias.
+            export DCENT_DEV_IMAGE="${DCENT_DEV_IMAGE:-1}"
             shift
             ;;
         -h|--help)
-            echo "Usage: $(basename "$0") [--target s9|am2-s19jpro|am2-s19pro|am2-s17pro|am2-s17plus|am2-t17|am2-t17plus|am3-s19kpro|am3-s19xp|am3-s19jxp|am3-s19jproplus|am3-s21|am3-s21pro|am3-s21xp|am3-s19jpro-aml|am3-t21|am3-bb|am3-bb-s19jpro|am3-bb-s19jpro-vnish] [--output-dir DIR] [--lab-unsigned]"
+            echo "Usage: $(basename "$0") --producer ID [--output-dir DIR]"
+            echo "Authenticated inner packaging driver; use make beta DROP=n for releases."
             echo ""
-            echo "Options:"
-            echo "  --lab-unsigned  Reserved for a future explicit lab capsule; direct"
-            echo "                  packaging currently fails closed before build work."
-            echo ""
-            echo "Targets:"
-            echo "  s9               (default) Antminer S9 am1-s9 (armv7) — tarball: dcentos-sysupgrade-118.tar"
-            echo "  am2-s19jpro      Antminer S19j Pro Zynq am2-s19jpro (armv7) — tarball: dcentos-sysupgrade-am2-s19jpro.tar"
-            # Added by Phase 2K
-            echo "  am2-s19pro       Antminer S19 / S19 Pro Zynq am2 BM1398 (armv7) — tarball: dcentos-sysupgrade-am2-s19pro.tar"
-            echo "  am2-s17pro       Antminer S17 / S17 Pro Zynq am2-s17 (armv7, EXPERIMENTAL PACKAGE-ONLY) — tarball: dcentos-sysupgrade-am2-s17pro.tar"
-            echo "  am2-s17plus      Antminer S17+ Zynq am2 17-series (armv7, EXPERIMENTAL PACKAGE-ONLY) — tarball: dcentos-sysupgrade-am2-s17plus.tar"
-            echo "  am2-t17          Antminer T17 Zynq am2 17-series (armv7, EXPERIMENTAL PACKAGE-ONLY) — tarball: dcentos-sysupgrade-am2-t17.tar"
-            echo "  am2-t17plus      Antminer T17+ Zynq am2 17-series (armv7, EXPERIMENTAL PACKAGE-ONLY) — tarball: dcentos-sysupgrade-am2-t17plus.tar"
-            # End Phase 2K
-            echo "  am3-s19kpro      Antminer S19k Pro Amlogic am3-aml (aarch64) — tarball: dcentos-sysupgrade-am3-s19kpro.tar"
-            echo "  am3-s21          Antminer S21 Amlogic am3-aml (aarch64) — tarball: dcentos-sysupgrade-am3-s21.tar"
-            echo "  am3-s21pro       Antminer S21 Pro Amlogic am3-aml (aarch64) — tarball: dcentos-sysupgrade-am3-s21pro.tar"
-            echo "  am3-s21xp        Antminer S21 XP Amlogic am3-aml (aarch64) — tarball: dcentos-sysupgrade-am3-s21xp.tar"
-            echo "  am3-s19xp        Antminer S19 XP Amlogic Experimental exact-identity package"
-            echo "  am3-s19jxp       Antminer S19j XP Amlogic Experimental exact-identity package"
-            echo "  am3-s19jproplus  Antminer S19j Pro+ Amlogic Experimental exact-identity package"
-            # Added by Phase 4B
-            echo "  am3-s19jpro-aml  Antminer S19j Pro Amlogic am3-aml PIC1704 (aarch64) — tarball: dcentos-sysupgrade-am3-s19jpro-aml.tar"
-            echo "  am3-t21          Antminer T21 Amlogic management-only scaffold (aarch64)"
-            # End Phase 4B
-            echo "  am3-bb           Antminer S19j Pro BeagleBone am3-bb (armv7) — tarball: dcentos-am3-bb-sdcard.tar"
-            echo "  am3-bb-s19jpro   Antminer S19j Pro BeagleBone BB unit (armv7) — tarball: dcentos-am3-bb-s19jpro-sdcard.tar"
-            echo "  am3-bb-s19jpro-vnish Phase 1B VNish boot.bin SD prototype (armv7) — image: dcentos-am3-bb-s19jpro-vnish-bootbin.img"
-            echo ""
-            echo "CV1835 is intentionally absent: no firmware, sysupgrade, or"
-            echo "supported analysis-artifact build lane is admitted."
+            echo "Native AM1 producers: am1-s9i am1-s9j am1-s9se am1-s9k am1-s15 am1-t15"
+            echo "Other producer IDs are listed by scripts/release_producer.py list."
+            echo "Legacy --target recipes include am3-s19kpro-nopic (Unsupported)."
+            echo "--lab-unsigned is unavailable in a beta/stable capsule or numbered DROP."
             exit 0
             ;;
         *)
@@ -127,6 +124,26 @@ while [ $# -gt 0 ]; do
             ;;
     esac
 done
+
+BUILDER_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "$PRODUCER" ]; then
+    [ "$TARGET_EXPLICIT" -eq 0 ] || { echo "ERROR: --producer and --target are mutually exclusive" >&2; exit 2; }
+    TARGET="$(python3 "$BUILDER_SCRIPT_DIR/release_producer.py" query "$PRODUCER" build_target)"
+    PRODUCER_BOARD="$(python3 "$BUILDER_SCRIPT_DIR/release_producer.py" query "$PRODUCER" board_target)"
+    PRODUCER_ARTIFACT_KIND="$(python3 "$BUILDER_SCRIPT_DIR/release_producer.py" query "$PRODUCER" artifact_kind)"
+fi
+if [ -n "${DROP:-}" ] || [ -n "${DCENT_RELEASE_DROP:-}" ]; then
+    if [ "$LAB_UNSIGNED" -eq 1 ]; then
+        echo "ERROR: unsigned lab output cannot enter a release drop" >&2
+        exit 2
+    fi
+    while IFS= read -r unsigned_name; do
+        if [ -n "${!unsigned_name:-}" ] && [ "${!unsigned_name}" != 0 ]; then
+            echo "ERROR: $unsigned_name cannot enter a release drop" >&2
+            exit 2
+        fi
+    done < <(compgen -A variable DCENT_ALLOW_UNSIGNED)
+fi
 
 is_truthy() {
     case "${1:-}" in
@@ -137,10 +154,23 @@ is_truthy() {
 
 is_release_status() {
     case "${1:-release}" in
-        release|production|stable) return 0 ;;
+        release|production|beta|stable) return 0 ;;
         *) return 1 ;;
     esac
 }
+
+# WS-A4 (2026-09-01, operator T-OP-7): RELEASE is the DEFAULT image posture.
+# Resolve the canonical posture once, immediately after argument parsing, and
+# materialize it as an explicit DCENT_RELEASE_IMAGE so every downstream read
+# in this driver (CE-183 gates, container -e passes, defconfig root-lock,
+# release-grade metadata) sees the effective value:
+#   * DCENT_RELEASE_IMAGE explicitly set (non-empty) -> that value wins.
+#   * else DCENT_DEV_IMAGE=1 (set by --lab-unsigned and by lab/bench
+#     callers) -> DEV/LAB posture.
+#   * else -> RELEASE (the shipped default).
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/release_posture.sh"
+DCENT_RELEASE_IMAGE="$(dcent_release_posture_value)"
+export DCENT_RELEASE_IMAGE
 
 # BR_DEFCONFIG_FRAGMENTS lists the shared fragments to concatenate BEFORE
 # the per-product defconfig at Phase 6 setup. Fragments are space-separated
@@ -155,6 +185,18 @@ if [ "$TARGET" = "cv1835-s19jpro" ]; then
     exit 78
 fi
 case "$TARGET" in
+    am1-s9i|am1-s9j|am1-s15|am1-t15|am2-t17e|am2-s17e)
+        # Fresh S9 userspace is the common ARM base. The final native hook
+        # applies and verifies the exact target's overlays and boot contract.
+        BR_DEFCONFIG="dcentos_s9_defconfig"
+        BR_DEFCONFIG_FRAGMENTS="dcentos-common.fragment"
+        BOARD_PKG_NAME="$TARGET"
+        TARBALL_NAME="dcentos-sd.img"
+        BOARD_POST_IMAGE="native-sd"
+        BUILD_ARCH="armv7-unknown-linux-musleabihf"
+        TOOLCHAIN_FILE="gcc-linaro-7.2.1-2017.11-x86_64_arm-linux-gnueabihf.tar.xz"
+        TOOLCHAIN_URL="https://releases.linaro.org/components/toolchain/binaries/7.2-2017.11/arm-linux-gnueabihf/$TOOLCHAIN_FILE"
+        ;;
     s9)
         BR_DEFCONFIG="dcentos_s9_defconfig"
         BR_DEFCONFIG_FRAGMENTS="dcentos-common.fragment"
@@ -228,6 +270,22 @@ case "$TARGET" in
     # post-image as am2-s19jpro. The board dir's post-image.sh produces the
     # tarball directly (sysupgrade-<board_target>/ prefix); Phase 7 copies
     # it out.
+    am2-s19|am2-t19|am2-s19a|am2-s19plus)
+        # Fresh AM2 userspace is composed into an exact signed removable-media
+        # profile below. The shared base is never a new-target NAND package.
+        [ "$PRODUCER_ARTIFACT_KIND" = native-sd-image ] && [ "$PRODUCER_BOARD" = "$TARGET" ] || {
+            echo "ERROR: this exact BM1398 target requires its current native SD producer" >&2
+            exit 2
+        }
+        BR_DEFCONFIG="dcentos_am2_s19jpro_defconfig"
+        BR_DEFCONFIG_FRAGMENTS="dcentos-common.fragment"
+        BOARD_PKG_NAME="$TARGET"
+        TARBALL_NAME="dcentos-sd.img"
+        BOARD_POST_IMAGE="native-sd"
+        BUILD_ARCH="armv7-unknown-linux-musleabihf"
+        TOOLCHAIN_FILE="gcc-linaro-7.2.1-2017.11-x86_64_arm-linux-gnueabihf.tar.xz"
+        TOOLCHAIN_URL="https://releases.linaro.org/components/toolchain/binaries/7.2-2017.11/arm-linux-gnueabihf/$TOOLCHAIN_FILE"
+        ;;
     am2-s19pro)
         # S19 / S19 Pro Zynq am2, BM1398 (114 chips/chain). Distinct from
         # am2-s19jpro (BM1362) — the dcentos_am2_s19pro_defconfig uses
@@ -302,11 +360,19 @@ case "$TARGET" in
         TOOLCHAIN_URL="https://releases.linaro.org/components/toolchain/binaries/7.2-2017.11/arm-linux-gnueabihf/$TOOLCHAIN_FILE"
         ;;
     # End Phase 2K
-    am3-s19kpro)
+    am3-s19kpro|am3-s19kpro-nopic)
         BR_DEFCONFIG="dcentos_am3_s19kpro_defconfig"
         BR_DEFCONFIG_FRAGMENTS="dcentos-common.fragment dcentos_am3_aml_common.fragment"
         BOARD_PKG_NAME="am3-s19k"
         TARBALL_NAME="dcentos-sysupgrade-am3-s19kpro.tar"
+        if [ "$TARGET" = am3-s19kpro-nopic ]; then
+            BR_DEFCONFIG="dcentos_am3_s19kpro_nopic_defconfig"
+            # The nopic board's overlay/post-build/post-image all emit the
+            # am3-s19kpro board identity (its post-image denies install in
+            # every mode); the artifact name follows the emitted identity.
+            BOARD_PKG_NAME="am3-s19kpro"
+            TARBALL_NAME="dcentos-sysupgrade-am3-s19kpro.tar"
+        fi
         # am3-aml uses board-script post-image (mkimage uImage CPIO + tar
         # with sysupgrade-am3-s19k/ prefix). Phase H.9 board script.
         BOARD_POST_IMAGE="board-script"
@@ -339,6 +405,19 @@ case "$TARGET" in
         BR_DEFCONFIG_FRAGMENTS="dcentos-common.fragment dcentos_am3_aml_common.fragment"
         BOARD_PKG_NAME="am3-s19jproplus"
         TARBALL_NAME="dcentos-sysupgrade-am3-s19jproplus.tar"
+        BOARD_POST_IMAGE="board-script"
+        BUILD_ARCH="aarch64-unknown-linux-musl"
+        TOOLCHAIN_FILE="gcc-linaro-7.2.1-2017.11-x86_64_aarch64-linux-gnu.tar.xz"
+        TOOLCHAIN_URL="https://releases.linaro.org/components/toolchain/binaries/7.2-2017.11/aarch64-linux-gnu/$TOOLCHAIN_FILE"
+        ;;
+    # R10 board join 2026-09-12 (drift13 #6a): the A126 lane joins the typed
+    # producer inventory. Its post-image execs the shared am3-bm1362-nopic
+    # builder and emits a package_only_denied archive; install stays Denied.
+    am3-s19jproa)
+        BR_DEFCONFIG="dcentos_am3_s19jproa_defconfig"
+        BR_DEFCONFIG_FRAGMENTS="dcentos-common.fragment dcentos_am3_aml_common.fragment"
+        BOARD_PKG_NAME="am3-s19jproa"
+        TARBALL_NAME="dcentos-sysupgrade-am3-s19jproa.tar"
         BOARD_POST_IMAGE="board-script"
         BUILD_ARCH="aarch64-unknown-linux-musl"
         TOOLCHAIN_FILE="gcc-linaro-7.2.1-2017.11-x86_64_aarch64-linux-gnu.tar.xz"
@@ -418,7 +497,7 @@ case "$TARGET" in
         TOOLCHAIN_FILE="gcc-linaro-7.2.1-2017.11-x86_64_arm-linux-gnueabihf.tar.xz"
         TOOLCHAIN_URL="https://releases.linaro.org/components/toolchain/binaries/7.2-2017.11/arm-linux-gnueabihf/$TOOLCHAIN_FILE"
         ;;
-    am3-bb-s19jpro)
+    am3-bb-s19jpro|am3-bb-s19jpro-payload)
         # W10.11 ( closure): NEW S19j Pro AM335x BB carrier variant
         # per agent B3. NAND install/revert disabled until live /proc/mtd
         # evidence captured (see B3 commit msg). Same A8 toolchain as am3-bb.
@@ -456,13 +535,20 @@ case "$TARGET" in
 esac
 
 # Immutable Buildroot source identity shared by cold- and warm-volume paths.
+if [ -n "$PRODUCER" ]; then
+    BOARD_PKG_NAME="$PRODUCER_BOARD"
+    TARBALL_NAME="$(python3 "$BUILDER_SCRIPT_DIR/release_producer.py" query "$PRODUCER" primary_artifact)"
+    if [ "$PRODUCER_ARTIFACT_KIND" = native-sd-image ]; then
+        BOARD_POST_IMAGE=native-sd
+    fi
+fi
 # A warm checkout is never trusted merely because its Makefile exists.
 BUILDROOT_REPOSITORY="https://github.com/buildroot/buildroot.git"
 BUILDROOT_COMMIT="7c8edc1b402efcd7bba2dabfe0b3be877adaed7a"
 
 dcent_target_requires_dcentos_init() {
     case "$1" in
-        s9|am2-s19jpro|am2-s19jpro-sd|am2-s19pro|am2-s17pro|am2-s17plus|am2-t17|am2-t17plus|am3-s19kpro|am3-s19xp|am3-s19jxp|am3-s19jproplus|am3-s21|am3-s21pro|am3-s21xp|am3-s19jpro-aml|am3-t21)
+        s9|am1-s9i|am1-s9j|am1-s9se|am1-s9k|am1-s15|am1-t15|am2-s19jpro|am2-s19jpro-sd|am2-s19pro|am2-s19|am2-t19|am2-s19a|am2-s19plus|am2-s17pro|am2-s17plus|am2-t17|am2-t17plus|am2-t17e|am2-s17e|am3-s19kpro|am3-s19kpro-nopic|am3-s19xp|am3-s19jxp|am3-s19jproa|am3-s19jproplus|am3-s21|am3-s21pro|am3-s21xp|am3-s19jpro-aml|am3-t21)
             return 0
             ;;
     esac
@@ -471,11 +557,30 @@ dcent_target_requires_dcentos_init() {
 
 dcent_target_requires_dcentos_discovery() {
     case "$1" in
-        am3-bb|am3-bb-s19jpro|am3-bb-s19jpro-vnish)
+        am1-s9i|am1-s9j|am1-s9se|am1-s9k|am1-s15|am1-t15|am2-s19pro|am2-s19|am2-t19|am2-s19a|am2-s19plus|am2-s17pro|am2-s17plus|am2-t17|am2-t17plus|am2-t17e|am2-s17e)
+            return 0
+            ;;
+        am3-bb|am3-bb-s19jpro|am3-bb-s19jpro-payload|am3-bb-s19jpro-vnish)
             return 0
             ;;
     esac
     return 1
+}
+
+# Docker -v cannot take the NT long-path prefix that cygpath -w emits for
+# paths beyond the classic MAX_PATH limit; the Docker CLI (Go) handles plain
+# long paths itself (2026-09-14 producer).
+dcent_cygpath_w() {
+    case "$1" in
+        /*) R="$(cygpath -m "$1")" ;;
+        *)  R="$(cygpath -w "$1" 2>/dev/null || printf '%s\n' "$1")" ;;
+    esac
+    # cygpath prefixes beyond-MAX_PATH results (\\?\ for -w, //?/ for -m);
+    # Docker -v rejects both forms.
+    case "$R" in
+        [\\][\\][?][\\]*|'//?/'*) R="${R:4}" ;;
+    esac
+    printf '%s\n' "$R"
 }
 
 dcent_validate_docker_transport_path() {
@@ -483,6 +588,10 @@ dcent_validate_docker_transport_path() {
 import sys
 
 value = sys.argv[1]
+# The NT long-path prefix is accepted and stripped: downstream Docker -v
+# mounts receive the plain native path (observed 2026-09-14 producer: the
+# signing-authority stage records \\?\-wrapped paths on the release host).
+value = value[4:] if value.startswith("\\\\?\\") else value
 if not value or any(character in value for character in ("\0", "\r", "\n")):
     raise SystemExit("unsafe empty/control-character Docker transport path")
 windows_drive = (
@@ -516,12 +625,12 @@ dcent_required_prebuilt_binaries() {
 
 dcent_expected_build_variant() {
     case "$1" in
-        s9|am2-s19jpro|am2-s19jpro-sd|am2-s19pro|am2-s17pro) printf '%s\n' zynq ;;
-        am3-s19kpro|am3-s19xp|am3-s19jxp|am3-s19jproplus|am3-s21|am3-s21pro|am3-s21xp|am3-s19jpro-aml|am3-t21) printf '%s\n' amlogic ;;
+        s9|am1-s9i|am1-s9j|am1-s9se|am1-s9k|am1-s15|am1-t15|am2-s19jpro|am2-s19jpro-sd|am2-s19pro|am2-s19|am2-t19|am2-s19a|am2-s19plus|am2-s17pro|am2-s17plus|am2-t17|am2-t17plus|am2-t17e|am2-s17e) printf '%s\n' zynq ;;
+        am3-s19kpro|am3-s19kpro-nopic|am3-s19xp|am3-s19jxp|am3-s19jproa|am3-s19jproplus|am3-s21|am3-s21pro|am3-s21xp|am3-s19jpro-aml|am3-t21) printf '%s\n' amlogic ;;
         # BB packaging currently stages the static musl ARMv7 artifact emitted
         # by the zynq build lane (the standalone `beaglebone` builder targets
         # glibc armv7-unknown-linux-gnueabihf and cannot satisfy BUILD_ARCH).
-        am3-bb|am3-bb-s19jpro|am3-bb-s19jpro-vnish) printf '%s\n' zynq ;;
+        am3-bb|am3-bb-s19jpro|am3-bb-s19jpro-payload|am3-bb-s19jpro-vnish) printf '%s\n' zynq ;;
         *) return 1 ;;
     esac
 }
@@ -667,11 +776,16 @@ if is_truthy "$DCENT_ALLOW_UNSIGNED_SYSUPGRADE" && is_release_status "$DCENT_PAC
 fi
 # CE-183: a release-status package must not decouple from release-image
 # hardening (SSH root lockdown + /etc/dcentos/release-image marker). Fail fast
-# here (seconds) instead of after the 30-90 min Buildroot phase.
+# here (seconds) instead of after the 30-90 min Buildroot phase. Since WS-A4
+# the RELEASE posture is the default (DCENT_RELEASE_IMAGE is materialized to
+# its effective value above), so this fires only on an explicit DEV/LAB
+# opt-out (DCENT_DEV_IMAGE=1 / DCENT_RELEASE_IMAGE=0) combined with a
+# release-status package.
 if is_release_status "$DCENT_PACKAGE_STATUS" && ! is_truthy "${DCENT_RELEASE_IMAGE:-0}"; then
     echo "ERROR: release-status package (DCENT_PACKAGE_STATUS=$DCENT_PACKAGE_STATUS) requires DCENT_RELEASE_IMAGE=1." >&2
     echo "       Release status must not decouple from release-image hardening (CE-183)." >&2
     echo "       Release-root signatures are reserved for fully hardened release profiles." >&2
+    echo "       DEV/LAB opt-out: DCENT_DEV_IMAGE=1 (or DCENT_RELEASE_IMAGE=0) with DCENT_PACKAGE_STATUS=lab_unsigned." >&2
     exit 1
 fi
 # Public/customer firmware tarball gate. Lab/DEV (`--lab-unsigned`, flags
@@ -840,20 +954,29 @@ if [ "${DCENT_RELEASE_CAPSULE_MODE:-0}" = "1" ]; then
     CAPSULE_RELEASE_SET_STAGE="$(dcent_capsule_shell_path "$CAPSULE_RELEASE_SET_STAGE")"
     python3 "$SCRIPT_DIR/build_input_snapshot.py" verify \
         --target cargo-workspace "$CAPSULE_CARGO_BUILD_INPUT_SNAPSHOT" >/dev/null
+    # A linked worktree's .git points outside its source directory. Export the
+    # host-resolved shared object database into a minimal read-only repository;
+    # the container still reconstructs and verifies the exact commit itself.
+    GIT_COMMON_DIR="$(python3 "$SCRIPT_DIR/release_source_git.py" --repo-root "$GIT_OBJECT_REPO" --field git-common-dir)"
+    GIT_COMMON_DIR="$(dcent_capsule_shell_path "$GIT_COMMON_DIR")"
+    CAPSULE_SOURCE_STAGE="$(dirname -- "$(dcent_capsule_shell_path "$CAPSULE_SOURCE_SNAPSHOT")")"
     if command -v cygpath >/dev/null 2>&1; then
-        CAPSULE_SOURCE_SNAPSHOT_MOUNT="$(cygpath -w "$CAPSULE_SOURCE_SNAPSHOT")"
-        GIT_OBJECT_REPO_MOUNT="$(cygpath -w "$GIT_OBJECT_REPO")"
+        CAPSULE_SOURCE_STAGE_MOUNT="$(dcent_cygpath_w "$CAPSULE_SOURCE_STAGE")"
+        GIT_COMMON_DIR_MOUNT="$(dcent_cygpath_w "$GIT_COMMON_DIR")"
     else
-        CAPSULE_SOURCE_SNAPSHOT_MOUNT="$CAPSULE_SOURCE_SNAPSHOT"
-        GIT_OBJECT_REPO_MOUNT="$GIT_OBJECT_REPO"
+        CAPSULE_SOURCE_STAGE_MOUNT="$CAPSULE_SOURCE_STAGE"
+        GIT_COMMON_DIR_MOUNT="$GIT_COMMON_DIR"
     fi
     CAPSULE_PROVENANCE_MOUNT_ARGS=(
-        -v "${CAPSULE_SOURCE_SNAPSHOT_MOUNT}:/dcent-capsule-source:ro"
-        -v "${GIT_OBJECT_REPO_MOUNT}:/dcent-git-object-repo:ro"
+        -v "${CAPSULE_SOURCE_STAGE_MOUNT}:/dcentos-source-snapshot-release:ro"
+        -v "${GIT_COMMON_DIR_MOUNT}:/dcent-git-object-repo/.git:ro"
+        -e GIT_CONFIG_COUNT=1
+        -e GIT_CONFIG_KEY_0=safe.directory
+        -e GIT_CONFIG_VALUE_0=/dcent-git-object-repo
     )
     DCENT_SOURCE_COMMIT="$DCENT_CAPSULE_SOURCE_COMMIT"
     DCENT_SOURCE_TREE_STATE="exact_git_object_snapshot"
-    SOURCE_DATE_EPOCH="$(git -C "$GIT_OBJECT_REPO" show -s --format=%ct "$DCENT_SOURCE_COMMIT")"
+    SOURCE_DATE_EPOCH="$(python3 "$SCRIPT_DIR/release_source_git.py" --repo-root "$GIT_OBJECT_REPO" --field epoch --commit "$DCENT_SOURCE_COMMIT")"
     DCENT_SOURCE_COMMIT_EPOCH="$SOURCE_DATE_EPOCH"
     DCENT_CREATED_AT_UTC="$(python3 - "$SOURCE_DATE_EPOCH" <<'PY'
 import datetime
@@ -863,6 +986,10 @@ PY
 )"
     DCENT_BUILD_ARCH="$BUILD_ARCH"
     DCENT_TOOLCHAIN_ID="linaro-7.2.1:${TOOLCHAIN_FILE}"
+    # Phase 6/post-image consumers identify the build by its Buildroot
+    # defconfig (e.g. the am3-s19kpro post-image refuses any other value);
+    # an explicit caller override still wins.
+    DCENT_BUILD_TARGET="${DCENT_BUILD_TARGET:-$BR_DEFCONFIG}"
     DCENT_REQUIRE_RELEASE_PROVENANCE=1
     DCENT_CAPSULE_PROVENANCE_VERIFIED=1
     export DCENT_SOURCE_COMMIT DCENT_SOURCE_COMMIT_EPOCH
@@ -1057,6 +1184,16 @@ dcent_cleanup_failed_release_evidence() {
     # resources. Release-set bytes remain under the outer capability lifecycle;
     # this inner process never deletes publication pathnames.
     set +e
+    if [ -n "${SIGN_KEY_MOUNT:-}" ] && [ -n "${BUILD_CONTAINER_ID:-}" ]; then
+        # The staged 0600 signing-key copy must not outlive this invocation
+        # in the warm build volume. Capsule mode destroys the whole volume
+        # below; this scrub also covers the persistent warm-volume path and
+        # runs on success and failure alike (the trap fires on every exit).
+        docker run --rm \
+            -v "${VOLUME_NAME}:/build" \
+            "$BUILD_CONTAINER_ID" bash -c \
+            'rm -f /build/.dcent-release-signing/release-key.pem' >/dev/null 2>&1
+    fi
     if [ "$CAPSULE_BUILDROOT_VOLUME_CREATED" = "1" ]; then
         current_volume_inspect="$(docker volume inspect -- "$VOLUME_NAME" 2>/dev/null)"
         if [ -z "$current_volume_inspect" ] || ! printf '%s\n' "$current_volume_inspect" \
@@ -1152,6 +1289,7 @@ if [ "$CAPSULE_MODE" = "1" ]; then
 fi
 BUILD_INPUT_CREATE_RESULT="$(python3 "$SCRIPT_DIR/build_input_snapshot.py" create \
     --repo-root "$BUILD_INPUT_REPO_ROOT" \
+    --held-assets "$(python3 "$SCRIPT_DIR/held_assets.py" --repo-root "$BUILD_INPUT_REPO_ROOT")" \
     --build-input-manifest "$SCRIPT_DIR/build_inputs.manifest" \
     "${BUILD_INPUT_SELECTION_ARGS[@]}" \
     --target "$TARGET")"
@@ -1163,7 +1301,7 @@ BUILD_INPUT_STAGE="$(snapshot_result_field --field stage)"
 BUILD_INPUT_SNAPSHOT="$(snapshot_result_field --field snapshot)"
 BUILD_INPUT_DESTROY_TOKEN="$(snapshot_result_field --field destroy_token)"
 if command -v cygpath >/dev/null 2>&1; then
-    DOCKER_BUILD_INPUT_STAGE="$(cygpath -w "$BUILD_INPUT_STAGE")"
+    DOCKER_BUILD_INPUT_STAGE="$(dcent_cygpath_w "$BUILD_INPUT_STAGE")"
 else
     DOCKER_BUILD_INPUT_STAGE="$BUILD_INPUT_STAGE"
 fi
@@ -1225,7 +1363,7 @@ if [ -n "${DCENT_RELEASE_SIGNING_KEY:-}" ]; then
         exit 1
     fi
     if command -v cygpath >/dev/null 2>&1; then
-        SIGN_KEY_MOUNT="$(cygpath -w "$DCENT_RELEASE_SIGNING_KEY")"
+        SIGN_KEY_MOUNT="$(dcent_cygpath_w "$DCENT_RELEASE_SIGNING_KEY")"
     else
         SIGN_KEY_MOUNT="$DCENT_RELEASE_SIGNING_KEY"
     fi
@@ -1233,6 +1371,9 @@ if [ -n "${DCENT_RELEASE_SIGNING_KEY:-}" ]; then
         echo "ERROR: release signing-key path is unsafe for Docker transport" >&2
         exit 1
     }
+    # Docker -v cannot take the NT long-path prefix; the validator already
+    # accepted the underlying native path.
+    SIGN_KEY_MOUNT="${SIGN_KEY_MOUNT#\\\\?\\}"
     SIGNING_MOUNT_ARGS+=(-v "${SIGN_KEY_MOUNT}:/dcent-release-signing-key.pem:ro")
     CONTAINER_RELEASE_SIGNING_KEY="/dcent-release-signing-key.pem"
 fi
@@ -1246,7 +1387,7 @@ if [ -n "${DCENT_RELEASE_PUBKEY_FILE:-}" ]; then
         exit 1
     fi
     if command -v cygpath >/dev/null 2>&1; then
-        RELEASE_PUBKEY_MOUNT="$(cygpath -w "$DCENT_RELEASE_PUBKEY_FILE")"
+        RELEASE_PUBKEY_MOUNT="$(dcent_cygpath_w "$DCENT_RELEASE_PUBKEY_FILE")"
     else
         RELEASE_PUBKEY_MOUNT="$DCENT_RELEASE_PUBKEY_FILE"
     fi
@@ -1274,7 +1415,7 @@ dcent_validate_docker_transport_path "$BINARY_EXPORT_STAGE" || {
     exit 1
 }
 if command -v cygpath >/dev/null 2>&1; then
-    DOCKER_BINARY_EXPORT_STAGE="$(cygpath -w "$BINARY_EXPORT_STAGE")"
+    DOCKER_BINARY_EXPORT_STAGE="$(dcent_cygpath_w "$BINARY_EXPORT_STAGE")"
 else
     DOCKER_BINARY_EXPORT_STAGE="$BINARY_EXPORT_STAGE"
 fi
@@ -1390,8 +1531,8 @@ echo "--- Phase 1: docker build (cached after first run) ---"
 # BUILD CONTEXT path (paths with spaces fail). Convert to Windows form via
 # cygpath when available; fall back to the original on Linux/macOS.
 if command -v cygpath >/dev/null 2>&1; then
-    DOCKER_BUILD_CTX="$(cygpath -w "$PROJECT_DIR")"
-    DOCKER_BUILD_DOCKERFILE="$(cygpath -w "$PROJECT_DIR/Dockerfile.build")"
+    DOCKER_BUILD_CTX="$(dcent_cygpath_w "$PROJECT_DIR")"
+    DOCKER_BUILD_DOCKERFILE="$(dcent_cygpath_w "$PROJECT_DIR/Dockerfile.build")"
 else
     DOCKER_BUILD_CTX="$PROJECT_DIR"
     DOCKER_BUILD_DOCKERFILE="$PROJECT_DIR/Dockerfile.build"
@@ -1469,7 +1610,7 @@ docker run --rm \
             echo "ERROR: Docker volume root is not a real directory" >&2
             exit 1
         }
-        for component in dcentos dcentrald target "$BUILD_ARCH" release; do
+        for component in projects dcentos dcentrald target "$BUILD_ARCH" release; do
             next="$release_dir/$component"
             if [ -L "$next" ] || { [ -e "$next" ] && [ ! -d "$next" ]; }; then
                 echo "ERROR: unsafe persistent binary staging component: $next" >&2
@@ -1509,73 +1650,112 @@ done
 
 # -------- Phase 3: stage project tree into volume --------
 echo "--- Phase 3: stage project tree into volume ---"
+python3 "$SCRIPT_DIR/release_dashboard.py" verify \
+    --source "$PROJECT_DIR/dashboard" --output "$CAPSULE_RESULT_ROOT/dashboard"
+DASHBOARD_MOUNT="$CAPSULE_RESULT_ROOT/dashboard"
+TOOLBOX_SOURCE_MOUNT="$REPO_ROOT/projects/dcent-toolbox"
+if command -v cygpath >/dev/null 2>&1; then
+    DASHBOARD_MOUNT="$(dcent_cygpath_w "$DASHBOARD_MOUNT")"
+    TOOLBOX_SOURCE_MOUNT="$(dcent_cygpath_w "$TOOLBOX_SOURCE_MOUNT")"
+fi
+dcent_validate_docker_transport_path "$DASHBOARD_MOUNT"
+dcent_validate_docker_transport_path "$TOOLBOX_SOURCE_MOUNT"
 # Mirror the WSL script exclude list. Use rsync --delete so removed files
 # disappear from the volume too. CRLF strip only our own shell scripts +
 # buildroot external config (Windows editors may save with CRLF and bash
 # chokes on \r in shebang lines and inside heredocs).
 docker run --rm \
     -e CAPSULE_MODE="$CAPSULE_MODE" \
+    -e BUILD_ARCH="$BUILD_ARCH" \
     -v "${VOLUME_NAME}:/build" \
     -v "${POSIX_PROJECT_DIR}:/src:ro" \
+    -v "${DASHBOARD_MOUNT}:/dcent-dashboard:ro" \
+    -v "${TOOLBOX_SOURCE_MOUNT}:/dcent-toolbox-source:ro" \
     "$BUILD_CONTAINER_ID" bash -c '
         set -e
-        mkdir -p /build/dcentos
-        rsync -a --delete \
-            --exclude=buildroot/ \
-            --exclude=output/ \
-            --exclude=dcentrald/target/ \
-            --exclude=dashboard/node_modules/ \
-            --exclude=.tmp_* \
-            --exclude=*.log \
-            --exclude=.git/ \
-            /src/ /build/dcentos/
+        bash /src/scripts/release_container_stage.sh /src /dcent-toolbox-source /build "$BUILD_ARCH"
+        python3 /build/DCENT_OS_Antminer/scripts/release_dashboard.py stage \
+            --source /src/dashboard --output /dcent-dashboard \
+            --destination /build/DCENT_OS_Antminer/dashboard/dist
         if [ "$CAPSULE_MODE" != "1" ]; then
             # Compatibility-only normalization for the legacy live-tree lane.
             # Capsule releases consume Git-object bytes and modes unchanged.
-            find /build/dcentos/scripts -type f -name "*.sh" \
+            find /build/DCENT_OS_Antminer/scripts -type f -name "*.sh" \
                 -exec sed -i "s/\r$//" {} + 2>/dev/null || true
-            find /build/dcentos/br2_external_dcentos -type f \
+            find /build/DCENT_OS_Antminer/br2_external_dcentos -type f \
                 \( -name "*.sh" -o -name "S[0-9][0-9]*" -o -name "Config.in" -o -name "*.mk" -o -name "*defconfig*" -o -name "*.fragment" \) \
                 -exec sed -i "s/\r$//" {} + 2>/dev/null || true
-            chmod +x /build/dcentos/scripts/*.sh 2>/dev/null || true
-            find /build/dcentos/br2_external_dcentos -type f -name "*.sh" \
+            chmod +x /build/DCENT_OS_Antminer/scripts/*.sh 2>/dev/null || true
+            find /build/DCENT_OS_Antminer/br2_external_dcentos -type f -name "*.sh" \
                 -exec chmod +x {} + 2>/dev/null || true
         fi
-        DCENTOS_VERSION_FILE="/build/dcentos/br2_external_dcentos/board/zynq/rootfs-overlay/etc/dcentos-version"
+        DCENTOS_VERSION_FILE="/build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/rootfs-overlay/etc/dcentos-version"
         DCENTOS_VERSION="$(sed -n "s/^[[:space:]]*//;s/[[:space:]]*$//;/^$/!{p;q;}" "$DCENTOS_VERSION_FILE")"
         [ -n "$DCENTOS_VERSION" ] || { echo "ERROR: empty DCENTOS_VERSION from $DCENTOS_VERSION_FILE" >&2; exit 1; }
         if [ "$CAPSULE_MODE" != "1" ]; then
             for version_path in \
-                /build/dcentos/br2_external_dcentos/board/zynq/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/zynq/am2-s19jpro/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/zynq/am2-s19pro/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/zynq/am2-s17pro/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/zynq/am2-s17plus/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/zynq/am2-t17/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/zynq/am2-t17plus/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/zynq/am1-s9se/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/zynq/am1-s9k/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/amlogic/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/amlogic/am3-s19kpro/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/amlogic/am3-s19xp/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/amlogic/am3-s19jxp/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/amlogic/am3-s19jproplus/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/amlogic/am3-s21/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/amlogic/am3-s21pro/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/amlogic/am3-s21xp/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/amlogic/am3-s19jpro-aml/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/amlogic/am3-t21/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/beaglebone/am3-bb/rootfs-overlay/etc/dcentos-version \
-                /build/dcentos/br2_external_dcentos/board/beaglebone/am3-bb-s19jpro/rootfs-overlay/etc/dcentos-version
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/am2-s19jpro/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/am2-s19pro/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/am2-s17pro/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/am2-s17plus/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/am2-t17/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/am2-t17plus/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/am1-s9se/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/am1-s9k/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s19kpro/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s19xp/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s19jxp/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s19jproa/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s19jproplus/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s21/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s21pro/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s21xp/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s19jpro-aml/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-t21/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/beaglebone/am3-bb/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/beaglebone/am3-bb-s19jpro/rootfs-overlay/etc/dcentos-version
             do
                 mkdir -p "$(dirname "$version_path")"
                 printf "%s\n" "$DCENTOS_VERSION" > "$version_path"
             done
-            echo "Stamped dcentos-version=$DCENTOS_VERSION into staged rootfs overlays"
+            # Verify the stamped overlays read back the exact version
+            # (synchronize AND verify — the board_desc build-driver lane
+            # test requires both references per dedicated overlay).
+            for version_path in \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/am2-s19jpro/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/am2-s19pro/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/am2-s17pro/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/am2-s17plus/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/am2-t17/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/am2-t17plus/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/am1-s9se/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/zynq/am1-s9k/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s19kpro/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s19xp/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s19jxp/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s19jproa/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s19jproplus/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s21/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s21pro/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s21xp/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-s19jpro-aml/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/am3-t21/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/beaglebone/am3-bb/rootfs-overlay/etc/dcentos-version \
+                /build/DCENT_OS_Antminer/br2_external_dcentos/board/beaglebone/am3-bb-s19jpro/rootfs-overlay/etc/dcentos-version
+            do
+                stamped_version="$(sed -n "s/^[[:space:]]*//;s/[[:space:]]*$//;/^$/!{p;q;}" "$version_path")"
+                [ "$stamped_version" = "$DCENTOS_VERSION" ] || {
+                    echo "ERROR: $version_path reads back [$stamped_version] not [$DCENTOS_VERSION]" >&2
+                    exit 1
+                }
+            done
+            echo "Stamped and verified dcentos-version=$DCENTOS_VERSION into staged rootfs overlays"
         else
             echo "Capsule source staged without CRLF, mode, or version rewrites (version=$DCENTOS_VERSION)"
         fi
-        echo "Staged $(du -sh /build/dcentos | cut -f1) into volume"
+        echo "Staged $(du -sh /build/DCENT_OS_Antminer | cut -f1) into volume"
     '
 echo ""
 
@@ -1589,8 +1769,9 @@ case "$TARGET" in
     am3-s19jpro-aml) AMLOGIC_EXACT_MODEL=s19jpro ;;
     am3-s19xp) AMLOGIC_EXACT_MODEL=s19xp ;;
     am3-s19jxp) AMLOGIC_EXACT_MODEL=s19j-xp ;;
+    am3-s19jproa) AMLOGIC_EXACT_MODEL=s19jpro-a ;;
     am3-s19jproplus) AMLOGIC_EXACT_MODEL=s19jpro-plus ;;
-    am3-s19kpro) AMLOGIC_EXACT_MODEL=s19kpro ;;
+    am3-s19kpro|am3-s19kpro-nopic) AMLOGIC_EXACT_MODEL=s19kpro ;;
     am3-s21) AMLOGIC_EXACT_MODEL=s21 ;;
     am3-s21pro) AMLOGIC_EXACT_MODEL=s21pro ;;
     am3-s21xp) AMLOGIC_EXACT_MODEL=s21xp ;;
@@ -1600,35 +1781,95 @@ AMLOGIC_EXACT_CONTAINER_ROOT=""
 if [ -n "$AMLOGIC_EXACT_MODEL" ]; then
     AMLOGIC_EXACT_CONTAINER_ROOT="/dcent-inputs/files/knowledge-base/extractions/vnish-farm/${AMLOGIC_EXACT_MODEL}/vnishfarm-1.2.6-rc5-aml-nand-install"
 fi
+if [ "$TARGET" = am3-s19kpro-nopic ]; then
+    AMLOGIC_EXACT_CONTAINER_ROOT="/dcent-inputs/files/knowledge-base/extractions/re-armada/vnish-1.2.7-s19kpro-aml-nand-v1.2.7-install"
+fi
+# Pinned mkimage for the native AM2 fabric FIT pin (drop1-20260919-4f5h9mgl
+# latent): the pin bytes were built by u-boot 2026.04 commit 5a998ab00758
+# (staged 2026-04-14). The capsule container's apt u-boot-tools (2022.01)
+# serializes the FIT with 896 structural bytes more, so byte-exact
+# reproduction MUST use this binary. No download fallback exists: a wrong
+# mkimage build silently produces non-pin bytes.
+MKIMAGE_MOUNT_ARGS=()
+if [ -n "${DCENT_TOOLCHAIN_LOCAL_DIR:-}" ]; then
+    dcent_require_absolute_host_path "$DCENT_TOOLCHAIN_LOCAL_DIR" || {
+        echo "ERROR: DCENT_TOOLCHAIN_LOCAL_DIR must be an absolute host path" >&2
+        exit 1
+    }
+    MKIMAGE_PIN_REL="u-boot-2026.04-mkimage/mkimage"
+    MKIMAGE_PIN_SHA256="998314bbd994aa5a8d37f089975f727e6500bce207dfda1322da0877c9b4c99d"
+    if [ -f "$DCENT_TOOLCHAIN_LOCAL_DIR/$MKIMAGE_PIN_REL" ]; then
+        MKIMAGE_PIN_ACTUAL="$(sha256sum "$DCENT_TOOLCHAIN_LOCAL_DIR/$MKIMAGE_PIN_REL" | awk '{print $1}')"
+        if [ "$MKIMAGE_PIN_ACTUAL" != "$MKIMAGE_PIN_SHA256" ]; then
+            # Present but wrong bytes is a tamper signal: stop every lane.
+            echo "ERROR: pinned mkimage sha256 mismatch under DCENT_TOOLCHAIN_LOCAL_DIR:" >&2
+            echo "  expected $MKIMAGE_PIN_SHA256" >&2
+            echo "  observed $MKIMAGE_PIN_ACTUAL" >&2
+            exit 1
+        fi
+        if command -v cygpath >/dev/null 2>&1; then
+            MKIMAGE_LOCAL_MOUNT="$(dcent_cygpath_w "$DCENT_TOOLCHAIN_LOCAL_DIR")"
+        else
+            MKIMAGE_LOCAL_MOUNT="$DCENT_TOOLCHAIN_LOCAL_DIR"
+        fi
+        dcent_validate_docker_transport_path "$MKIMAGE_LOCAL_MOUNT" || {
+            echo "ERROR: local toolchain path is unsafe for Docker transport" >&2
+            exit 1
+        }
+        MKIMAGE_MOUNT_ARGS=(-v "${MKIMAGE_LOCAL_MOUNT}:/toolchain-local:ro")
+        echo "Pinned mkimage verified: $MKIMAGE_PIN_REL ($MKIMAGE_PIN_SHA256)"
+    else
+        # Absent is a provisioning gap, not a tamper: only the native AM2
+        # squashfs lanes need this tool, and they fail closed at Phase 4 with
+        # a nameable error, so unrelated lanes keep building.
+        echo "WARNING: DCENT_TOOLCHAIN_LOCAL_DIR does not contain $MKIMAGE_PIN_REL:" >&2
+        echo "  $DCENT_TOOLCHAIN_LOCAL_DIR" >&2
+        echo "  Native AM2 squashfs lanes will refuse at boot staging until it is" >&2
+        echo "  provisioned (scripts/provision_build_inputs.sh)." >&2
+    fi
+fi
 docker run --rm \
     -v "${VOLUME_NAME}:/build" \
     "${BUILD_INPUT_MOUNT_ARGS[@]}" \
+    "${MKIMAGE_MOUNT_ARGS[@]}" \
+    -e DCENT_MKIMAGE="/toolchain-local/u-boot-2026.04-mkimage/mkimage" \
     -e TARGET="$TARGET" \
+    -e PRODUCER="$PRODUCER" \
+    -e BOARD_POST_IMAGE="$BOARD_POST_IMAGE" \
     -e DCENT_AM3_AML_KERNEL="${AMLOGIC_EXACT_CONTAINER_ROOT:+${AMLOGIC_EXACT_CONTAINER_ROOT}/vmlinux.bin}" \
     -e DCENT_AM3_AML_DTB="${AMLOGIC_EXACT_CONTAINER_ROOT:+${AMLOGIC_EXACT_CONTAINER_ROOT}/devicetree.dtb}" \
     -e DCENT_AM3_AML_FW_INFO="${AMLOGIC_EXACT_CONTAINER_ROOT:+${AMLOGIC_EXACT_CONTAINER_ROOT}/rootfs/etc/fw-info}" \
     "$BUILD_CONTAINER_ID" bash -c '
         set -e
+        if [ "$BOARD_POST_IMAGE" = native-sd ]; then
+            python3 /build/DCENT_OS_Antminer/scripts/release_stage_boot.py \
+                --producer "$PRODUCER" --snapshot-files /dcent-inputs/files \
+                --output /build/dcent-native-boot
+            exit 0
+        fi
         case "$TARGET" in
             s9)
-                mkdir -p /build/dcentos/extractions/s9
+                mkdir -p /build/DCENT_OS_Antminer/extractions/s9
                 rsync -a --delete \
                     /dcent-inputs/files/knowledge-base/extractions/s9/ \
-                    /build/dcentos/extractions/s9/
-                echo "Staged s9: $(du -sh /build/dcentos/extractions/s9 | cut -f1)"
-                ls -la /build/dcentos/extractions/s9/kernel.bin
+                    /build/DCENT_OS_Antminer/extractions/s9/
+                echo "Staged s9: $(du -sh /build/DCENT_OS_Antminer/extractions/s9 | cut -f1)"
+                ls -la /build/DCENT_OS_Antminer/extractions/s9/kernel.bin
                 ;;
             am2-s19jpro|am2-s19jpro-sd|am2-s19pro)
-                mkdir -p /build/dcentos/extractions/s19j
+                mkdir -p /build/DCENT_OS_Antminer/extractions/s19j
                 rsync -a --delete \
                     /dcent-inputs/files/knowledge-base/extractions/s19j/ \
-                    /build/dcentos/extractions/s19j/
-                echo "Staged s19j: $(du -sh /build/dcentos/extractions/s19j | cut -f1)"
+                    /build/DCENT_OS_Antminer/extractions/s19j/
+                echo "Staged s19j: $(du -sh /build/DCENT_OS_Antminer/extractions/s19j | cut -f1)"
                 ;;
-            am3-s19jpro-aml|am3-s19xp|am3-s19jxp|am3-s19jproplus|am3-s19kpro|am3-s21|am3-s21pro|am3-s21xp|am3-t21)
-                . /build/dcentos/br2_external_dcentos/board/amlogic/require-exact-build-inputs.sh
+            am3-s19jpro-aml|am3-s19xp|am3-s19jxp|am3-s19jproa|am3-s19jproplus|am3-s19kpro|am3-s19kpro-nopic|am3-s21|am3-s21pro|am3-s21xp|am3-t21)
+                . /build/DCENT_OS_Antminer/br2_external_dcentos/board/amlogic/require-exact-build-inputs.sh
                 dcent_require_exact_amlogic_build_inputs "$TARGET"
                 echo "Amlogic inputs remain in the private read-only snapshot for Buildroot"
+                ;;
+            am3-bb-s19jpro-payload)
+                echo "BeagleBone userspace payload consumes no external boot components"
                 ;;
             *)
                 echo "ERROR: target $TARGET reached Phase 4 without an exact build-input staging policy" >&2
@@ -1642,7 +1883,10 @@ echo ""
 echo "--- Phase 5: stage pre-built dcentrald binary ($BUILD_ARCH) ---"
 # Consume only the exact target-required binaries captured by Phase 0. The
 # mutable host target tree is deliberately absent from this packaging phase.
-docker run --rm \
+# MSYS argv conversion would mangle the multiline inline script at the
+# bash->docker.exe exec boundary (observed 2026-09-14: container bash -c
+# died at the case-pattern line), so it is disabled for this one spawn.
+MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker run --rm \
     -e BUILD_ARCH="$BUILD_ARCH" \
     -e TARGET="$TARGET" \
     -e REQUIRED_BINARIES="$BINARY_EXPORT_REQUIRED" \
@@ -1656,149 +1900,7 @@ docker run --rm \
     -e DCENT_ALLOW_UNSIGNED_SYSUPGRADE="$DCENT_ALLOW_UNSIGNED_SYSUPGRADE" \
     "${BINARY_EXPORT_MOUNT_ARGS[@]}" \
     -v "${VOLUME_NAME}:/build" \
-    "$BUILD_CONTAINER_ID" bash -c '
-        set -eu
-        case "$BUILD_ARCH" in
-            armv7-unknown-linux-musleabihf|aarch64-unknown-linux-musl) ;;
-            *) echo "ERROR: unsafe BUILD_ARCH for binary staging: $BUILD_ARCH" >&2; exit 1 ;;
-        esac
-        release_dir=/build
-        [ -d "$release_dir" ] && [ ! -L "$release_dir" ] || {
-            echo "ERROR: Docker volume root is not a real directory" >&2
-            exit 1
-        }
-        for component in dcentos dcentrald target "$BUILD_ARCH" release; do
-            next="$release_dir/$component"
-            [ -d "$next" ] && [ ! -L "$next" ] || {
-                echo "ERROR: unsafe persistent binary staging component: $next" >&2
-                exit 1
-            }
-            release_dir="$next"
-        done
-        for binary_name in $REQUIRED_BINARIES; do
-            case "$binary_name" in
-                dcentrald)
-                    relative_path="$DCENTRALD_EXPORT_PATH"
-                    expected_sha256="$DCENTRALD_EXPORT_SHA256"
-                    ;;
-                dcentos-init)
-                    relative_path="$INIT_EXPORT_PATH"
-                    expected_sha256="$INIT_EXPORT_SHA256"
-                    ;;
-                dcentos-discovery)
-                    relative_path="$DISCOVERY_EXPORT_PATH"
-                    expected_sha256="$DISCOVERY_EXPORT_SHA256"
-                    ;;
-                *) echo "ERROR: unsafe required binary name: $binary_name" >&2; exit 1 ;;
-            esac
-            case "$relative_path" in
-                artifacts/[0-9][0-9][0-9][0-9]/"$binary_name") ;;
-                *) echo "ERROR: unsafe exported path for $binary_name" >&2; exit 1 ;;
-            esac
-            case "$expected_sha256" in
-                *[!0-9a-f]*|'') echo "ERROR: malformed SHA256 for $binary_name" >&2; exit 1 ;;
-            esac
-            [ "${#expected_sha256}" -eq 64 ] || {
-                echo "ERROR: non-64-byte SHA256 for $binary_name" >&2
-                exit 1
-            }
-            source_path="/dcent-binaries/$relative_path"
-            destination="$release_dir/$binary_name"
-            [ -f "$source_path" ] && [ ! -L "$source_path" ] || {
-                echo "ERROR: exported source is missing or linked: $source_path" >&2
-                exit 1
-            }
-            [ ! -e "$destination" ] && [ ! -L "$destination" ] || {
-                echo "ERROR: binary destination unexpectedly exists: $destination" >&2
-                exit 1
-            }
-            source_sha256="$(sha256sum "$source_path" | cut -d" " -f1)"
-            [ "$source_sha256" = "$expected_sha256" ] || {
-                echo "ERROR: exported source digest mismatch for $binary_name" >&2
-                exit 1
-            }
-            install -m 0755 "$source_path" "$destination"
-            destination_sha256="$(sha256sum "$destination" | cut -d" " -f1)"
-            [ "$destination_sha256" = "$expected_sha256" ] || {
-                echo "ERROR: installed destination digest mismatch for $binary_name" >&2
-                exit 1
-            }
-            file "$destination"
-            ls -lh "$destination"
-        done
-        # W1.2 (2026-05-07): when a manifest pubkey was pinned, prove it is
-        # actually embedded in the prebuilt binary. dcentrald-api uses
-        # `option_env!("DCENT_MANIFEST_PUBLIC_KEY_HEX")` which only embeds
-        # the hex string when the env var was set during `cargo build`. If
-        # the build host did not export the same hex used here, the binary
-        # silently falls back to fail-open. `strings | grep` catches that.
-        if [ -n "${DCENT_MANIFEST_PUBLIC_KEY_HEX:-}" ]; then
-            BIN_PATH="/build/dcentos/dcentrald/target/$BUILD_ARCH/release/dcentrald"
-            if strings "$BIN_PATH" | grep -qF "$DCENT_MANIFEST_PUBLIC_KEY_HEX"; then
-                echo "  manifest pubkey pin embedded in dcentrald binary (verified via strings)"
-            else
-                echo "ERROR: DCENT_MANIFEST_PUBLIC_KEY_HEX is set in this build environment" >&2
-                echo "       but the prebuilt dcentrald binary does NOT contain that hex" >&2
-                echo "       string — the binary was likely cargo-built without the env" >&2
-                echo "       var exported. Re-run cargo build with the pin set:" >&2
-                echo "       export DCENT_MANIFEST_PUBLIC_KEY_HEX=<hex64>" >&2
-                echo "       cargo build --release --target $BUILD_ARCH" >&2
-                exit 1
-            fi
-        fi
-        # W13.C4: variant TARGET arms (W10) need version-stamp dispatch.
-        # Without these, dcentrald version stamp is silently skipped on
-        # these variants (the wildcard `*)` falls through to "" and the
-        # `dcent_require_dcentrald_version_match` call below is bypassed),
-        # so a stale binary in the variant overlay would ship to
-        # sysupgrade tarballs unnoticed.
-        case "$TARGET" in
-            s9) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/zynq/rootfs-overlay" ;;
-            # DEVOPS-011 (2026-06-02): am2-s19jpro-sd reuses the am2-s19jpro
-            # defconfig + rootfs-overlay (only the post-image differs — it emits
-            # a flashable .img instead of a sysupgrade .tar). Without this arm it
-            # fell through to the wildcard "" and the dcentrald version-match
-            # gate was silently skipped, so a stale binary in the shared
-            # am2-s19jpro overlay could ship in the SD image unnoticed (same
-            # W13.C4 hazard the other variants close). Point it at the same
-            # overlay the SD build actually stages from.
-            am2-s19jpro|am2-s19jpro-sd) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/zynq/am2-s19jpro/rootfs-overlay" ;;
-            # Added by Phase 2K — without these am2-s19pro / am2-s17pro fall
-            # through to the wildcard "" and the version-match gate is
-            # silently skipped, shipping a stale binary in the variant
-            # overlay unnoticed (same W13.C4 hazard as the am3 variants).
-            am2-s19pro) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/zynq/am2-s19pro/rootfs-overlay" ;;
-            am2-s17pro) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/zynq/am2-s17pro/rootfs-overlay" ;;
-            am2-s17plus) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/zynq/am2-s17plus/rootfs-overlay" ;;
-            am2-t17) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/zynq/am2-t17/rootfs-overlay" ;;
-            am1-s9se) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/zynq/am1-s9se/rootfs-overlay" ;;
-            am1-s9k) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/zynq/am1-s9k/rootfs-overlay" ;;
-            am2-t17plus) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/zynq/am2-t17plus/rootfs-overlay" ;;
-            # End Phase 2K
-            am3-s19kpro) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/amlogic/am3-s19kpro/rootfs-overlay" ;;
-            am3-s19xp) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/amlogic/am3-s19xp/rootfs-overlay" ;;
-            am3-s19jxp) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/amlogic/am3-s19jxp/rootfs-overlay" ;;
-            am3-s19jproplus) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/amlogic/am3-s19jproplus/rootfs-overlay" ;;
-            am3-s21) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/amlogic/am3-s21/rootfs-overlay" ;;
-            am3-s21pro) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/amlogic/am3-s21pro/rootfs-overlay" ;;
-            am3-s21xp) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/amlogic/am3-s21xp/rootfs-overlay" ;;
-            # Added by Phase 4B
-            am3-s19jpro-aml) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/amlogic/am3-s19jpro-aml/rootfs-overlay" ;;
-            am3-t21) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/amlogic/am3-t21/rootfs-overlay" ;;
-            # End Phase 4B
-            am3-bb) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/beaglebone/am3-bb/rootfs-overlay" ;;
-            am3-bb-s19jpro|am3-bb-s19jpro-vnish) VERSION_TARGET_DIR="/build/dcentos/br2_external_dcentos/board/beaglebone/am3-bb-s19jpro/rootfs-overlay" ;;
-            *) VERSION_TARGET_DIR="" ;;
-        esac
-        if [ -n "$VERSION_TARGET_DIR" ]; then
-            . /build/dcentos/scripts/lib/dcentrald_version_gate.sh
-            dcent_require_dcentrald_version_match \
-                "$VERSION_TARGET_DIR" \
-                "/build/dcentos/dcentrald/target/$BUILD_ARCH/release/dcentrald" \
-                "build_in_docker Phase 5 ($TARGET)" \
-                "/build/dcentos/dcentrald/Cargo.toml"
-        fi
-    '
+    "$BUILD_CONTAINER_ID" bash /build/DCENT_OS_Antminer/scripts/phase5_stage_binaries.sh
 echo ""
 
 # -------- Phase 5b: pre-cache Linaro toolchain --------
@@ -1839,17 +1941,12 @@ echo ""
 # both of which pin this exact filename to cee0087b... — matching the on-disk
 # toolchain that built the shipped 20260617 beta (xz-integrity + gcc-7.2.1 OK).
 TOOLCHAIN_SHA256_ARMHF="cee0087b1f1205b73996651b99acd3a926d136e71047048f1758ffcec69b1ca2"
-# NOTE (follow-up): TOOLCHAIN_SHA256_AARCH64 below was likewise never
-# operator-verified and is out of scope for the armv7 S9/S19jPro RC. Re-verify
-# it against Buildroot's aarch64 .hash before any Amlogic release build.
-# EVIDENCE 2026-07-09: Buildroot 2018.02 toolchain-external-linaro-aarch64.hash
-# pins gcc-linaro-7.2.1-2017.11-x86_64_aarch64-linux-gnu.tar.xz to
-#   20181f828e1075f1a493947ff91e82dd578ce9f8638fbdfc39e24b62857d8f8d
-# and the dotsrc/armbian mirror copy hashes to that SAME value — the recorded
-# 40dce3d3... value below is almost certainly a stale placeholder, and any
-# aarch64 (Amlogic) release build WILL fail-closed on it. Changing the pin
-# VALUE is operator-gated (ratification) — deliberately NOT changed here.
-TOOLCHAIN_SHA256_AARCH64="40dce3d35e95a3a92cba27acbb21f30f86a720d320bc2a2e8a48fea423bc16f7"
+# Corrected 2026-09-07 during the authorized all-variant beta implementation.
+# Buildroot tags 2018.02 and 2018.05 both pin this exact x86_64 archive to
+# 20181f82...; the S19k beta lane already uses that value. The old 40dce3d3...
+# placeholder could never admit the authentic archive. Retained upstream files:
+#
+TOOLCHAIN_SHA256_AARCH64="20181f828e1075f1a493947ff91e82dd578ce9f8638fbdfc39e24b62857d8f8d"
 case "$TOOLCHAIN_FILE" in
     *arm-linux-gnueabihf*) TOOLCHAIN_SHA256="$TOOLCHAIN_SHA256_ARMHF" ;;
     *aarch64-linux-gnu*)   TOOLCHAIN_SHA256="$TOOLCHAIN_SHA256_AARCH64" ;;
@@ -1877,7 +1974,7 @@ fi
 # byte-identical armhf artifact (sha256 cee0087b... = the ratified pin; the
 # aarch64 sibling there matches Buildroot 2018.02 upstream 20181f82...).
 # The RELIABLE sources are:
-#   1. the persistent in-volume cache /build/dcentos/dl-cache/ (survives
+#   1. the persistent in-volume cache /build/DCENT_OS_Antminer/dl-cache/ (survives
 #      Buildroot re-clones — see the BUG-5 restage in Phase 6), and
 #   2. an operator/CI-provided local directory:
 #        export DCENT_TOOLCHAIN_LOCAL_DIR=<dir containing $TOOLCHAIN_FILE>
@@ -1893,7 +1990,7 @@ if [ -n "${DCENT_TOOLCHAIN_LOCAL_DIR:-}" ]; then
     }
     if [ -f "$DCENT_TOOLCHAIN_LOCAL_DIR/$TOOLCHAIN_FILE" ]; then
         if command -v cygpath >/dev/null 2>&1; then
-            TOOLCHAIN_LOCAL_MOUNT="$(cygpath -w "$DCENT_TOOLCHAIN_LOCAL_DIR")"
+            TOOLCHAIN_LOCAL_MOUNT="$(dcent_cygpath_w "$DCENT_TOOLCHAIN_LOCAL_DIR")"
         else
             TOOLCHAIN_LOCAL_MOUNT="$DCENT_TOOLCHAIN_LOCAL_DIR"
         fi
@@ -1926,13 +2023,13 @@ docker run --rm \
         # can no longer delete it (it used to wipe the just-staged tarball on
         # every cold-volume run). Phase 6 (re)stages this cache into
         # buildroot/dl/ after any clone. Sourcing order:
-        #   1. persistent cache /build/dcentos/dl-cache/toolchain-external-custom
+        #   1. persistent cache /build/DCENT_OS_Antminer/dl-cache/toolchain-external-custom
         #   2. legacy warm-volume copy in buildroot/dl (migrated forward)
         #   3. operator-provided DCENT_TOOLCHAIN_LOCAL_DIR (mounted read-only)
         #   4. network download: original Linaro URL (DEAD, 404 — kept for the
         #      record), then the hash-verified dotsrc/armbian mirror.
-        PERSIST_DIR="/build/dcentos/dl-cache/toolchain-external-custom"
-        LEGACY_DIR="/build/dcentos/buildroot/dl/toolchain-external-custom"
+        PERSIST_DIR="/build/DCENT_OS_Antminer/dl-cache/toolchain-external-custom"
+        LEGACY_DIR="/build/DCENT_OS_Antminer/buildroot/dl/toolchain-external-custom"
         FILE="$TOOLCHAIN_FILE"
         mkdir -p "$PERSIST_DIR"
 
@@ -1957,10 +2054,21 @@ docker run --rm \
                 echo "  $TRY_URL"
                 if curl -fL --retry 3 --retry-delay 5 --retry-max-time 600 \
                     -o "$PERSIST_DIR/$FILE.tmp" "$TRY_URL"; then
-                    mv "$PERSIST_DIR/$FILE.tmp" "$PERSIST_DIR/$FILE"
-                    ls -lh "$PERSIST_DIR/$FILE"
-                    DOWNLOADED=1
-                    break
+                    # A HTTP 200 body can still be garbage: the dead
+                    # releases.linaro.org URL 301-redirects to a ~60K error
+                    # page served with status 200, so curl -f succeeds. Only
+                    # accept bodies of plausible toolchain size (same
+                    # threshold as have_file above); otherwise try the next
+                    # source. DEVOPS-002 below still hash-verifies whatever
+                    # lands.
+                    BODY_BYTES="$(stat -c%s "$PERSIST_DIR/$FILE.tmp" 2>/dev/null || echo 0)"
+                    if [ "$BODY_BYTES" -gt 100000000 ]; then
+                        mv "$PERSIST_DIR/$FILE.tmp" "$PERSIST_DIR/$FILE"
+                        ls -lh "$PERSIST_DIR/$FILE"
+                        DOWNLOADED=1
+                        break
+                    fi
+                    echo "  download body implausibly small (${BODY_BYTES} bytes) from $TRY_URL" >&2
                 fi
                 rm -f "$PERSIST_DIR/$FILE.tmp"
                 echo "  download FAILED from $TRY_URL" >&2
@@ -2040,7 +2148,7 @@ docker run --rm \
         # does NOT create buildroot/ here: the old code did (mkdir -p of the
         # dl dir), which left a Makefile-less buildroot/ stub that Phase 6
         # then rm -rf-ed together with the just-staged toolchain (BUG-5).
-        if [ -f /build/dcentos/buildroot/Makefile ]; then
+        if [ -f /build/DCENT_OS_Antminer/buildroot/Makefile ]; then
             mkdir -p "$LEGACY_DIR"
             rm -f "$LEGACY_DIR/.lock"
             if ! have_file "$LEGACY_DIR/$FILE"; then
@@ -2054,50 +2162,71 @@ echo ""
 # -------- Phase 6: Buildroot --------
 echo "--- Phase 6: Buildroot make setup + make -j$(docker run --rm "$BUILD_CONTAINER_ID" nproc) ---"
 echo "(first build downloads ~500 MB of tarballs — expect 30–90 min)"
+if [ -n "${SIGN_KEY_MOUNT:-}" ]; then
+    # A bind-mounted Windows host file is visible 0777 inside the container,
+    # which trips the runtime-image private-key mode guard. Stage a 0600 copy
+    # in the invocation-scoped volume and point the signer at that copy; the
+    # bind mount stays read-only. Capsule mode destroys the whole volume at
+    # exit; the EXIT trap additionally scrubs the copy for the warm-volume
+    # path where the volume itself intentionally persists.
+    docker run --rm \
+        "${SIGNING_MOUNT_ARGS[@]}" \
+        -v "${VOLUME_NAME}:/build" \
+        "$BUILD_CONTAINER_ID" bash -c 'set -e; install -D -m 600 /dcent-release-signing-key.pem /build/.dcent-release-signing/release-key.pem'
+    CONTAINER_RELEASE_SIGNING_KEY="/build/.dcent-release-signing/release-key.pem"
+fi
 # Mount the private target-selected input snapshot read-only. Post-image hooks
 # receive exact snapshot paths; they cannot reopen mutable repository fallbacks.
-docker run --rm \
-    -e FORCE_UNSAFE_CONFIGURE=1 \
-    -e TARGET="$TARGET" \
-    -e BUILD_ARCH="$BUILD_ARCH" \
-    -e TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
-    -e BR_DEFCONFIG="$BR_DEFCONFIG" \
-    -e BR_DEFCONFIG_FRAGMENTS="$BR_DEFCONFIG_FRAGMENTS" \
-    -e BUILDROOT_REPOSITORY="$BUILDROOT_REPOSITORY" \
-    -e BUILDROOT_COMMIT="$BUILDROOT_COMMIT" \
-    -e DCENT_RELEASE_IMAGE="${DCENT_RELEASE_IMAGE:-0}" \
-    -e DCENT_ALLOW_UNSIGNED_SYSUPGRADE="$DCENT_ALLOW_UNSIGNED_SYSUPGRADE" \
-    -e DCENT_PACKAGE_STATUS="$DCENT_PACKAGE_STATUS" \
-    -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
-    -e DCENT_SOURCE_COMMIT="$DCENT_SOURCE_COMMIT" \
-    -e DCENT_SOURCE_COMMIT_EPOCH="$DCENT_SOURCE_COMMIT_EPOCH" \
-    -e DCENT_SOURCE_TREE_STATE="$DCENT_SOURCE_TREE_STATE" \
-    -e DCENT_BUILD_TARGET="$DCENT_BUILD_TARGET" \
-    -e DCENT_BUILD_ARCH="$DCENT_BUILD_ARCH" \
-    -e DCENT_TOOLCHAIN_ID="$DCENT_TOOLCHAIN_ID" \
-    -e DCENT_REQUIRE_RELEASE_PROVENANCE="$DCENT_REQUIRE_RELEASE_PROVENANCE" \
-    -e DCENT_RELEASE_CAPSULE_MODE="$DCENT_RELEASE_CAPSULE_MODE" \
-    -e DCENT_CAPSULE_PROVENANCE_VERIFIED="$DCENT_CAPSULE_PROVENANCE_VERIFIED" \
-    -e DCENT_PROVENANCE_SOURCE_SNAPSHOT="/dcent-capsule-source" \
-    -e DCENT_PROVENANCE_GIT_OBJECT_REPO="/dcent-git-object-repo" \
-    -e DCENT_PROVENANCE_HELPER="/build/dcentos/scripts/source_snapshot.py" \
-    -e TOOLCHAIN_SHA256_MANDATORY="$TOOLCHAIN_SHA256_MANDATORY" \
-    -e DCENT_RELEASE_SIGNING_KEY="$CONTAINER_RELEASE_SIGNING_KEY" \
-    -e DCENT_RELEASE_PUBKEY_FILE="$CONTAINER_RELEASE_PUBKEY_FILE" \
-    -e DCENT_REQUIRE_RELEASE_KEY="${DCENT_REQUIRE_RELEASE_KEY:-0}" \
-    -e DCENT_AM2_S19J_KERNEL="/dcent-inputs/files/knowledge-base/extractions/s19j/kernel.bin" \
-    -e DCENT_AM2_S19J_BITSTREAM="/dcent-inputs/files/knowledge-base/extractions/s19j/fpga_bitstream.bit" \
-    -e DCENT_AM2_S19PRO_KERNEL="/dcent-inputs/files/knowledge-base/extractions/s19j/kernel.bin" \
-    -e DCENT_AM2_S19PRO_BITSTREAM="/dcent-inputs/files/knowledge-base/extractions/s19j/fpga_bitstream.bit" \
-    -e DCENT_AM3_AML_KERNEL="${AMLOGIC_EXACT_CONTAINER_ROOT:+${AMLOGIC_EXACT_CONTAINER_ROOT}/vmlinux.bin}" \
-    -e DCENT_AM3_AML_DTB="${AMLOGIC_EXACT_CONTAINER_ROOT:+${AMLOGIC_EXACT_CONTAINER_ROOT}/devicetree.dtb}" \
-    -e DCENT_AM3_AML_FW_INFO="${AMLOGIC_EXACT_CONTAINER_ROOT:+${AMLOGIC_EXACT_CONTAINER_ROOT}/rootfs/etc/fw-info}" \
-    "${AM2_S17_DONOR_ENV_ARGS[@]}" \
-    "${SIGNING_MOUNT_ARGS[@]}" \
-    "${BUILD_INPUT_MOUNT_ARGS[@]}" \
-    "${CAPSULE_PROVENANCE_MOUNT_ARGS[@]}" \
-    -v "${VOLUME_NAME}:/build" \
-    "$BUILD_CONTAINER_ID" bash -c '
+phase6_docker_args=()
+phase6_docker_args+=(--rm)
+phase6_docker_args+=(-e FORCE_UNSAFE_CONFIGURE=1)
+phase6_docker_args+=(-e PRODUCER="$PRODUCER")
+phase6_docker_args+=(-e DCENT_RELEASE_CHANNEL="${DCENT_RELEASE_CHANNEL:-beta}")
+phase6_docker_args+=(-e DCENT_RELEASE_HARDWARE_RECIPE="${DCENT_RELEASE_HARDWARE_RECIPE:-board-default}")
+phase6_docker_args+=(-e DCENT_NATIVE_SD_TARGET="${PRODUCER_BOARD}")
+phase6_docker_args+=(-e DCENT_RELEASE_DASHBOARD_DIR="/build/DCENT_OS_Antminer/dashboard/dist")
+phase6_docker_args+=(-e DCENT_NATIVE_SD_BOOT_INPUTS="/build/dcent-native-boot")
+phase6_docker_args+=(-e DCENT_NATIVE_SD_BINARIES="/build/DCENT_OS_Antminer/dcentrald/target/${BUILD_ARCH}/release")
+phase6_docker_args+=(-e TARGET="$TARGET")
+phase6_docker_args+=(-e BUILD_ARCH="$BUILD_ARCH")
+phase6_docker_args+=(-e TOOLCHAIN_FILE="$TOOLCHAIN_FILE")
+phase6_docker_args+=(-e BR_DEFCONFIG="$BR_DEFCONFIG")
+phase6_docker_args+=(-e BR_DEFCONFIG_FRAGMENTS="$BR_DEFCONFIG_FRAGMENTS")
+phase6_docker_args+=(-e BUILDROOT_REPOSITORY="$BUILDROOT_REPOSITORY")
+phase6_docker_args+=(-e BUILDROOT_COMMIT="$BUILDROOT_COMMIT")
+phase6_docker_args+=(-e DCENT_RELEASE_IMAGE="${DCENT_RELEASE_IMAGE:-0}")
+phase6_docker_args+=(-e DCENT_ALLOW_UNSIGNED_SYSUPGRADE="$DCENT_ALLOW_UNSIGNED_SYSUPGRADE")
+phase6_docker_args+=(-e DCENT_PACKAGE_STATUS="$DCENT_PACKAGE_STATUS")
+phase6_docker_args+=(-e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH")
+phase6_docker_args+=(-e DCENT_SOURCE_COMMIT="$DCENT_SOURCE_COMMIT")
+phase6_docker_args+=(-e DCENT_SOURCE_COMMIT_EPOCH="$DCENT_SOURCE_COMMIT_EPOCH")
+phase6_docker_args+=(-e DCENT_SOURCE_TREE_STATE="$DCENT_SOURCE_TREE_STATE")
+phase6_docker_args+=(-e DCENT_BUILD_TARGET="$DCENT_BUILD_TARGET")
+phase6_docker_args+=(-e DCENT_BUILD_ARCH="$DCENT_BUILD_ARCH")
+phase6_docker_args+=(-e DCENT_TOOLCHAIN_ID="$DCENT_TOOLCHAIN_ID")
+phase6_docker_args+=(-e DCENT_REQUIRE_RELEASE_PROVENANCE="$DCENT_REQUIRE_RELEASE_PROVENANCE")
+phase6_docker_args+=(-e DCENT_RELEASE_CAPSULE_MODE="$DCENT_RELEASE_CAPSULE_MODE")
+phase6_docker_args+=(-e DCENT_CAPSULE_PROVENANCE_VERIFIED="$DCENT_CAPSULE_PROVENANCE_VERIFIED")
+phase6_docker_args+=(-e DCENT_PROVENANCE_SOURCE_SNAPSHOT="/dcentos-source-snapshot-release/snapshot.json")
+phase6_docker_args+=(-e DCENT_PROVENANCE_GIT_OBJECT_REPO="/dcent-git-object-repo")
+phase6_docker_args+=(-e DCENT_PROVENANCE_HELPER="/build/DCENT_OS_Antminer/scripts/source_snapshot.py")
+phase6_docker_args+=(-e TOOLCHAIN_SHA256_MANDATORY="$TOOLCHAIN_SHA256_MANDATORY")
+phase6_docker_args+=(-e DCENT_RELEASE_SIGNING_KEY="$CONTAINER_RELEASE_SIGNING_KEY")
+phase6_docker_args+=(-e DCENT_RELEASE_PUBKEY_FILE="$CONTAINER_RELEASE_PUBKEY_FILE")
+phase6_docker_args+=(-e DCENT_REQUIRE_RELEASE_KEY="${DCENT_REQUIRE_RELEASE_KEY:-0}")
+phase6_docker_args+=(-e DCENT_AM2_S19J_KERNEL="/dcent-inputs/files/knowledge-base/extractions/s19j/kernel.bin")
+phase6_docker_args+=(-e DCENT_AM2_S19J_BITSTREAM="/dcent-inputs/files/knowledge-base/extractions/s19j/fpga_bitstream.bit")
+phase6_docker_args+=(-e DCENT_AM2_S19PRO_KERNEL="/dcent-inputs/files/knowledge-base/extractions/s19j/kernel.bin")
+phase6_docker_args+=(-e DCENT_AM2_S19PRO_BITSTREAM="/dcent-inputs/files/knowledge-base/extractions/s19j/fpga_bitstream.bit")
+phase6_docker_args+=(-e DCENT_AM3_AML_KERNEL="${AMLOGIC_EXACT_CONTAINER_ROOT:+${AMLOGIC_EXACT_CONTAINER_ROOT}/vmlinux.bin}")
+phase6_docker_args+=(-e DCENT_AM3_AML_DTB="${AMLOGIC_EXACT_CONTAINER_ROOT:+${AMLOGIC_EXACT_CONTAINER_ROOT}/devicetree.dtb}")
+phase6_docker_args+=(-e DCENT_AM3_AML_FW_INFO="${AMLOGIC_EXACT_CONTAINER_ROOT:+${AMLOGIC_EXACT_CONTAINER_ROOT}/rootfs/etc/fw-info}")
+phase6_docker_args+=("${AM2_S17_DONOR_ENV_ARGS[@]}")
+phase6_docker_args+=("${SIGNING_MOUNT_ARGS[@]}")
+phase6_docker_args+=("${BUILD_INPUT_MOUNT_ARGS[@]}")
+phase6_docker_args+=("${CAPSULE_PROVENANCE_MOUNT_ARGS[@]}")
+phase6_docker_args+=(-v "${VOLUME_NAME}:/build")
+docker run "${phase6_docker_args[@]}" "$BUILD_CONTAINER_ID" bash -c '
         set -e
         # HTTP/1.1 + larger buffer: avoids "RPC failed; curl 92 HTTP/2 stream 0
         # was not closed cleanly" on flaky networks when cloning Buildroot.
@@ -2106,7 +2235,7 @@ docker run --rm \
         git config --global http.lowSpeedLimit 1000
         git config --global http.lowSpeedTime 60
 
-        cd /build/dcentos
+        cd /build/DCENT_OS_Antminer
 
         # ----- Merge shared fragments + per-product defconfig --------------
         # Buildroot has no native top-level fragment mechanism (only the kernel
@@ -2118,7 +2247,7 @@ docker run --rm \
         # listed by BR_DEFCONFIG_FRAGMENTS, with the per-product defconfig last
         # so that later overrides win (Kconfig parses top-to-bottom and the
         # last KEY= line wins on conflict).
-        CONFIGS_DIR="/build/dcentos/br2_external_dcentos/configs"
+        CONFIGS_DIR="/build/DCENT_OS_Antminer/br2_external_dcentos/configs"
         FULL_DEFCONFIG_NAME="${BR_DEFCONFIG%_defconfig}_full_defconfig"
         FULL_DEFCONFIG_PATH="${CONFIGS_DIR}/${FULL_DEFCONFIG_NAME}"
         echo "[setup] merging defconfig fragments [$BR_DEFCONFIG_FRAGMENTS] + $BR_DEFCONFIG"
@@ -2142,23 +2271,33 @@ docker run --rm \
             cat "$BASE_PATH"
             echo "# --- end per-product defconfig: $BR_DEFCONFIG ---"
             # Production-readiness matrix §7 #1 (public-image trust boundary):
-            # on a PRODUCTION/RELEASE build (DCENT_RELEASE_IMAGE=1) LOCK the
-            # root account so NO default SSH password login is possible. This
-            # is appended LAST so it overrides the shared dcentos-common.fragment
+            # on a PRODUCTION/RELEASE build (the default posture since WS-A4;
+            # DCENT_RELEASE_IMAGE is materialized to its effective value by the
+            # outer driver before this container starts) LOCK the root account
+            # so NO default SSH password login is possible. This is appended
+            # LAST so it overrides the shared dcentos-common.fragment
             # BR2_TARGET_GENERIC_ROOT_PASSWD="dcentral" (Buildroot processes the
             # merged defconfig top-to-bottom; the last KEY= line wins). DEV/LAB
-            # builds (flag unset) leave root:dcentral byte-identical — the
+            # builds (explicit opt-out) leave root:dcentral byte-identical — the
             # operator ssh_cmd.js / fleet tooling is unaffected. The matching
             # runtime marker /etc/dcentos/release-image (which disables the
             # dashboard passwordless opt-out) is stamped by the board
-            # post-build via scripts/lib/release_image_provision.sh, also keyed
-            # on DCENT_RELEASE_IMAGE.
+            # post-build via scripts/lib/release_image_provision.sh, keyed on
+            # the same canonical posture.
             if case "${DCENT_RELEASE_IMAGE:-0}" in 1|true|TRUE|yes|YES|y|Y) true ;; *) false ;; esac; then
                 echo ""
                 echo "# --- DCENT_RELEASE_IMAGE=1: lock root SSH password login ---"
-                echo "BR2_TARGET_GENERIC_ROOT_PASSWD=\"*\""
+                # Pinned Buildroot hashes every nonempty non-crypt password,
+                # including "*", while root login is enabled. Disable that
+                # build-time option to emit the literal locked shadow field.
+                # Provisioned Dropbear public-key access is a runtime policy.
+                echo "# BR2_TARGET_ENABLE_ROOT_LOGIN is not set"
+                echo "BR2_TARGET_GENERIC_ROOT_PASSWD=\"\""
             fi
         } > "$FULL_DEFCONFIG_PATH"
+        if [ -n "$PRODUCER" ]; then
+            python3 scripts/release_build_config.py --producer "$PRODUCER" --defconfig "$FULL_DEFCONFIG_PATH"
+        fi
         echo "[setup] merged defconfig: $FULL_DEFCONFIG_PATH ($(wc -l < "$FULL_DEFCONFIG_PATH") lines)"
 
         # BUG-5 (2026-07-09): download artifacts must survive a fresh
@@ -2171,7 +2310,7 @@ docker run --rm \
         # the persistent cache into buildroot/dl AFTER the clone. Covers
         # cold-volume first runs, warm re-runs, and target switches (the
         # dl-cache accumulates the per-arch toolchains side by side).
-        PERSIST_DL_DIR="/build/dcentos/dl-cache"
+        PERSIST_DL_DIR="/build/DCENT_OS_Antminer/dl-cache"
         mkdir -p "$PERSIST_DL_DIR"
         if [ ! -d buildroot ] || [ ! -f buildroot/Makefile ]; then
             echo "[setup] cloning Buildroot (retry up to 4x)"
@@ -2233,8 +2372,8 @@ docker run --rm \
             echo "ERROR: invalid BR2_EXTERNAL source digest: $BR2_EXTERNAL_SOURCE_SHA256" >&2
             exit 1
         fi
-        BUILD_DRIVER_SHA256="$(sha256sum scripts/build_in_docker.sh | awk '{ print $1 }')"
-        SOURCE_DIGEST_TOOL_SHA256="$(sha256sum scripts/buildroot_local_source_digest.py | awk '{ print $1 }')"
+        BUILD_DRIVER_SHA256="$(sha256sum scripts/build_in_docker.sh | awk '\''{ print $1 }'\'')"
+        SOURCE_DIGEST_TOOL_SHA256="$(sha256sum scripts/buildroot_local_source_digest.py | awk '\''{ print $1 }'\'')"
         DESIRED_STAMP="target=${TARGET:-unknown}|build_arch=${BUILD_ARCH:-unknown}|defconfig=${BR_DEFCONFIG:-unknown}|fragments=${BR_DEFCONFIG_FRAGMENTS:-}"
         DESIRED_STAMP="${DESIRED_STAMP}|br2_external_sha256=$BR2_EXTERNAL_SOURCE_SHA256"
         DESIRED_STAMP="${DESIRED_STAMP}|build_driver_sha256=$BUILD_DRIVER_SHA256"
@@ -2267,7 +2406,7 @@ docker run --rm \
         rm -f buildroot/output/images/rootfs-ownership.json
 
         echo "[setup] applying merged defconfig $FULL_DEFCONFIG_NAME"
-        make -C buildroot BR2_EXTERNAL=/build/dcentos/br2_external_dcentos \
+        make -C buildroot BR2_EXTERNAL=/build/DCENT_OS_Antminer/br2_external_dcentos \
             "$FULL_DEFCONFIG_NAME"
 
         echo ""
@@ -2283,8 +2422,30 @@ docker run --rm \
         if [ "$TOOLCHAIN_SHA256_MANDATORY" = "1" ]; then
             echo ""
             echo "[evidence] regenerating Buildroot legal-info"
+            # A package dir left half-patched is unrecoverable in Buildroot:
+            # every re-entry to its patch step dies on the apply-patches
+            # duplicate-filename guard. Two presentations, both poison —
+            # .applied_patches_list with .stamp_patched ABSENT (patch step
+            # entered, never finished), or .stamp_patched OLDER than its own
+            # .stamp_extracted prerequisite (mtime skew re-enters the recipe;
+            # critic K, drop1-20260921 was indistinguishable in the log).
+            # The legal-info walk can pull packages the main build never
+            # stamped (legal-only dependency edges), so sweep the poison
+            # state before it turns evidence regeneration into a lane
+            # failure (observed: am3-s19jproplus host-python3 3.13.9
+            # duplicate 0001-Make-the-build-of-pyc-files-conditional.patch).
+            # -mindepth 2 keeps a stray depth-1 list from nuking output/build.
+            find buildroot/output/build -mindepth 2 -maxdepth 2 -name .applied_patches_list 2>/dev/null \
+                | while read -r applied_list; do
+                    package_dir=$(dirname "$applied_list")
+                    if [ ! -e "$package_dir/.stamp_patched" ] \
+                        || [ "$package_dir/.stamp_patched" -ot "$package_dir/.stamp_extracted" ]; then
+                        echo "[evidence] removing unrecoverable half-patched state: $package_dir"
+                        rm -rf "$package_dir"
+                    fi
+                done
             rm -rf buildroot/output/legal-info
-            make -C buildroot BR2_EXTERNAL=/build/dcentos/br2_external_dcentos legal-info
+            make -C buildroot BR2_EXTERNAL=/build/DCENT_OS_Antminer/br2_external_dcentos legal-info
         fi
     '
 echo ""
@@ -2303,10 +2464,10 @@ if [ "$BOARD_POST_IMAGE" = "vnish-bootbin-sd" ]; then
         -v "${POSIX_PROJECT_DIR}:/project:ro" \
         "$BUILD_CONTAINER_ID" bash -c '
             set -e
-            cd /build/dcentos
+            cd /build/DCENT_OS_Antminer
             BOOTBIN_REF="/project/output/vnish-extracted-artifacts/boot.bin-s19jpro-bb-v1.2.6"
             LIVE_DIR="/project/output/am3-bb-s19jpro-79-boot-artifacts-LIVE-20260514T214500Z"
-            BR_PAYLOAD_DIR="/build/dcentos/buildroot/output/images/dcentos-am3-bb-s19jpro-sdcard"
+            BR_PAYLOAD_DIR="/build/DCENT_OS_Antminer/buildroot/output/images/dcentos-am3-bb-s19jpro-sdcard"
             UIMAGE_PATH=""
             DTB_PATH=""
             INITRAMFS_PATH=""
@@ -2318,8 +2479,8 @@ if [ "$BOARD_POST_IMAGE" = "vnish-bootbin-sd" ]; then
             fi
             if [ -f "$BR_PAYLOAD_DIR/uramdisk.image.gz" ]; then
                 INITRAMFS_PATH="$BR_PAYLOAD_DIR/uramdisk.image.gz"
-            elif [ -f "/build/dcentos/buildroot/output/images/rootfs.cpio.gz" ]; then
-                INITRAMFS_PATH="/build/dcentos/buildroot/output/images/rootfs.cpio.gz"
+            elif [ -f "/build/DCENT_OS_Antminer/buildroot/output/images/rootfs.cpio.gz" ]; then
+                INITRAMFS_PATH="/build/DCENT_OS_Antminer/buildroot/output/images/rootfs.cpio.gz"
             fi
             [ -n "$UIMAGE_PATH" ] || { echo "ERROR: no uImage source (looked at $LIVE_DIR/uImage)"; exit 1; }
             [ -n "$DTB_PATH" ]    || { echo "ERROR: no DTB source (looked at $LIVE_DIR/devicetree.dtb)"; exit 1; }
@@ -2330,7 +2491,7 @@ if [ "$BOARD_POST_IMAGE" = "vnish-bootbin-sd" ]; then
                 --uimage "$UIMAGE_PATH" \
                 --dtb "$DTB_PATH" \
                 --initramfs "$INITRAMFS_PATH"
-            SD_OUT_DIR="/build/dcentos/buildroot/output/images/sd_card_am3_bb_s19jpro"
+            SD_OUT_DIR="/build/DCENT_OS_Antminer/buildroot/output/images/sd_card_am3_bb_s19jpro"
             cp "$SD_OUT_DIR/'"$TARBALL_NAME"'" "/build/'"$TARBALL_NAME"'"
             cp "$SD_OUT_DIR/dcentos-am3-bb-s19jpro-vnish-bootbin.manifest.json" \
                "/build/dcentos-am3-bb-s19jpro-vnish-bootbin.manifest.json"
@@ -2348,11 +2509,11 @@ elif [ "$BOARD_POST_IMAGE" = "am2-sd-disk" ]; then
         -v "${POSIX_PROJECT_DIR}:/project:ro" \
         "$BUILD_CONTAINER_ID" bash -c '
             set -e
-            cd /build/dcentos
-            PAYLOAD_TAR="/build/dcentos/buildroot/output/images/dcentos-sysupgrade-am2-s19jpro.tar"
+            cd /build/DCENT_OS_Antminer
+            PAYLOAD_TAR="/build/DCENT_OS_Antminer/buildroot/output/images/dcentos-sysupgrade-am2-s19jpro.tar"
             if [ ! -f "$PAYLOAD_TAR" ]; then
                 echo "ERROR: expected am2 sysupgrade tarball missing: $PAYLOAD_TAR" >&2
-                ls -la /build/dcentos/buildroot/output/images/ >&2 || true
+                ls -la /build/DCENT_OS_Antminer/buildroot/output/images/ >&2 || true
                 exit 1
             fi
             # --allow-incomplete: a real bootable SD also needs BOOT.bin +
@@ -2365,11 +2526,25 @@ elif [ "$BOARD_POST_IMAGE" = "am2-sd-disk" ]; then
             bash scripts/build_am2_s19jpro_sd_disk_image.sh \
                 --payload-tar "$PAYLOAD_TAR" \
                 --allow-incomplete
-            SD_OUT_DIR="/build/dcentos/buildroot/output/images/sd_card_am2_s19jpro"
+            SD_OUT_DIR="/build/DCENT_OS_Antminer/buildroot/output/images/sd_card_am2_s19jpro"
             cp "$SD_OUT_DIR/'"$TARBALL_NAME"'" "/build/'"$TARBALL_NAME"'"
             cp "$SD_OUT_DIR/'"$TARBALL_NAME"'.manifest.json" \
                "/build/'"$TARBALL_NAME"'.manifest.json"
             ls -la "/build/'"$TARBALL_NAME"'" "/build/'"$TARBALL_NAME"'.manifest.json"
+        '
+elif [ "$BOARD_POST_IMAGE" = native-sd ]; then
+    echo "--- Phase 7: collecting exact native SD image for $PRODUCER_BOARD ---"
+    docker run --rm -v "${VOLUME_NAME}:/build" -e ARTIFACT="$TARBALL_NAME" \
+        "$BUILD_CONTAINER_ID" bash -c '
+            set -eu
+            for suffix in "" .manifest.json .runtime-image.json .runtime-image.sig; do
+                source="/build/DCENT_OS_Antminer/buildroot/output/images/${ARTIFACT}${suffix}"
+                [ -f "$source" ] && [ ! -L "$source" ] || {
+                    echo "ERROR: incomplete native producer output: $source" >&2; exit 1;
+                }
+                cp "$source" "/build/${ARTIFACT}${suffix}"
+            done
+            cp /build/DCENT_OS_Antminer/buildroot/output/images/TESTER_README.txt /build/TESTER_README.txt
         '
 elif [ "$BOARD_POST_IMAGE" = "board-script" ]; then
     # am2-s19jpro / AM3 Amlogic / am3-bb: the board's post-image.sh already produced
@@ -2380,10 +2555,10 @@ elif [ "$BOARD_POST_IMAGE" = "board-script" ]; then
         -v "${VOLUME_NAME}:/build" \
         "$BUILD_CONTAINER_ID" bash -c '
             set -e
-            SRC="/build/dcentos/buildroot/output/images/'"$TARBALL_NAME"'"
+            SRC="/build/DCENT_OS_Antminer/buildroot/output/images/'"$TARBALL_NAME"'"
             if [ ! -f "$SRC" ]; then
                 echo "ERROR: expected tarball not produced by post-image.sh: $SRC" >&2
-                ls -la /build/dcentos/buildroot/output/images/ >&2 || true
+                ls -la /build/DCENT_OS_Antminer/buildroot/output/images/ >&2 || true
                 exit 1
             fi
             cp "$SRC" "/build/'"$TARBALL_NAME"'"
@@ -2396,6 +2571,8 @@ else
         -e DCENT_ALLOW_UNSIGNED_SYSUPGRADE="$DCENT_ALLOW_UNSIGNED_SYSUPGRADE" \
         -e DCENT_PACKAGE_STATUS="$DCENT_PACKAGE_STATUS" \
         -e DCENT_RELEASE_IMAGE="${DCENT_RELEASE_IMAGE:-0}" \
+        -e DCENT_RELEASE_CHANNEL="${DCENT_RELEASE_CHANNEL:-beta}" \
+        -e DCENT_RELEASE_HARDWARE_RECIPE="${DCENT_RELEASE_HARDWARE_RECIPE:-board-default}" \
         -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
         -e DCENT_SOURCE_COMMIT="$DCENT_SOURCE_COMMIT" \
         -e DCENT_SOURCE_COMMIT_EPOCH="$DCENT_SOURCE_COMMIT_EPOCH" \
@@ -2406,9 +2583,9 @@ else
         -e DCENT_REQUIRE_RELEASE_PROVENANCE="$DCENT_REQUIRE_RELEASE_PROVENANCE" \
         -e DCENT_RELEASE_CAPSULE_MODE="$DCENT_RELEASE_CAPSULE_MODE" \
         -e DCENT_CAPSULE_PROVENANCE_VERIFIED="$DCENT_CAPSULE_PROVENANCE_VERIFIED" \
-        -e DCENT_PROVENANCE_SOURCE_SNAPSHOT="/dcent-capsule-source" \
+        -e DCENT_PROVENANCE_SOURCE_SNAPSHOT="/dcentos-source-snapshot-release/snapshot.json" \
         -e DCENT_PROVENANCE_GIT_OBJECT_REPO="/dcent-git-object-repo" \
-        -e DCENT_PROVENANCE_HELPER="/build/dcentos/scripts/source_snapshot.py" \
+        -e DCENT_PROVENANCE_HELPER="/build/DCENT_OS_Antminer/scripts/source_snapshot.py" \
         -e DCENT_EXTRACTIONS_DIR="/dcent-inputs/files/knowledge-base/extractions/s9" \
         -e DCENT_RELEASE_SIGNING_KEY="$CONTAINER_RELEASE_SIGNING_KEY" \
         -e DCENT_RELEASE_PUBKEY_FILE="$CONTAINER_RELEASE_PUBKEY_FILE" \
@@ -2420,7 +2597,7 @@ else
         -v "${VOLUME_NAME}:/build" \
         "$BUILD_CONTAINER_ID" bash -c '
             set -e
-            cd /build/dcentos
+            cd /build/DCENT_OS_Antminer
             bash scripts/package_sysupgrade.sh \
                 --board "$BOARD_PKG_NAME" \
                 --output "/build/'"$TARBALL_NAME"'"
@@ -2439,7 +2616,7 @@ case "$TARGET" in
             -v "${VOLUME_NAME}:/build" \
             "$BUILD_CONTAINER_ID" bash -c '
                 set -e
-                SRC=/build/dcentos/buildroot/output/images/rootfs-ownership.json
+                SRC=/build/DCENT_OS_Antminer/buildroot/output/images/rootfs-ownership.json
                 DST=/build/'"$ROOTFS_OWNERSHIP_LEDGER_NAME"'
                 [ -f "$SRC" ] || {
                     echo "ERROR: integrated final-rootfs ownership ledger missing: $SRC" >&2
@@ -2477,7 +2654,12 @@ docker run --rm \
         echo "SHA256:"
         sha256sum /out/'"$TARBALL_NAME"'
         echo ""
-        if [ "$BOARD_POST_IMAGE" = "vnish-bootbin-sd" ]; then
+        if [ "$BOARD_POST_IMAGE" = native-sd ]; then
+            for suffix in .manifest.json .runtime-image.json .runtime-image.sig; do
+                cp /build/'"$TARBALL_NAME"'"$suffix" /out/
+            done
+            cp /build/TESTER_README.txt /out/TESTER_README.txt
+        elif [ "$BOARD_POST_IMAGE" = "vnish-bootbin-sd" ]; then
             echo "VNish boot.bin SD image (no tar listing — this is a raw .img):"
             if [ -f /build/dcentos-am3-bb-s19jpro-vnish-bootbin.manifest.json ]; then
                 cp /build/dcentos-am3-bb-s19jpro-vnish-bootbin.manifest.json /out/
@@ -2497,11 +2679,12 @@ docker run --rm \
             echo "Contents:"
             tar tf /out/'"$TARBALL_NAME"' | head -20
         fi
+        if [ "$BOARD_POST_IMAGE" != native-sd ]; then
         case "'"$TARGET"'" in
             am2-s17pro|am2-s17plus|am2-t17|am2-t17plus)
             echo ""
             echo "Package-only non-installable validation:"
-            cd /build/dcentos
+            cd /build/DCENT_OS_Antminer
             PACKAGE_ONLY_TMP="$(mktemp -d)"
             trap "rm -rf -- \"$PACKAGE_ONLY_TMP\"" EXIT HUP INT TERM
             # shellcheck source=/dev/null
@@ -2543,31 +2726,31 @@ PY
             # Added by Phase 4B: am3-s19jpro-aml + am3-t21 share structural
             # tarball validation. The typed manifest helper separately admits
             # T21 only as package_only_denied; it receives no flash geometry.
-            s9|am3-s19kpro|am3-s19xp|am3-s19jxp|am3-s19jproplus|am3-s21|am3-s21pro|am3-s21xp|am3-s19jpro-aml|am3-t21|am2-s19jpro|am2-s19pro)
+            s9|am3-s19kpro|am3-s19kpro-nopic|am3-s19xp|am3-s19jxp|am3-s19jproa|am3-s19jproplus|am3-s21|am3-s21pro|am3-s21xp|am3-s19jpro-aml|am3-t21|am2-s19jpro|am2-s19pro)
             # End Phase 4B
             # DevOps Q1 finding 4I (2026-05-15): wire pre_flash_validate.sh
             # --package-only for am2-s19jpro so the AM2 signing flow mirrors
             # the AM3 signing flow that was wired in W11.
             echo ""
             echo "Package-only validation:"
-            cd /build/dcentos
+            cd /build/DCENT_OS_Antminer
             DCENT_ALLOW_UNSIGNED_SYSUPGRADE="${DCENT_ALLOW_UNSIGNED_SYSUPGRADE:-0}" \
             DCENT_PACKAGE_STATUS="${DCENT_PACKAGE_STATUS:-release}" \
                 ./scripts/pre_flash_validate.sh --package-only /out/'"$TARBALL_NAME"' "'"$BOARD_PKG_NAME"'"
             ;;
-            am3-bb|am3-bb-s19jpro)
+            am3-bb|am3-bb-s19jpro|am3-bb-s19jpro-payload)
             echo ""
             echo "SD-card payload validation:"
             case "'"$TARGET"'" in
                 am3-bb) SD_PREFIX="dcentos-am3-bb-sdcard" ;;
-                am3-bb-s19jpro) SD_PREFIX="dcentos-am3-bb-s19jpro-sdcard" ;;
+                am3-bb-s19jpro|am3-bb-s19jpro-payload) SD_PREFIX="dcentos-am3-bb-s19jpro-sdcard" ;;
             esac
             PAYLOAD_ADMIT_DIR="$(mktemp -d)"
             trap "rm -rf -- \"$PAYLOAD_ADMIT_DIR\"" EXIT HUP INT TERM
-            cd /build/dcentos
+            cd /build/DCENT_OS_Antminer
             python3 ./scripts/safe_extract_am3_bb_payload.py \
                 /out/'"$TARBALL_NAME"' "$PAYLOAD_ADMIT_DIR" \
-                --expected-target "'"$TARGET"'"
+                --expected-target "'"$BOARD_PKG_NAME"'"
             PAYLOAD_ROOT="$PAYLOAD_ADMIT_DIR/$SD_PREFIX"
             CPIO_LIST="$(gzip -dc "$PAYLOAD_ROOT/uramdisk.image.gz" | cpio -it --quiet | sed "s#^\./##")"
             if printf "%s\n" "$CPIO_LIST" \
@@ -2575,10 +2758,9 @@ PY
                 echo "ERROR: forbidden stock BB daemon/blob present"
                 exit 1
             fi
-            if [ "'"$TARGET"'" = "am3-bb-s19jpro" ]; then
+            if [ "'"$BOARD_PKG_NAME"'" = "am3-bb-s19jpro" ]; then
                 printf "%s\n" "$CPIO_LIST" | grep -qx "etc/dcentos/board_target"
                 printf "%s\n" "$CPIO_LIST" | grep -qx "etc/dcentos/board_targets/am3-bb-s19jpro.toml"
-                printf "%s\n" "$CPIO_LIST" | grep -qx "etc/dcentos/rescue_ssh_enabled"
                 printf "%s\n" "$CPIO_LIST" | grep -qx "etc/init.d/S50dropbear"
                 printf "%s\n" "$CPIO_LIST" | grep -qx "etc/init.d/S81mcp"
                 printf "%s\n" "$CPIO_LIST" | grep -qx "etc/init.d/S82dcentrald"
@@ -2618,6 +2800,7 @@ PY
             echo "PASS: exact target-bound SD package admitted; no forbidden stock BB daemon/blob paths; required management files and ARMv7 critical binaries verified"
             ;;
         esac
+        fi
     '
 echo ""
 
@@ -2671,7 +2854,11 @@ fi
 # snapshot-consistency evidence only: compiler causality, build execution, and
 # equivalence to the installed payload are deliberately not claimed.
 if [ "$TOOLCHAIN_SHA256_MANDATORY" = "1" ]; then
-    dcent_remove_prebuilt_rust_sidecars "$TARBALL_NAME"
+    # 995183dee renamed the remove-helper to a require-absent admission but
+    # missed this retention-site call; the orphaned name killed the first
+    # producer run to ever reach the post-validation retention block
+    # (drop1-20260916-uh8_s8i6). Fail closed on stale sidecars here too.
+    dcent_require_prebuilt_rust_sidecars_absent "$TARBALL_NAME"
     python3 "$SCRIPT_DIR/binary_build_receipt.py" \
         retain-export-snapshot-set \
         --stage "$BINARY_EXPORT_STAGE" \
@@ -2718,7 +2905,7 @@ if [ "$TOOLCHAIN_SHA256_MANDATORY" = "1" ]; then
             set -e
             INVENTORY="/out/${ARTIFACT_NAME}.buildroot-legal.json"
             python3 /project/scripts/buildroot_legal_inventory.py generate \
-                --legal-info-dir /build/dcentos/buildroot/output/legal-info \
+                --legal-info-dir /build/DCENT_OS_Antminer/buildroot/output/legal-info \
                 --buildroot-repository "$BUILDROOT_REPOSITORY" \
                 --buildroot-commit "$BUILDROOT_COMMIT" \
                 --target "$TARGET" \
@@ -2728,7 +2915,7 @@ if [ "$TOOLCHAIN_SHA256_MANDATORY" = "1" ]; then
                 --output "$INVENTORY" >/dev/null
             python3 /project/scripts/buildroot_legal_inventory.py verify \
                 --artifact-dir /out \
-                --legal-info-dir /build/dcentos/buildroot/output/legal-info \
+                --legal-info-dir /build/DCENT_OS_Antminer/buildroot/output/legal-info \
                 "$INVENTORY" >/dev/null
         '
     [ -f "$BUILDROOT_LEGAL_INVENTORY_PATH" ] || {
@@ -2812,16 +2999,21 @@ if [ "$TOOLCHAIN_SHA256_MANDATORY" = "1" ]; then
         exit 1
     }
     SOURCE_CLOSURE_SIGNATURE_PATH="${SOURCE_CLOSURE_PATH}.sig"
+    # Sign with the 0600 invocation-volume copy (CONTAINER_RELEASE_SIGNING_KEY,
+    # staged before Phase 6). The raw bind mount reads 0777 inside the
+    # container and the receipt signer's private-key mode guard refuses it.
     docker run --rm \
         -v "${POSIX_OUTPUT_DIR}:/out" \
         -v "${POSIX_PROJECT_DIR}:/project:ro" \
-        "${SIGNING_MOUNT_ARGS[@]}" \
+        -v "${VOLUME_NAME}:/build:ro" \
+        "${PUBKEY_MOUNT_ARGS[@]}" \
         -e RECEIPT_NAME="$(basename "$SOURCE_CLOSURE_PATH")" \
+        -e RELEASE_SIGNING_KEY="${CONTAINER_RELEASE_SIGNING_KEY}" \
         "$BUILD_CONTAINER_ID" bash -c '
             set -e
             bash /project/scripts/sign_release_receipt.sh \
                 "/out/$RECEIPT_NAME" \
-                /dcent-release-signing-key.pem \
+                "$RELEASE_SIGNING_KEY" \
                 /dcent-release-ed25519.pub \
                 "/out/$RECEIPT_NAME.sig"
         '
@@ -2959,6 +3151,7 @@ if [ -n "$RELEASE_NAME" ]; then
             echo "signature_trust=$SIGNATURE_TRUST"
             echo "proof_scope=$PROOF_SCOPE"
             echo "release_grade=$RELEASE_GRADE"
+            echo "fund_url=https://d-central.tech/fund/"
         })"
         echo "--- Standardized release name (Phase 8a) ---"
         echo "  name:     $RELEASE_NAME   (firmware $FW_VERSION)"
@@ -2985,33 +3178,26 @@ fi
 #
 # Skipped for lab/unsigned builds (DCENT_ALLOW_UNSIGNED_SYSUPGRADE=1 with no
 # signing key). Required when DCENT_RELEASE_SIGNING_KEY is set.
-if [ "$TARGET" = "am3-bb" ] || [ "$TARGET" = "am3-bb-s19jpro" ]; then
+if [ "$TARGET" = "am3-bb" ] || [ "$TARGET" = "am3-bb-s19jpro" ] || [ "$TARGET" = "am3-bb-s19jpro-payload" ]; then
     if [ -n "${DCENT_RELEASE_SIGNING_KEY:-}" ]; then
         echo "--- Phase 8b: sign $TARGET SD-card tarball (ed25519) ---"
-        # Stage the signing key into the container so we don't widen the
-        # mount surface. Path inside container: /signkey.
-        SIGN_KEY_HOST="${DCENT_RELEASE_SIGNING_KEY}"
-        if command -v cygpath >/dev/null 2>&1; then
-            SIGN_KEY_MOUNT="$(cygpath -w "$SIGN_KEY_HOST")"
-        else
-            SIGN_KEY_MOUNT="$SIGN_KEY_HOST"
-        fi
-        if [ ! -f "$SIGN_KEY_HOST" ]; then
-            echo "ERROR: DCENT_RELEASE_SIGNING_KEY points to missing file: $SIGN_KEY_HOST" >&2
-            exit 1
-        fi
+        # Sign with the 0600 invocation-volume copy (staged before Phase 6);
+        # the raw bind mount reads 0777 in-container and the artifact
+        # signer's private-key mode guard refuses it. The host-side key
+        # existence/transport checks already ran with the mount setup.
         docker run --rm \
             -v "${POSIX_OUTPUT_DIR}:/out" \
             -v "${POSIX_PROJECT_DIR}:/project:ro" \
-            -v "${SIGN_KEY_MOUNT}:/signkey:ro" \
+            -v "${VOLUME_NAME}:/build:ro" \
             "${PUBKEY_MOUNT_ARGS[@]}" \
             -e TARBALL_NAME="$TARBALL_NAME" \
             -e DCENT_RELEASE_PUBKEY_FILE="$CONTAINER_RELEASE_PUBKEY_FILE" \
+            -e RELEASE_SIGNING_KEY="${CONTAINER_RELEASE_SIGNING_KEY}" \
             "$BUILD_CONTAINER_ID" bash -c '
                 set -e
                 python3 /project/scripts/sign_release_artifact.py \
                     "/out/${TARBALL_NAME}" \
-                    --key /signkey \
+                    --key "${RELEASE_SIGNING_KEY}" \
                     --pubkey "${DCENT_RELEASE_PUBKEY_FILE}" \
                     --output-sig "/out/${TARBALL_NAME}.sig"
             '
@@ -3046,26 +3232,19 @@ if [ "$BOARD_POST_IMAGE" = "vnish-bootbin-sd" ] || [ "$BOARD_POST_IMAGE" = "am2-
                 "$OUTPUT_DIR/$TARBALL_NAME" \
                 "$OUTPUT_DIR/$TARBALL_NAME.manifest.json"
         fi
-        SIGN_KEY_HOST="${DCENT_RELEASE_SIGNING_KEY}"
-        if command -v cygpath >/dev/null 2>&1; then
-            SIGN_KEY_MOUNT="$(cygpath -w "$SIGN_KEY_HOST")"
-        else
-            SIGN_KEY_MOUNT="$SIGN_KEY_HOST"
-        fi
-        if [ ! -f "$SIGN_KEY_HOST" ]; then
-            echo "ERROR: DCENT_RELEASE_SIGNING_KEY points to missing file: $SIGN_KEY_HOST" >&2
-            exit 1
-        fi
+        # Same 0600 invocation-volume copy as 8b; the raw /signkey bind
+        # mount reads 0777 in-container and the signer refuses it.
         docker run --rm \
             -v "${POSIX_OUTPUT_DIR}:/out" \
             -v "${POSIX_PROJECT_DIR}:/project:ro" \
-            -v "${SIGN_KEY_MOUNT}:/signkey:ro" \
+            -v "${VOLUME_NAME}:/build:ro" \
             "${PUBKEY_MOUNT_ARGS[@]}" \
             -e TARBALL_NAME="$TARBALL_NAME" \
             -e DCENT_RELEASE_PUBKEY_FILE="$CONTAINER_RELEASE_PUBKEY_FILE" \
+            -e RELEASE_SIGNING_KEY="${CONTAINER_RELEASE_SIGNING_KEY}" \
             "$BUILD_CONTAINER_ID" bash -c '
                 set -e
-                bash /project/scripts/sign_sd_image.sh "/out/${TARBALL_NAME}" --key /signkey
+                bash /project/scripts/sign_sd_image.sh "/out/${TARBALL_NAME}" --key "${RELEASE_SIGNING_KEY}"
             '
         if [ "${RELEASE_GRADE:-0}" = "1" ] && [ -n "${RELEASE_COPY:-}" ]; then
             RELEASE_SIGNATURE_PATH="${RELEASE_COPY}.sig"
@@ -3082,6 +3261,36 @@ if [ "$BOARD_POST_IMAGE" = "vnish-bootbin-sd" ] || [ "$BOARD_POST_IMAGE" = "am2-
         bash "$SCRIPT_DIR/sign_sd_image.sh" "$OUTPUT_DIR/$TARBALL_NAME" \
             --allow-unsigned-lab
     fi
+fi
+if [ -n "$PRODUCER" ]; then
+    # Verify the runtime embedded in the final artifact before signing these
+    # exact primary bytes. Companions are byte copies of its in-image pair.
+    python3 "$SCRIPT_DIR/release_runtime_exports.py" export \
+        --artifact "$OUTPUT_DIR/$TARBALL_NAME" --board-target "$PRODUCER_BOARD" \
+        --channel "${DCENT_RELEASE_CHANNEL:-beta}" --version "$FW_VERSION" \
+        --hardware-recipe "${DCENT_RELEASE_HARDWARE_RECIPE:-board-default}" \
+        --pubkey "$DCENT_RELEASE_PUBKEY_FILE" >/dev/null
+    if [ ! -e "$OUTPUT_DIR/$TARBALL_NAME.sig" ]; then
+        python3 "$SCRIPT_DIR/sign_release_artifact.py" "$OUTPUT_DIR/$TARBALL_NAME" \
+            --key "$DCENT_RELEASE_SIGNING_KEY" --pubkey "$DCENT_RELEASE_PUBKEY_FILE" \
+            --staged-output >/dev/null
+    fi
+    openssl pkeyutl -verify -rawin -pubin -inkey "$DCENT_RELEASE_PUBKEY_FILE" \
+        -sigfile "$OUTPUT_DIR/$TARBALL_NAME.sig" -in "$OUTPUT_DIR/$TARBALL_NAME" >/dev/null
+    if [ "$PRODUCER_ARTIFACT_KIND" = native-sd-image ]; then
+        python3 "$SCRIPT_DIR/release_producer.py" verify-native-media \
+            --producer "$PRODUCER" --artifact "$OUTPUT_DIR/$TARBALL_NAME" \
+            --version "$FW_VERSION" --channel "${DCENT_RELEASE_CHANNEL:-beta}" \
+            --hardware-recipe "${DCENT_RELEASE_HARDWARE_RECIPE:-board-default}" \
+            --pubkey "$DCENT_RELEASE_PUBKEY_FILE" >/dev/null
+    fi
+    python3 "$SCRIPT_DIR/release_dashboard.py" verify \
+        --source "$PROJECT_DIR/dashboard" --output "$CAPSULE_RESULT_ROOT/dashboard"
+    python3 "$SCRIPT_DIR/release_publication.py" copy \
+        --source "$CAPSULE_RESULT_ROOT/dashboard/dashboard-build.json" \
+        --output "$OUTPUT_DIR/${TARBALL_NAME}.dashboard-build.json" >/dev/null
+    python3 "$SCRIPT_DIR/release_result_stage.py" verify \
+        --invocation-stage "$CAPSULE_INVOCATION_STAGE" "$CAPSULE_RESULT_STAGE" >/dev/null
 fi
 if [ -n "${RELEASE_METADATA_CONTENT:-}" ]; then
     printf '%s\n' "$RELEASE_METADATA_CONTENT" \
@@ -3107,6 +3316,11 @@ fi
 if [ -n "$ROOTFS_OWNERSHIP_LEDGER_PATH" ]; then
     echo "  Rootfs ownership ledger: $ROOTFS_OWNERSHIP_LEDGER_PATH"
 fi
+if [ -n "$PRODUCER" ]; then
+    echo "Verified producer $PRODUCER_BOARD: $OUTPUT_DIR/$TARBALL_NAME"
+    exit 0
+fi
+
 echo ""
 if [ "$TARGET" = "am2-s19jpro" ]; then
     echo "Next (Phase 3 — S19j Pro .139):"
@@ -3178,7 +3392,7 @@ elif [ "$TARGET" = "am3-t21" ]; then
     echo "No toolbox install route advertises this board target yet."
     echo "Pending: Phase 4C revert-to-stock + bench unit acquisition."
 # End Phase 4B
-elif [ "$TARGET" = "am3-bb" ] || [ "$TARGET" = "am3-bb-s19jpro" ]; then
+elif [ "$TARGET" = "am3-bb" ] || [ "$TARGET" = "am3-bb-s19jpro" ] || [ "$TARGET" = "am3-bb-s19jpro-payload" ]; then
     echo "Next (AM3 BB .79 SD-card first boot):"
     echo "  Inspect \"$OUTPUT_DIR/$TARBALL_NAME\""
     if [ -f "$OUTPUT_DIR/${TARBALL_NAME}.sig" ]; then

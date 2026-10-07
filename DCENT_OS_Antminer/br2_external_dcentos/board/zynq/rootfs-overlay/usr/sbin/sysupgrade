@@ -30,6 +30,8 @@ ROOTFS_ORIGINAL=""
 PACKAGE_INPUT_IS_TAR=0
 FORCE=0
 TEST_ONLY=0
+STOP_MINER=0
+MINER_INIT=/etc/init.d/S82dcentrald
 EXPECTED_BOARD=am1-s9
 EXPECTED_KERNEL_MIN_LEBS=32
 EXPECTED_ROOTFS_LEBS=134
@@ -103,6 +105,7 @@ if [ "${DCENT_SYSUPGRADE_OFFLINE_HARNESS:-0}" = "1" ]; then
     ZYNQ_GEOMETRY_HELPER="${DCENT_SYSUPGRADE_ZYNQ_GEOMETRY_HELPER:-$ZYNQ_GEOMETRY_HELPER}"
     UBOOT_ENV_ADMISSION_HELPER="${DCENT_SYSUPGRADE_UBOOT_ENV_ADMISSION_HELPER:-$UBOOT_ENV_ADMISSION_HELPER}"
     SESSION_LATCH_HELPER="${DCENT_SYSUPGRADE_SESSION_LATCH_HELPER:-$SESSION_LATCH_HELPER}"
+    MINER_INIT="${DCENT_SYSUPGRADE_MINER_INIT:-$MINER_INIT}"
     FW_ENV_CONFIG="${DCENT_SYSUPGRADE_FW_ENV_CONFIG:-$FW_ENV_CONFIG}"
     UBOOT_ENV_PROC_MTD="${DCENT_SYSUPGRADE_UBOOT_ENV_PROC_MTD:-$UBOOT_ENV_PROC_MTD}"
     UBOOT_ENV_SYSFS_MTD_ROOT="${DCENT_SYSUPGRADE_UBOOT_ENV_SYSFS_MTD_ROOT:-$UBOOT_ENV_SYSFS_MTD_ROOT}"
@@ -720,6 +723,7 @@ for arg in "$@"; do
     case "$arg" in
         -f|--force) FORCE=1 ;;
         -T|--test) TEST_ONLY=1 ;;
+        --stop-miner) STOP_MINER=1 ;;
         -*) echo "Unknown option: $arg"; exit 1 ;;
         *) ROOTFS="$arg" ;;
     esac
@@ -758,6 +762,7 @@ if [ -z "$ROOTFS" ]; then
     echo "Options:"
     echo "  -f, --force    Skip confirmation prompt"
     echo "  -T, --test     Verify package/image only, do not write NAND"
+    echo "  --stop-miner   Gracefully stop mining after validation, before writing"
     echo ""
     echo "Current: firmware=$CURRENT_FW (mtd$CURRENT_MTD)"
     echo "Target:  firmware=$INACTIVE_FW (mtd$INACTIVE_MTD)"
@@ -1186,21 +1191,24 @@ fi
 
 echo ""
 
-# A normal daemon session deliberately keeps an unresolved marker. Until a
-# typed SafeOff receipt exists, sysupgrade is manual-resolution-only: the
-# operator must stop the daemon, remove AC, verify rails, and deliberately
-# resolve the persistent latch. This check owns the same admission lock as S82,
-# while the already-held /run transaction lock blocks a new daemon start.
+# The update transaction already excludes new hardware-session admission.
+# A requested stop waits for exact owner death and successful software cutoff;
+# the session helper independently rejects forced, crashed or failed shutdowns.
 dcent_persist_preflight "$PERSIST_SOURCE_ROOT" || {
     echo "Error: active persistent state failed preflight validation."
     echo "  Refusing before any inactive-slot mutation."
     exit 1
 }
+if [ "$STOP_MINER" = "1" ]; then
+    [ -x "$MINER_INIT" ] && "$MINER_INIT" stop || {
+        echo "Error: graceful miner stop did not complete; no inactive-slot write attempted."
+        exit 1
+    }
+fi
 /bin/sh "$SESSION_LATCH_HELPER" admit-update \
     "$PERSIST_SOURCE_ROOT" "$SYSUPGRADE_LOCK_DIR" "$CURRENT_MTD" || {
-    echo "Error: sysupgrade requires a manually resolved hardware session."
-    echo "  Refusing before any inactive-slot mutation. Stop dcentrald, remove"
-    echo "  AC, verify approved rail SafeOff, resolve the session latch, then retry."
+    echo "Error: stopped daemon with successful software SafeOff is required."
+    echo "  The recorded hardware session is active or unresolved; no inactive-slot write attempted."
     exit 1
 }
 if ! dcent_zynq_uboot_env_admit \
@@ -1500,7 +1508,7 @@ dcent_ubi_detach_device 1 || preflip_fail "inactive UBI detach failed after pers
 # switch_firmware CRC-rebuild → `flash_erase /dev/mtd4 0 0` (erases BOTH
 # redundant env copies) → `nandwrite` path has a zero-valid-copy window AND
 # ECC-blind raw reads — the exact erase-both-then-rewrite + identical-flag
-# dual-write pattern that bricked .39/.139. switch_firmware.py wrote BOTH
+# dual-write pattern that bricked lab-unit/.139. switch_firmware.py wrote BOTH
 # redundant copies byte-identical with the same 1-byte flag, defeating U-Boot's
 # newer-copy disambiguation. This migrates the am1-s9 FLIP to the same atomic
 # `fw_setenv` primitive the am2 overlay already uses (libubootenv implements
@@ -1511,10 +1519,10 @@ dcent_ubi_detach_device 1 || preflip_fail "inactive UBI detach failed after pers
 # (the same mtd4 redundant pair) — this closes the FLIP asymmetry. The A/B
 # slot metadata (first_boot / upgrade_stage / firmware) is UNCHANGED; only
 # the WRITE MECHANISM changes. Serial/SD recovery remains the reliable backstop.
-#.
+# See am2 uboot env flip must use fw setenv rule.
 #
 # AUTO-RECOVERY IS NOT A RELIABLE BACKSTOP ON THIS U-BOOT — DO NOT TRUST IT.
-# `upgrade_stage=0` is field-disproven as a power-cycle auto-revert (the .39
+# `upgrade_stage=0` is field-disproven as a power-cycle auto-revert (the lab-unit
 # S9 brick incident: two AC power-cycles did NOT auto-revert; recovery needed
 # an SD card / serial console). So the post-flip fw_printenv verify gate below
 # IS the primary brick defense and MUST fail-closed on every unknown.

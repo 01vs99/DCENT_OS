@@ -1,0 +1,1468 @@
+{
+  "original_source": "docs\\dev\\2026-09-07-antminer-beta-execution\\evidence\\r06\\native-voltage-stepper-vectors-v1.json",
+  "original_sha256": "ae898676d86f2e5086cfe2b870329198310eed5ef7b7ca8d4c2dc281cbfd4f0a",
+  "cases": [
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1800,
+      "target_voltage_cv": 1800,
+      "dac_codes": [
+        120
+      ],
+      "frames": [
+        "55aa068378000101"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1800,
+      "target_voltage_cv": 1840,
+      "dac_codes": [
+        106
+      ],
+      "frames": [
+        "55aa06836a00f300"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1800,
+      "target_voltage_cv": 1860,
+      "dac_codes": [
+        103,
+        98
+      ],
+      "frames": [
+        "55aa06836700f000",
+        "55aa06836200eb00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1800,
+      "target_voltage_cv": 1900,
+      "dac_codes": [
+        103,
+        86,
+        84
+      ],
+      "frames": [
+        "55aa06836700f000",
+        "55aa06835600df00",
+        "55aa06835400dd00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1800,
+      "target_voltage_cv": 1950,
+      "dac_codes": [
+        103,
+        86,
+        69,
+        66
+      ],
+      "frames": [
+        "55aa06836700f000",
+        "55aa06835600df00",
+        "55aa06834500ce00",
+        "55aa06834200cb00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1800,
+      "target_voltage_cv": 2000,
+      "dac_codes": [
+        103,
+        86,
+        69,
+        52,
+        48
+      ],
+      "frames": [
+        "55aa06836700f000",
+        "55aa06835600df00",
+        "55aa06834500ce00",
+        "55aa06833400bd00",
+        "55aa06833000b900"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1800,
+      "target_voltage_cv": 2100,
+      "dac_codes": [
+        103,
+        86,
+        69,
+        52,
+        35,
+        18,
+        12
+      ],
+      "frames": [
+        "55aa06836700f000",
+        "55aa06835600df00",
+        "55aa06834500ce00",
+        "55aa06833400bd00",
+        "55aa06832300ac00",
+        "55aa068312009b00",
+        "55aa06830c009500"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1840,
+      "target_voltage_cv": 1800,
+      "dac_codes": [
+        120
+      ],
+      "frames": [
+        "55aa068378000101"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1840,
+      "target_voltage_cv": 1840,
+      "dac_codes": [
+        106
+      ],
+      "frames": [
+        "55aa06836a00f300"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1840,
+      "target_voltage_cv": 1860,
+      "dac_codes": [
+        98
+      ],
+      "frames": [
+        "55aa06836200eb00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1840,
+      "target_voltage_cv": 1900,
+      "dac_codes": [
+        89,
+        84
+      ],
+      "frames": [
+        "55aa06835900e200",
+        "55aa06835400dd00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1840,
+      "target_voltage_cv": 1950,
+      "dac_codes": [
+        89,
+        72,
+        66
+      ],
+      "frames": [
+        "55aa06835900e200",
+        "55aa06834800d100",
+        "55aa06834200cb00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1840,
+      "target_voltage_cv": 2000,
+      "dac_codes": [
+        89,
+        72,
+        55,
+        48
+      ],
+      "frames": [
+        "55aa06835900e200",
+        "55aa06834800d100",
+        "55aa06833700c000",
+        "55aa06833000b900"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1840,
+      "target_voltage_cv": 2100,
+      "dac_codes": [
+        89,
+        72,
+        55,
+        38,
+        21,
+        12
+      ],
+      "frames": [
+        "55aa06835900e200",
+        "55aa06834800d100",
+        "55aa06833700c000",
+        "55aa06832600af00",
+        "55aa068315009e00",
+        "55aa06830c009500"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1860,
+      "target_voltage_cv": 1800,
+      "dac_codes": [
+        115,
+        120
+      ],
+      "frames": [
+        "55aa06837300fc00",
+        "55aa068378000101"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1860,
+      "target_voltage_cv": 1840,
+      "dac_codes": [
+        106
+      ],
+      "frames": [
+        "55aa06836a00f300"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1860,
+      "target_voltage_cv": 1860,
+      "dac_codes": [
+        98
+      ],
+      "frames": [
+        "55aa06836200eb00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1860,
+      "target_voltage_cv": 1900,
+      "dac_codes": [
+        84
+      ],
+      "frames": [
+        "55aa06835400dd00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1860,
+      "target_voltage_cv": 1950,
+      "dac_codes": [
+        81,
+        66
+      ],
+      "frames": [
+        "55aa06835100da00",
+        "55aa06834200cb00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1860,
+      "target_voltage_cv": 2000,
+      "dac_codes": [
+        81,
+        64,
+        48
+      ],
+      "frames": [
+        "55aa06835100da00",
+        "55aa06834000c900",
+        "55aa06833000b900"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1860,
+      "target_voltage_cv": 2100,
+      "dac_codes": [
+        81,
+        64,
+        47,
+        30,
+        13,
+        12
+      ],
+      "frames": [
+        "55aa06835100da00",
+        "55aa06834000c900",
+        "55aa06832f00b800",
+        "55aa06831e00a700",
+        "55aa06830d009600",
+        "55aa06830c009500"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1900,
+      "target_voltage_cv": 1800,
+      "dac_codes": [
+        101,
+        118,
+        120
+      ],
+      "frames": [
+        "55aa06836500ee00",
+        "55aa06837600ff00",
+        "55aa068378000101"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1900,
+      "target_voltage_cv": 1840,
+      "dac_codes": [
+        101,
+        106
+      ],
+      "frames": [
+        "55aa06836500ee00",
+        "55aa06836a00f300"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1900,
+      "target_voltage_cv": 1860,
+      "dac_codes": [
+        98
+      ],
+      "frames": [
+        "55aa06836200eb00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1900,
+      "target_voltage_cv": 1900,
+      "dac_codes": [
+        84
+      ],
+      "frames": [
+        "55aa06835400dd00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1900,
+      "target_voltage_cv": 1950,
+      "dac_codes": [
+        67,
+        66
+      ],
+      "frames": [
+        "55aa06834300cc00",
+        "55aa06834200cb00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1900,
+      "target_voltage_cv": 2000,
+      "dac_codes": [
+        67,
+        50,
+        48
+      ],
+      "frames": [
+        "55aa06834300cc00",
+        "55aa06833200bb00",
+        "55aa06833000b900"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1900,
+      "target_voltage_cv": 2100,
+      "dac_codes": [
+        67,
+        50,
+        33,
+        16,
+        12
+      ],
+      "frames": [
+        "55aa06834300cc00",
+        "55aa06833200bb00",
+        "55aa06832100aa00",
+        "55aa068310009900",
+        "55aa06830c009500"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1950,
+      "target_voltage_cv": 1800,
+      "dac_codes": [
+        83,
+        100,
+        117,
+        120
+      ],
+      "frames": [
+        "55aa06835300dc00",
+        "55aa06836400ed00",
+        "55aa06837500fe00",
+        "55aa068378000101"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1950,
+      "target_voltage_cv": 1840,
+      "dac_codes": [
+        83,
+        100,
+        106
+      ],
+      "frames": [
+        "55aa06835300dc00",
+        "55aa06836400ed00",
+        "55aa06836a00f300"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1950,
+      "target_voltage_cv": 1860,
+      "dac_codes": [
+        83,
+        98
+      ],
+      "frames": [
+        "55aa06835300dc00",
+        "55aa06836200eb00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1950,
+      "target_voltage_cv": 1900,
+      "dac_codes": [
+        83,
+        84
+      ],
+      "frames": [
+        "55aa06835300dc00",
+        "55aa06835400dd00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1950,
+      "target_voltage_cv": 1950,
+      "dac_codes": [
+        66
+      ],
+      "frames": [
+        "55aa06834200cb00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1950,
+      "target_voltage_cv": 2000,
+      "dac_codes": [
+        49,
+        48
+      ],
+      "frames": [
+        "55aa06833100ba00",
+        "55aa06833000b900"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 1950,
+      "target_voltage_cv": 2100,
+      "dac_codes": [
+        49,
+        32,
+        15,
+        12
+      ],
+      "frames": [
+        "55aa06833100ba00",
+        "55aa06832000a900",
+        "55aa06830f009800",
+        "55aa06830c009500"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 2000,
+      "target_voltage_cv": 1800,
+      "dac_codes": [
+        65,
+        82,
+        99,
+        116,
+        120
+      ],
+      "frames": [
+        "55aa06834100ca00",
+        "55aa06835200db00",
+        "55aa06836300ec00",
+        "55aa06837400fd00",
+        "55aa068378000101"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 2000,
+      "target_voltage_cv": 1840,
+      "dac_codes": [
+        65,
+        82,
+        99,
+        106
+      ],
+      "frames": [
+        "55aa06834100ca00",
+        "55aa06835200db00",
+        "55aa06836300ec00",
+        "55aa06836a00f300"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 2000,
+      "target_voltage_cv": 1860,
+      "dac_codes": [
+        65,
+        82,
+        98
+      ],
+      "frames": [
+        "55aa06834100ca00",
+        "55aa06835200db00",
+        "55aa06836200eb00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 2000,
+      "target_voltage_cv": 1900,
+      "dac_codes": [
+        65,
+        82,
+        84
+      ],
+      "frames": [
+        "55aa06834100ca00",
+        "55aa06835200db00",
+        "55aa06835400dd00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 2000,
+      "target_voltage_cv": 1950,
+      "dac_codes": [
+        65,
+        66
+      ],
+      "frames": [
+        "55aa06834100ca00",
+        "55aa06834200cb00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 2000,
+      "target_voltage_cv": 2000,
+      "dac_codes": [
+        48
+      ],
+      "frames": [
+        "55aa06833000b900"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 2000,
+      "target_voltage_cv": 2100,
+      "dac_codes": [
+        31,
+        14,
+        12
+      ],
+      "frames": [
+        "55aa06831f00a800",
+        "55aa06830e009700",
+        "55aa06830c009500"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 2100,
+      "target_voltage_cv": 1800,
+      "dac_codes": [
+        29,
+        46,
+        63,
+        80,
+        97,
+        114,
+        120
+      ],
+      "frames": [
+        "55aa06831d00a600",
+        "55aa06832e00b700",
+        "55aa06833f00c800",
+        "55aa06835000d900",
+        "55aa06836100ea00",
+        "55aa06837200fb00",
+        "55aa068378000101"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 2100,
+      "target_voltage_cv": 1840,
+      "dac_codes": [
+        29,
+        46,
+        63,
+        80,
+        97,
+        106
+      ],
+      "frames": [
+        "55aa06831d00a600",
+        "55aa06832e00b700",
+        "55aa06833f00c800",
+        "55aa06835000d900",
+        "55aa06836100ea00",
+        "55aa06836a00f300"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 2100,
+      "target_voltage_cv": 1860,
+      "dac_codes": [
+        29,
+        46,
+        63,
+        80,
+        97,
+        98
+      ],
+      "frames": [
+        "55aa06831d00a600",
+        "55aa06832e00b700",
+        "55aa06833f00c800",
+        "55aa06835000d900",
+        "55aa06836100ea00",
+        "55aa06836200eb00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 2100,
+      "target_voltage_cv": 1900,
+      "dac_codes": [
+        29,
+        46,
+        63,
+        80,
+        84
+      ],
+      "frames": [
+        "55aa06831d00a600",
+        "55aa06832e00b700",
+        "55aa06833f00c800",
+        "55aa06835000d900",
+        "55aa06835400dd00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 2100,
+      "target_voltage_cv": 1950,
+      "dac_codes": [
+        29,
+        46,
+        63,
+        66
+      ],
+      "frames": [
+        "55aa06831d00a600",
+        "55aa06832e00b700",
+        "55aa06833f00c800",
+        "55aa06834200cb00"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 2100,
+      "target_voltage_cv": 2000,
+      "dac_codes": [
+        29,
+        46,
+        48
+      ],
+      "frames": [
+        "55aa06831d00a600",
+        "55aa06832e00b700",
+        "55aa06833000b900"
+      ]
+    },
+    {
+      "model": "s17e",
+      "current_voltage_cv": 2100,
+      "target_voltage_cv": 2100,
+      "dac_codes": [
+        12
+      ],
+      "frames": [
+        "55aa06830c009500"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1800,
+      "target_voltage_cv": 1800,
+      "dac_codes": [
+        120
+      ],
+      "frames": [
+        "55aa068378000101"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1800,
+      "target_voltage_cv": 1840,
+      "dac_codes": [
+        106
+      ],
+      "frames": [
+        "55aa06836a00f300"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1800,
+      "target_voltage_cv": 1860,
+      "dac_codes": [
+        103,
+        98
+      ],
+      "frames": [
+        "55aa06836700f000",
+        "55aa06836200eb00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1800,
+      "target_voltage_cv": 1900,
+      "dac_codes": [
+        103,
+        86,
+        84
+      ],
+      "frames": [
+        "55aa06836700f000",
+        "55aa06835600df00",
+        "55aa06835400dd00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1800,
+      "target_voltage_cv": 1950,
+      "dac_codes": [
+        103,
+        86,
+        69,
+        66
+      ],
+      "frames": [
+        "55aa06836700f000",
+        "55aa06835600df00",
+        "55aa06834500ce00",
+        "55aa06834200cb00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1800,
+      "target_voltage_cv": 2000,
+      "dac_codes": [
+        103,
+        86,
+        69,
+        52,
+        48
+      ],
+      "frames": [
+        "55aa06836700f000",
+        "55aa06835600df00",
+        "55aa06834500ce00",
+        "55aa06833400bd00",
+        "55aa06833000b900"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1800,
+      "target_voltage_cv": 2100,
+      "dac_codes": [
+        103,
+        86,
+        69,
+        52,
+        35,
+        18,
+        12
+      ],
+      "frames": [
+        "55aa06836700f000",
+        "55aa06835600df00",
+        "55aa06834500ce00",
+        "55aa06833400bd00",
+        "55aa06832300ac00",
+        "55aa068312009b00",
+        "55aa06830c009500"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1840,
+      "target_voltage_cv": 1800,
+      "dac_codes": [
+        120
+      ],
+      "frames": [
+        "55aa068378000101"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1840,
+      "target_voltage_cv": 1840,
+      "dac_codes": [
+        106
+      ],
+      "frames": [
+        "55aa06836a00f300"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1840,
+      "target_voltage_cv": 1860,
+      "dac_codes": [
+        98
+      ],
+      "frames": [
+        "55aa06836200eb00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1840,
+      "target_voltage_cv": 1900,
+      "dac_codes": [
+        89,
+        84
+      ],
+      "frames": [
+        "55aa06835900e200",
+        "55aa06835400dd00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1840,
+      "target_voltage_cv": 1950,
+      "dac_codes": [
+        89,
+        72,
+        66
+      ],
+      "frames": [
+        "55aa06835900e200",
+        "55aa06834800d100",
+        "55aa06834200cb00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1840,
+      "target_voltage_cv": 2000,
+      "dac_codes": [
+        89,
+        72,
+        55,
+        48
+      ],
+      "frames": [
+        "55aa06835900e200",
+        "55aa06834800d100",
+        "55aa06833700c000",
+        "55aa06833000b900"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1840,
+      "target_voltage_cv": 2100,
+      "dac_codes": [
+        89,
+        72,
+        55,
+        38,
+        21,
+        12
+      ],
+      "frames": [
+        "55aa06835900e200",
+        "55aa06834800d100",
+        "55aa06833700c000",
+        "55aa06832600af00",
+        "55aa068315009e00",
+        "55aa06830c009500"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1860,
+      "target_voltage_cv": 1800,
+      "dac_codes": [
+        115,
+        120
+      ],
+      "frames": [
+        "55aa06837300fc00",
+        "55aa068378000101"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1860,
+      "target_voltage_cv": 1840,
+      "dac_codes": [
+        106
+      ],
+      "frames": [
+        "55aa06836a00f300"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1860,
+      "target_voltage_cv": 1860,
+      "dac_codes": [
+        98
+      ],
+      "frames": [
+        "55aa06836200eb00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1860,
+      "target_voltage_cv": 1900,
+      "dac_codes": [
+        84
+      ],
+      "frames": [
+        "55aa06835400dd00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1860,
+      "target_voltage_cv": 1950,
+      "dac_codes": [
+        81,
+        66
+      ],
+      "frames": [
+        "55aa06835100da00",
+        "55aa06834200cb00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1860,
+      "target_voltage_cv": 2000,
+      "dac_codes": [
+        81,
+        64,
+        48
+      ],
+      "frames": [
+        "55aa06835100da00",
+        "55aa06834000c900",
+        "55aa06833000b900"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1860,
+      "target_voltage_cv": 2100,
+      "dac_codes": [
+        81,
+        64,
+        47,
+        30,
+        13,
+        12
+      ],
+      "frames": [
+        "55aa06835100da00",
+        "55aa06834000c900",
+        "55aa06832f00b800",
+        "55aa06831e00a700",
+        "55aa06830d009600",
+        "55aa06830c009500"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1900,
+      "target_voltage_cv": 1800,
+      "dac_codes": [
+        101,
+        118,
+        120
+      ],
+      "frames": [
+        "55aa06836500ee00",
+        "55aa06837600ff00",
+        "55aa068378000101"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1900,
+      "target_voltage_cv": 1840,
+      "dac_codes": [
+        101,
+        106
+      ],
+      "frames": [
+        "55aa06836500ee00",
+        "55aa06836a00f300"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1900,
+      "target_voltage_cv": 1860,
+      "dac_codes": [
+        98
+      ],
+      "frames": [
+        "55aa06836200eb00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1900,
+      "target_voltage_cv": 1900,
+      "dac_codes": [
+        84
+      ],
+      "frames": [
+        "55aa06835400dd00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1900,
+      "target_voltage_cv": 1950,
+      "dac_codes": [
+        67,
+        66
+      ],
+      "frames": [
+        "55aa06834300cc00",
+        "55aa06834200cb00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1900,
+      "target_voltage_cv": 2000,
+      "dac_codes": [
+        67,
+        50,
+        48
+      ],
+      "frames": [
+        "55aa06834300cc00",
+        "55aa06833200bb00",
+        "55aa06833000b900"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1900,
+      "target_voltage_cv": 2100,
+      "dac_codes": [
+        67,
+        50,
+        33,
+        16,
+        12
+      ],
+      "frames": [
+        "55aa06834300cc00",
+        "55aa06833200bb00",
+        "55aa06832100aa00",
+        "55aa068310009900",
+        "55aa06830c009500"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1950,
+      "target_voltage_cv": 1800,
+      "dac_codes": [
+        83,
+        100,
+        117,
+        120
+      ],
+      "frames": [
+        "55aa06835300dc00",
+        "55aa06836400ed00",
+        "55aa06837500fe00",
+        "55aa068378000101"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1950,
+      "target_voltage_cv": 1840,
+      "dac_codes": [
+        83,
+        100,
+        106
+      ],
+      "frames": [
+        "55aa06835300dc00",
+        "55aa06836400ed00",
+        "55aa06836a00f300"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1950,
+      "target_voltage_cv": 1860,
+      "dac_codes": [
+        83,
+        98
+      ],
+      "frames": [
+        "55aa06835300dc00",
+        "55aa06836200eb00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1950,
+      "target_voltage_cv": 1900,
+      "dac_codes": [
+        83,
+        84
+      ],
+      "frames": [
+        "55aa06835300dc00",
+        "55aa06835400dd00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1950,
+      "target_voltage_cv": 1950,
+      "dac_codes": [
+        66
+      ],
+      "frames": [
+        "55aa06834200cb00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1950,
+      "target_voltage_cv": 2000,
+      "dac_codes": [
+        49,
+        48
+      ],
+      "frames": [
+        "55aa06833100ba00",
+        "55aa06833000b900"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 1950,
+      "target_voltage_cv": 2100,
+      "dac_codes": [
+        49,
+        32,
+        15,
+        12
+      ],
+      "frames": [
+        "55aa06833100ba00",
+        "55aa06832000a900",
+        "55aa06830f009800",
+        "55aa06830c009500"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 2000,
+      "target_voltage_cv": 1800,
+      "dac_codes": [
+        65,
+        82,
+        99,
+        116,
+        120
+      ],
+      "frames": [
+        "55aa06834100ca00",
+        "55aa06835200db00",
+        "55aa06836300ec00",
+        "55aa06837400fd00",
+        "55aa068378000101"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 2000,
+      "target_voltage_cv": 1840,
+      "dac_codes": [
+        65,
+        82,
+        99,
+        106
+      ],
+      "frames": [
+        "55aa06834100ca00",
+        "55aa06835200db00",
+        "55aa06836300ec00",
+        "55aa06836a00f300"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 2000,
+      "target_voltage_cv": 1860,
+      "dac_codes": [
+        65,
+        82,
+        98
+      ],
+      "frames": [
+        "55aa06834100ca00",
+        "55aa06835200db00",
+        "55aa06836200eb00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 2000,
+      "target_voltage_cv": 1900,
+      "dac_codes": [
+        65,
+        82,
+        84
+      ],
+      "frames": [
+        "55aa06834100ca00",
+        "55aa06835200db00",
+        "55aa06835400dd00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 2000,
+      "target_voltage_cv": 1950,
+      "dac_codes": [
+        65,
+        66
+      ],
+      "frames": [
+        "55aa06834100ca00",
+        "55aa06834200cb00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 2000,
+      "target_voltage_cv": 2000,
+      "dac_codes": [
+        48
+      ],
+      "frames": [
+        "55aa06833000b900"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 2000,
+      "target_voltage_cv": 2100,
+      "dac_codes": [
+        31,
+        14,
+        12
+      ],
+      "frames": [
+        "55aa06831f00a800",
+        "55aa06830e009700",
+        "55aa06830c009500"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 2100,
+      "target_voltage_cv": 1800,
+      "dac_codes": [
+        29,
+        46,
+        63,
+        80,
+        97,
+        114,
+        120
+      ],
+      "frames": [
+        "55aa06831d00a600",
+        "55aa06832e00b700",
+        "55aa06833f00c800",
+        "55aa06835000d900",
+        "55aa06836100ea00",
+        "55aa06837200fb00",
+        "55aa068378000101"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 2100,
+      "target_voltage_cv": 1840,
+      "dac_codes": [
+        29,
+        46,
+        63,
+        80,
+        97,
+        106
+      ],
+      "frames": [
+        "55aa06831d00a600",
+        "55aa06832e00b700",
+        "55aa06833f00c800",
+        "55aa06835000d900",
+        "55aa06836100ea00",
+        "55aa06836a00f300"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 2100,
+      "target_voltage_cv": 1860,
+      "dac_codes": [
+        29,
+        46,
+        63,
+        80,
+        97,
+        98
+      ],
+      "frames": [
+        "55aa06831d00a600",
+        "55aa06832e00b700",
+        "55aa06833f00c800",
+        "55aa06835000d900",
+        "55aa06836100ea00",
+        "55aa06836200eb00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 2100,
+      "target_voltage_cv": 1900,
+      "dac_codes": [
+        29,
+        46,
+        63,
+        80,
+        84
+      ],
+      "frames": [
+        "55aa06831d00a600",
+        "55aa06832e00b700",
+        "55aa06833f00c800",
+        "55aa06835000d900",
+        "55aa06835400dd00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 2100,
+      "target_voltage_cv": 1950,
+      "dac_codes": [
+        29,
+        46,
+        63,
+        66
+      ],
+      "frames": [
+        "55aa06831d00a600",
+        "55aa06832e00b700",
+        "55aa06833f00c800",
+        "55aa06834200cb00"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 2100,
+      "target_voltage_cv": 2000,
+      "dac_codes": [
+        29,
+        46,
+        48
+      ],
+      "frames": [
+        "55aa06831d00a600",
+        "55aa06832e00b700",
+        "55aa06833000b900"
+      ]
+    },
+    {
+      "model": "t17e",
+      "current_voltage_cv": 2100,
+      "target_voltage_cv": 2100,
+      "dac_codes": [
+        12
+      ],
+      "frames": [
+        "55aa06830c009500"
+      ]
+    }
+  ]
+}

@@ -203,7 +203,9 @@ mod tests {
     use crate::board_desc::{
         AsicProtocolIdentity, BoardDesc, ChainTransportKind, VoltageControllerClass, WorkEngineKind,
     };
-    use dcent_schema::hardware::{InstallAuthorization, RuntimeStatus};
+    use dcent_schema::hardware::{
+        GenericConstruction, InstallAuthorization, LifecycleLane, RuntimeStatus,
+    };
 
     #[test]
     fn ten_unique_artifacts_and_three_independent_routes_are_exact() {
@@ -253,23 +255,28 @@ mod tests {
 
     #[test]
     fn board_and_acceptance_rows_refuse_the_unproved_shared_s21_inheritance() {
+        // 2026-09 refresh: the XP row now carries its own traced native route
+        // (exact key3 -> PsuAsVoltageController production chain, distinct
+        // 91-chip geometry). Nothing is inherited from am3-s21/pro: the pins
+        // below hold the row to its XP-specific facts and keep every install
+        // posture denied.
         let board = BoardDesc::lookup("am3-s21xp").expect("registered S21 XP target");
         assert_eq!(board.asic_protocol, AsicProtocolIdentity::Bm1370);
         assert_eq!(board.chain_transport, ChainTransportKind::Serial);
-        assert_eq!(board.work_engine, WorkEngineKind::ManagementOnly);
-        assert_eq!(
-            board.voltage_controller,
-            VoltageControllerClass::RuntimeDiscovered
-        );
+        assert_eq!(board.work_engine, WorkEngineKind::SerialWork);
+        assert_eq!(board.voltage_controller, VoltageControllerClass::NoPic);
         assert!(matches!(
             board.runtime_status,
-            RuntimeStatus::ManagementOnlyByPolicy { .. }
+            RuntimeStatus::SpecialisedLifecycle {
+                lane: LifecycleLane::AmlogicNativeSerial,
+                generic_construction: GenericConstruction::Refused
+            }
         ));
         assert_eq!(
             board.enablement.install_authorization,
             InstallAuthorization::Denied
         );
-        assert!(!board.public_beta_install);
+        assert!(!board.public_beta_install());
         assert!(!board.mining_default_enabled);
 
         let acceptance = include_str!("../../../scripts/hw-acceptance/skus.conf");
@@ -277,7 +284,12 @@ mod tests {
             .lines()
             .find(|line| line.starts_with("S21XP|"))
             .expect("S21XP acceptance row");
-        assert!(line.contains("|NOT-IMPLEMENTED|"));
-        assert!(line.contains("ttyS3/ttyS2/ttyS1"));
+        // Acceptance truth: the exact native profile is EXPERIMENTAL with
+        // physical qualification pending — implemented, never public.
+        assert!(line.contains("|EXPERIMENTAL|"));
+        assert!(line.contains("am3-s21xp"));
+        assert!(line.contains("3x91 BM1370"));
+        assert!(line.contains("ttyS3/2/1"));
+        assert!(line.contains("physical qualification pending"));
     }
 }

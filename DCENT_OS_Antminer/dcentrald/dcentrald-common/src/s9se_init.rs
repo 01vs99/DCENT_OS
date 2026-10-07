@@ -1,9 +1,8 @@
 //! S9 SE desk-only bring-up planner.
 //!
 //! Sequence is reconstructed from S9k `set_addr_one_chain` /
-//! `check_asic_num` / `open_core_bm1393` plus S9 SE geometry (interval 2,
-//! 60 chips). It is not executed. S9k `init_address_info` interval 4 is
-//! refused.
+//! `check_asic_num` / `open_core_bm1393` plus both held S9 SE production
+//! `init_address_info` routines: interval four, 60 populated chips.
 
 use crate::asic_protocol::{InitProgram, InitStep};
 use crate::s9se_enum::{
@@ -158,8 +157,10 @@ pub fn plan_s9se_open_core() -> Result<S9SeOpenCorePlan, S9SeInitError> {
         return Err(S9SeInitError::GeometryMismatch);
     }
     let mut frames = Vec::with_capacity(208);
-    for slot in 0..OPEN_CORE_SLOTS {
-        for core_id in 0..OPEN_CORE_PER_SLOT {
+    // Production opens the same position in all four banks, then emits
+    // one dummy work record before moving to the next position.
+    for core_id in 0..OPEN_CORE_PER_SLOT {
+        for slot in 0..OPEN_CORE_SLOTS {
             let idx = slot * OPEN_CORE_PER_SLOT + core_id;
             frames.push(pack_enable_core_clock(idx));
         }
@@ -205,7 +206,7 @@ pub fn admit_address_program_matches_capture() -> Result<(), S9SeInitError> {
     if plan.set_address[59][2] != S9SE_LAST_CHIP_ADDR {
         return Err(S9SeInitError::GeometryMismatch);
     }
-    if S9SE_ADDR_INTERVAL != 2 {
+    if S9SE_ADDR_INTERVAL != 4 {
         return Err(S9SeInitError::GeometryMismatch);
     }
     Ok(())

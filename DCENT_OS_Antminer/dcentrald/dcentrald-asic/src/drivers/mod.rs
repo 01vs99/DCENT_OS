@@ -170,7 +170,7 @@ pub const fn sg1_corrected_nonce_attribution_cores(chip_id: u16) -> Option<u32> 
 /// True when the operator opted into the SG-1 corrected slot counts.
 /// Mirrors the `== "1"` parse of [`ALLOW_SCAFFOLD_ASIC_DRIVERS_ENV`].
 pub fn sg1_corrected_nonce_cores_enabled() -> bool {
-    std::env::var(SG1_CORRECTED_NONCE_CORES_ENV)
+    dcentrald_common::lab_env::var(SG1_CORRECTED_NONCE_CORES_ENV)
         .map(|value| value == "1")
         .unwrap_or(false)
 }
@@ -216,7 +216,7 @@ pub const fn is_re_pending_chip(chip_id: u16) -> bool {
 }
 
 pub fn scaffold_asic_driver_override_enabled() -> bool {
-    std::env::var(ALLOW_SCAFFOLD_ASIC_DRIVERS_ENV)
+    dcentrald_common::lab_env::var(ALLOW_SCAFFOLD_ASIC_DRIVERS_ENV)
         .map(|value| value == "1")
         .unwrap_or(false)
 }
@@ -236,7 +236,7 @@ pub const SCAFFOLD_STUB_ACK_ENV: &str = "DCENT_CONFIRM_SCAFFOLD_DRIVERS_ARE_SIMU
 /// Whether the operator has explicitly acknowledged the scaffold/simulator stub
 /// behavior via [`SCAFFOLD_STUB_ACK_ENV`]. See that constant for the rationale.
 pub fn scaffold_stub_behavior_acknowledged() -> bool {
-    std::env::var(SCAFFOLD_STUB_ACK_ENV)
+    dcentrald_common::lab_env::var(SCAFFOLD_STUB_ACK_ENV)
         .map(|value| value == "1")
         .unwrap_or(false)
 }
@@ -958,10 +958,11 @@ pub struct MiningWork {
 }
 
 /// Result of decoding a nonce from the WORK_RX_FIFO.
+#[derive(Debug)]
 pub struct NonceResult {
     /// The nonce value (32-bit).
     pub nonce: u32,
-    /// Chip index on the chain (0-62 for BM1387).
+    /// Chip index on the chain (0-62 for BM1387); `u8::MAX` means unknown.
     /// Extracted from nonce bits [7:2]. This is the chip INDEX, not the
     /// hardware address (which is index * 4 for BM1387).
     pub chip_index: u8,
@@ -1411,6 +1412,17 @@ impl ChipRegistry {
             Box::new(bm1391::Bm1391Driver::new()),
             ChipDriverMaturity::Scaffold,
         );
+        // BM1393 (S9 SE / S9k) — evidence-backed codec, Scaffold maturity.
+        // drivers/bm1393.rs now implements every carrier-independent fact from
+        // the held S9k cgminer.dec (208 cores = 4 banks x 52, verified 8-byte
+        // two-word return record, held freq_pll_1393 tables, divisor-anchored
+        // baud, nonce_calc chip/core attribution). Its FpgaChain-carried
+        // operations still fail closed: no BM1393 s9io/Braiins-FIFO carrier
+        // exists in held evidence. The production C43 lane does not consume
+        // ChipRegistry at all — it runs through
+        // dcentrald_common::bm1393_native::Bm1393Runtime over
+        // dcentrald_hal::platform::c43_bm1393. Keep 0x1393 out of production()
+        // until a real detect proves this trait surface on hardware.
         self.register_with_maturity(
             Box::new(bm1393::Bm1393Driver::new()),
             ChipDriverMaturity::Scaffold,
@@ -1805,6 +1817,18 @@ mod tests {
                 driver_above_catalog_reason: None,
             },
             Case {
+                source_file: "bm1396.rs",
+                driver_name: bm1396::Bm1396Driver::new().chip_name(),
+                driver_max_baud: bm1396::Bm1396Driver::new().max_baud(),
+                catalog_chip: Some(AsicChip::Bm1396),
+                catalog_absence_reason: None,
+                driver_above_catalog_reason: Some(
+                    "BM1396 driver max is the exact S17e operational 6 Mbaud \
+                     (native-operational-baud-vectors-v1); the 937500 catalog \
+                     row is a stale placeholder without runtime authority",
+                ),
+            },
+            Case {
                 source_file: "bm1485.rs",
                 driver_name: bm1485::Bm1485Driver::new().chip_name(),
                 driver_max_baud: bm1485::Bm1485Driver::new().max_baud(),
@@ -1832,7 +1856,7 @@ mod tests {
 
         assert_eq!(
             cases.len(),
-            13,
+            15,
             "this pin must cover every concrete driver file with max_baud()"
         );
 
@@ -1970,6 +1994,16 @@ mod tests {
                 profile_absence_reason: None,
             },
             Case {
+                source_file: "bm1396.rs",
+                driver: Box::new(bm1396::Bm1396Driver::new()),
+                profile_absence_reason: Some(
+                    "BM1396/S17e-T17e has no MinerProfile: wire identity, CRC5 \
+                     and the 135/78 chain populations are exact, but per-chip \
+                     core count, measured hashrate and power calibration are \
+                     unproved (driver cores_per_chip is a deliberate 0)",
+                ),
+            },
+            Case {
                 source_file: "bm1485.rs",
                 driver: Box::new(bm1485::Bm1485Driver::new()),
                 profile_absence_reason: Some(
@@ -1985,7 +2019,7 @@ mod tests {
 
         assert_eq!(
             cases.len(),
-            12,
+            14,
             "this pin must cover every concrete driver file with cores_per_chip()"
         );
 

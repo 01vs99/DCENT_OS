@@ -1,6 +1,7 @@
 import React, { useEffect, useCallback, useState } from 'react';
 import { useMinerStore } from '../../store/miner';
 import { noticeGlyph } from '../../utils/noticeGlyphs';
+import { ReportProblem } from './ReportProblem';
 
 export function ToastContainer() {
   const toasts = useMinerStore(s => s.toasts);
@@ -45,10 +46,10 @@ function ToastItem({ toast, onDismiss }: { toast: ToastData; onDismiss: (id: str
   // keyboard-focused so a user reading/about-to-act on it isn't raced by the
   // timeout. Re-arms on leave/blur.
   useEffect(() => {
-    if (paused) return;
+    if (paused || toast.type === 'error') return;
     const timer = setTimeout(dismiss, 4000);
     return () => clearTimeout(timer);
-  }, [dismiss, paused]);
+  }, [dismiss, paused, toast.type]);
 
   // Error toasts interrupt SR users (role="alert" + aria-live="assertive").
   // Non-critical toasts use role="status" + aria-live="polite".
@@ -71,16 +72,15 @@ function ToastItem({ toast, onDismiss }: { toast: ToastData; onDismiss: (id: str
           pause-on-interaction handlers below. */}
       <div
         className={`ds-toast ds-toast--${toast.type}`}
-        role="button"
-        tabIndex={0}
-        aria-label={`${toast.type} notification. Press Enter to dismiss.`}
-        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); dismiss(); } }}
-        onClick={dismiss}
+        style={isError ? { flexDirection: 'column', alignItems: 'stretch' } : undefined}
         onMouseEnter={pause}
         onMouseLeave={resume}
         onFocus={pause}
         onBlur={resume}
       >
+        <button type="button" onClick={dismiss}
+          aria-label={`${toast.type} notification. Press Enter to dismiss.`}
+          style={{ display: 'flex', gap: 8, border: 0, background: 'transparent', color: 'inherit', cursor: 'pointer' }}>
         <span className="ds-toast__glyph" aria-hidden="true">
           {/* Glyph from the shared canonical map (utils/noticeGlyphs) — same
               tone glyph as InfoBanner/AlertBanner/StatePanel. error -> danger
@@ -88,6 +88,9 @@ function ToastItem({ toast, onDismiss }: { toast: ToastData; onDismiss: (id: str
           {noticeGlyph(toast.type)}
         </span>
         <span className="ds-toast__msg">{toast.message}</span>
+        <span aria-hidden="true">×</span>
+        </button>
+        {isError && <ReportProblem />}
       </div>
     </div>
   );

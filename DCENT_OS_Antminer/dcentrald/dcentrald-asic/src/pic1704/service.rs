@@ -74,10 +74,10 @@ pub trait Pic1704Authorized: sealed::Sealed {}
 /// constructs the marker locally at the call site:
 ///
 /// ```ignore
-/// use dcentrald_asic::pic1704::service::platforms::Cv1835S19jPro;
+/// use dcentrald_asic::pic1704::service::platforms::Am335xBbS19jPro;
 /// use dcentrald_asic::pic1704::Pic1704Service;
 ///
-/// let service = Pic1704Service::new(i2c_handle, 0x20, Cv1835S19jPro);
+/// let service = Pic1704Service::new(i2c_handle, 0x20, Am335xBbS19jPro);
 /// ```
 ///
 /// The hal-side `VoltageControllerKind::Pic1704` classification (from
@@ -85,8 +85,27 @@ pub trait Pic1704Authorized: sealed::Sealed {}
 /// runtime gate; these zero-sized markers are the compile-time gate.
 /// Together they form the "subtype + ACK + sealed-trait" defense in
 /// depth that prevents a stray PIC1704 instantiation on a dsPIC unit.
+/// CV1835 runtime markers were retired in L17. Historical mock tests retain
+/// private test-build access; a normal library exposes no CV constructor marker.
+///
+/// ```compile_fail
+/// use dcentrald_asic::pic1704::service::platforms::Cv1835S19jPro;
+/// ```
+/// ```compile_fail
+/// use dcentrald_asic::pic1704::service::platforms::Cv1835S19;
+/// ```
+/// ```compile_fail
+/// use dcentrald_asic::pic1704::service::platforms::Cv1835S19i;
+/// ```
+/// ```compile_fail
+/// use dcentrald_asic::pic1704::service::platforms::Cv1835S19XP;
+/// ```
+/// ```compile_fail
+/// use dcentrald_asic::pic1704::service::platforms::Cv1835T19;
+/// ```
 pub mod platforms {
     /// S19j Pro CV1835 (Sophgo CV1835 SoC). Subtype = `CVCtrl_BHB42XXX`.
+    #[cfg(test)]
     pub struct Cv1835S19jPro;
     /// AM335x BB (BeagleBone-class control board, S19j Pro variant).
     /// Subtype = `BBCtrl_BHB42XXX`.
@@ -101,11 +120,13 @@ pub mod platforms {
     /// share the BHB42XXX pattern at the `/etc/subtype` level.
     /// Source: `DCENT_OS_HARDWARE_CATALOG.md` §2.5 (Antminer S19) +
     /// §6.1 (PIC MCU comparison row — PIC1704 confirmed for S19).
+    #[cfg(test)]
     pub struct Cv1835S19;
     /// Antminer S19i on Cvitek CV183x. PIC1704 at I²C 0x20 per chain.
     /// Same `CVCtrl_BHB42XXX` subtype family.
     /// Source: `DCENT_OS_HARDWARE_CATALOG.md` §2.5 (Antminer S19i) +
     /// §6.1 PIC MCU row — PIC1704 confirmed for S19i.
+    #[cfg(test)]
     pub struct Cv1835S19i;
     /// Antminer S19 XP (Hydra) on Cvitek CV183x. PIC1704 at I²C 0x20 per
     /// chain. Same `CVCtrl_BHB42XXX` subtype family. Note the spelling
@@ -117,6 +138,7 @@ pub mod platforms {
     /// path is not yet covered by a marker; add a separate
     /// `AmlogicS19XP` marker when (a) RE2 ground-truths the subtype
     /// string AND (b) live hardware is acquired.
+    #[cfg(test)]
     pub struct Cv1835S19XP;
     /// Antminer T19 on Cvitek CV183x. PIC1704 at I²C 0x20 per chain.
     /// Same `CVCtrl_BHB42XXX` subtype family + APW12 SMBus PSU as the
@@ -131,10 +153,13 @@ pub mod platforms {
     /// on BB or AML carrier (with subtype evidence + live i2cdetect 0x20
     /// ACK), add `Am335xBbT19` / `AmlogicT19` markers in a follow-up
     /// wave; do not back-door them here.
+    #[cfg(test)]
     pub struct Cv1835T19;
 }
 
+#[cfg(test)]
 impl sealed::Sealed for platforms::Cv1835S19jPro {}
+#[cfg(test)]
 impl Pic1704Authorized for platforms::Cv1835S19jPro {}
 
 impl sealed::Sealed for platforms::Am335xBbS19jPro {}
@@ -148,19 +173,27 @@ impl Pic1704Authorized for platforms::AmlogicS19jPro {}
 // `CVCtrl_BHB42XXX` subtype + 0x20 ACK probe gate as the existing
 // CV1835 S19j Pro entry — no platform-specific construction-time
 // behavior changes; only the compile-time whitelist grows.
+#[cfg(test)]
 impl sealed::Sealed for platforms::Cv1835S19 {}
+#[cfg(test)]
 impl Pic1704Authorized for platforms::Cv1835S19 {}
 
+#[cfg(test)]
 impl sealed::Sealed for platforms::Cv1835S19i {}
+#[cfg(test)]
 impl Pic1704Authorized for platforms::Cv1835S19i {}
 
+#[cfg(test)]
 impl sealed::Sealed for platforms::Cv1835S19XP {}
+#[cfg(test)]
 impl Pic1704Authorized for platforms::Cv1835S19XP {}
 
 // W12 expansion (RE3 §2.5 + §5.1): T19 carrier addition.
 // RE3 lists ONLY Cvitek CV183x for T19 — no AM335x BB or Amlogic
 // variants are documented. Adding only `Cv1835T19`.
+#[cfg(test)]
 impl sealed::Sealed for platforms::Cv1835T19 {}
+#[cfg(test)]
 impl Pic1704Authorized for platforms::Cv1835T19 {}
 
 // NOTE: NO `S21*` PIC1704 marker exists by design.

@@ -21,6 +21,8 @@ dcentrald-api-types = { path = "../dcentrald-api-types" }
 dcentrald-common = { path = "../dcentrald-common" }
 
 [features]
+# Hardware environment overrides; excluded from signed Beta/Stable builds.
+lab = ["dcentrald-common/lab"]
 default = []
 # `experimental_chips` exposes register-mapped-only chip families
 # (BM1360, BM1491, BM1373) that have a dcentrald-asic driver scaffold

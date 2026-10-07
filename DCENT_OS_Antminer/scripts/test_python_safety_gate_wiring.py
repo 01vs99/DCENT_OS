@@ -28,7 +28,7 @@ CALL_POSITION = (
 SHELL_TEST_CALL = re.compile(
     CALL_POSITION
     + r"(?:sh|bash)\s+[\"']?(?:scripts/|\$(?:SCRIPT_DIR|DIR)/)?"
-    r"(?P<name>test_[A-Za-z0-9_]+\.sh)"
+    r"(?P<name>(?:[A-Za-z0-9_.-]+/)*test_[A-Za-z0-9_]+\.sh)"
 )
 PYTHON_TEST_CALL = re.compile(
     CALL_POSITION
@@ -36,7 +36,7 @@ PYTHON_TEST_CALL = re.compile(
     r"[\"']?\$PYTHON[\"']?)\s+"
     r"(?:-m\s+pytest\s+(?:-q\s+)?)?"
     r"[\"']?(?:scripts/|\$(?:SCRIPT_DIR|DIR)/)?"
-    r"(?P<name>test_[A-Za-z0-9_]+\.py)"
+    r"(?P<name>(?:[A-Za-z0-9_.-]+/)*test_[A-Za-z0-9_]+\.py)"
 )
 
 
@@ -223,6 +223,32 @@ def propagated_test_calls(source: str, pattern: re.Pattern[str]) -> tuple[str, .
         line = raw_line.strip()
         if line.startswith("@"):
             line = line[1:].lstrip()
+        condition_start = conditional_start_index(lines, index)
+        if condition_start is not None and conditional_failure_branch_fails(lines, condition_start):
+            # A continued `if py_compile ... && test_a && test_b; then`
+            # propagates every operand's failure through the same else branch.
+            # Tokenize before splitting so quoted documentary text is not code.
+            try:
+                lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|")
+                lexer.whitespace_split = True
+                lexer.commenters = "#"
+                tokens = list(lexer)
+            except ValueError:
+                tokens = []
+            if "&&" in tokens and not any(token in {"||", "|", "&"} for token in tokens):
+                segments: list[list[str]] = [[]]
+                for token in tokens:
+                    if token in {"&&", ";"}:
+                        segments.append([])
+                    else:
+                        segments[-1].append(token)
+                for segment in segments:
+                    if segment and segment[0] == "if":
+                        segment = segment[1:]
+                    match = pattern.search(shlex.join(segment))
+                    if match is not None:
+                        calls.append(match.group("name"))
+                continue
         match = pattern.search(line)
         if match is None:
             continue
@@ -233,7 +259,6 @@ def propagated_test_calls(source: str, pattern: re.Pattern[str]) -> tuple[str, .
         if re.search(r"(?<![>&])&(?![>&])", suffix):
             continue
 
-        condition_start = conditional_start_index(lines, index)
         if condition_start is not None:
             if conditional_failure_branch_fails(lines, condition_start):
                 calls.append(match.group("name"))
@@ -344,7 +369,17 @@ def python_tests_reachable_from_offline_gate() -> set[str]:
     reachable: set[str] = set()
     for shell_test in reachable_shell_tests():
         source = shell_test.read_text(encoding="utf-8")
-        reachable.update(propagated_test_calls(source, PYTHON_TEST_CALL))
+        for name in propagated_test_calls(source, PYTHON_TEST_CALL):
+            # $SCRIPT_DIR is local to a nested shell wrapper. Root gate paths
+            # are relative to scripts; ignore external tools outside this
+            # inventory rather than treating their basenames as owned suites.
+            local = (shell_test.parent / name).resolve()
+            candidate = local if local.is_file() else (SCRIPT_DIR / name).resolve()
+            try:
+                relative = candidate.relative_to(SCRIPT_DIR).as_posix()
+            except ValueError:
+                continue
+            reachable.add(relative)
     return reachable
 
 
@@ -581,6 +616,29 @@ class PythonSafetyGateWiringTests(unittest.TestCase):
             self.assertEqual(
                 propagated_test_calls(source, PYTHON_TEST_CALL), (), source
             )
+
+    def test_continued_conditional_calls_and_nested_paths_keep_ownership(self) -> None:
+        source = '''if "$PY" -m py_compile helper.py && \\
+    run_python_script scripts/tests/test_one.py && \\
+    python3 scripts/test_two.py; then
+    pass good
+else
+    fail broken
+fi
+'''
+        self.assertEqual(propagated_test_calls(source, PYTHON_TEST_CALL),
+                         ("tests/test_one.py", "test_two.py"))
+        self.assertEqual(propagated_test_calls(
+            'set -eu\nsh scripts/virtme/am2-ubi/test_nested.sh', SHELL_TEST_CALL),
+            ("virtme/am2-ubi/test_nested.sh",))
+        for command in (
+            "echo 'python3 scripts/test_fake.py'",
+            "'python3 scripts/test_fake.py'",
+            "python3 scripts/test_fake.py || true",
+            "python3 scripts/test_fake.py | cat",
+        ):
+            candidate = f"if true && {command}; then\n    pass good\nelse\n    fail bad\nfi"
+            self.assertEqual(propagated_test_calls(candidate, PYTHON_TEST_CALL), (), candidate)
 
 
 if __name__ == "__main__":

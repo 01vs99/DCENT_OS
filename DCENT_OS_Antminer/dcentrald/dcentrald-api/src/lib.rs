@@ -46,6 +46,7 @@ pub mod cgminer;
 /// Every mutating verb delegates to the same gated `rest::` handler the
 /// dashboard calls — no new control/voltage/NAND path.
 pub mod cgminer_luxos;
+pub mod cold_activation;
 /// P3-2: in-memory mirror of the persisted config table (`dcentrald.toml`) so
 /// read-only status handlers stop re-parsing the file from disk on every
 /// request. Post-write-fresh via the `atomic_io` config-write generation.
@@ -54,6 +55,7 @@ pub mod config_cache;
 /// Wired from `auth::is_allowed_dashboard_origin`.
 pub mod csrf_allowlist;
 pub mod dashboard;
+pub mod diagnostics;
 pub mod mining_pipeline_snapshot;
 pub mod mode_middleware;
 pub mod mqtt;
@@ -65,6 +67,13 @@ pub mod rest;
 /// hosts the silicon-profile-import endpoints under
 /// `/api/profiles/silicon/*` (see `routes/profiles.rs`).
 pub mod routes;
+pub mod runtime_image;
+mod dashboard_tls;
+pub mod reset_default;
+mod update_job;
+mod channel_feed;
+mod channel_download;
+mod channel_update;
 /// GROUP C (W8 parity): outbound webhook event dispatch — the event-bus →
 /// webhook bridge. Wires the daemon's existing mining-sync event bus and
 /// direct event call sites (mining start/stop, pool failover, thermal safety,
@@ -922,7 +931,7 @@ pub struct ApiConfig {
     /// Enable one-time WebSocket auth tickets as a browser-compatible bearer alternative.
     pub websocket_tickets: bool,
     /// Bind CGMiner API to LAN (0.0.0.0) instead of localhost (127.0.0.1).
-    /// SECURITY: CGMiner protocol has no auth — LAN exposure allows hashrate redirection.
+    /// Read-only monitoring is enabled by default; writes require a separate opt-in.
     pub cgminer_bind_lan: bool,
     /// Allow MUTATING CGMiner/LuxOS verbs (voltageset/fanset/curtail/addpool/
     /// switchpool/profileset/...) from NON-loopback peers.
@@ -961,7 +970,7 @@ impl Default for ApiConfig {
             http_bind: "0.0.0.0".to_string(),
             websocket_enabled: true,
             websocket_tickets: false,
-            cgminer_bind_lan: false,
+            cgminer_bind_lan: true,
             cgminer_lan_writes: false,
             metrics_require_auth: true,
             expose_boot_timeline: false,
@@ -3103,7 +3112,8 @@ pub async fn start_api_servers(
 ) -> Result<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)> {
     let cgminer_port = state.config.cgminer_port;
     let http_port = state.config.http_port;
-    let http_bind = state.config.http_bind.clone();
+    let http_bind = dashboard_tls::backend_bind(
+        &state.config.http_bind, auth::is_release_image(), auth::is_password_set());
 
     // Initialize auth module with config-driven flags
     auth::init_auth_config(
@@ -3177,7 +3187,8 @@ pub async fn start_api_servers(
             .route("/", axum::routing::get(dashboard::index_handler))
             .with_state(http_state)
             .layer(axum::middleware::from_fn(auth::auth_middleware))
-            .layer(cors);
+            .layer(cors)
+            .layer(axum::middleware::from_fn(dashboard_tls::middleware));
 
         let bind_addr = http_bind_addr(&http_bind, http_port);
         tracing::info!(bind = %http_bind, port = http_port, "HTTP API server listening");

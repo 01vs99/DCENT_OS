@@ -5,7 +5,7 @@
 //! but their actual init flows still diverge enough that we do not want a large
 //! inheritance-style abstraction yet.
 
-use crate::protocol::{pack_lsb_first, unpack_lsb_first};
+use crate::protocol::pack_lsb_first;
 use crate::Result;
 use dcentrald_hal::fpga_chain::FpgaChain;
 
@@ -55,23 +55,91 @@ pub fn read_pll_register(
     chip_addr: u8,
     pll_reg_addr: u8,
 ) -> Result<Option<u32>> {
-    while chain.cmd_rx_has_data() {
-        let _ = chain.read_cmd_response();
-    }
+    read_pll_register_until(
+        chain,
+        chip_addr,
+        pll_reg_addr,
+        std::time::Instant::now() + std::time::Duration::from_millis(50),
+        &|| false,
+    )
+}
 
-    chain.write_cmd(fifo_read_reg_single(chip_addr, pll_reg_addr));
-    std::thread::sleep(std::time::Duration::from_millis(20));
-
-    if !chain.cmd_rx_has_data() {
-        return Ok(None);
-    }
-
-    let Some(r0) = chain.read_cmd_response() else {
-        return Ok(None);
+/// Owner-borrowed, CRC/framing/address-correlated command FIFO read. Existing
+/// callers have no cancellation token; owners that do may pass it here.
+pub fn read_pll_register_until(
+    chain: &mut FpgaChain,
+    chip: u8,
+    register: u8,
+    deadline: std::time::Instant,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<u32>> {
+    use crate::register_transaction::{
+        read_register, RegisterConversationIo, RegisterResponseLayout,
+        RegisterTransactionError as Error,
     };
-    let _ = chain.read_cmd_response();
-    let bytes = unpack_lsb_first(r0);
-    Ok(Some(u32::from_be_bytes(bytes)))
+    struct FifoIo<'a> {
+        chain: &'a mut FpgaChain,
+        cancelled: &'a dyn Fn() -> bool,
+    }
+    impl RegisterConversationIo for FifoIo<'_> {
+        fn cancelled(&self) -> bool {
+            (self.cancelled)()
+        }
+        fn poll(
+            &mut self,
+            deadline: std::time::Instant,
+        ) -> std::result::Result<Option<Vec<u8>>, Error> {
+            let Some(first) = self.chain.read_cmd_response() else {
+                return Ok(None);
+            };
+            let second = loop {
+                if self.cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(Error::Transport);
+                }
+                if let Some(word) = self.chain.read_cmd_response() {
+                    break word;
+                }
+                std::thread::yield_now();
+            };
+            crate::register_transaction::braiins_command_fifo_body([first, second])
+                .map(Some)
+                .ok_or(Error::Transport)
+        }
+        fn send_read(
+            &mut self,
+            chip: u8,
+            register: u8,
+            _: std::time::Instant,
+        ) -> std::result::Result<(), Error> {
+            self.chain.write_cmd(fifo_read_reg_single(chip, register));
+            Ok(())
+        }
+        fn retain_nonce(&mut self, _: Vec<u8>) -> std::result::Result<(), Error> {
+            // This dedicated hardware FIFO routes command responses only;
+            // mining shares remain in WORK_RX_FIFO, which this reader never
+            // opens/drains. A job trailer here is a transport framing error.
+            Err(Error::Transport)
+        }
+    }
+    let chain_id = chain.chain_id;
+    let result = read_register(
+        &mut FifoIo { chain, cancelled },
+        RegisterResponseLayout::Body7,
+        chip,
+        register,
+        deadline,
+    );
+    match result {
+        Ok(reply) => Ok(Some(reply.value)),
+        Err(Error::Deadline) => Ok(None),
+        Err(error) => Err(crate::AsicError::FifoTimeout {
+            chain_id,
+            detail: format!("correlated register read {chip:#04x}/{register:#04x}: {error:?}"),
+        }),
+    }
 }
 
 #[cfg(all(test, feature = "sim-hal"))]

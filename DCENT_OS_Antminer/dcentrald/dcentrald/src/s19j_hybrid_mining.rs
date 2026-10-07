@@ -46,7 +46,7 @@
 //!   - Register writes use BM1397+ headers (0x51 broadcast / 0x41 single) via
 //!     `send_write_reg_broadcast_bm1397plus` / `send_write_reg_bm1397plus`.
 //!     NEVER the BM1387 SETCONFIG headers (0x58/0x48) Ã¢â‚¬â€
-//!      cost Codex-found regressions.
+//!      cost review-found regressions.
 //!   - Serial dispatch is rate-limited during init (~50/s) to avoid UART flood
 //!.
 //!   - FPGA work_id is 8 bits; `asic_job_id`
@@ -136,7 +136,7 @@ use dcentrald_hal::psu_gpio_gate::PsuGpioSafeOffReceipt;
 // are mutually exclusive on a given unit. See
 // .
 use dcentrald_hal::psu_bypass_gate::PsuBypassGate;
-use dcentrald_hal::serial_chain::SerialChainBackend;
+use dcentrald_hal::serial_chain::{SerialBackendPreference, SerialChainBackend};
 use dcentrald_hal::HalError;
 // W13.B1 (2026-05-10): renamed from `uart_relay::{chain_relay_offset, UartRelay,
 // RELAY_ENABLE_VALUE}`. The `0x43D000xx` window is a Braiins-am2 diagnostic
@@ -647,10 +647,9 @@ fn prepare_pwr_control_cut(spec: Option<&str>, reason: &str) -> Result<PreparedP
     }
     // 2026-06-07 (.25 active-LOW PWR_CONTROL): writing "0" is the CUT-POWER
     // action only on an active-HIGH line. On `a lab unit` gpio907 is ACTIVE-LOW
-    // (RE-018 true-cold strace: "0"=rail ON, "1"=rail OFF), so the hard-stop
-    // must write "1" to actually de-energize Ã¢â‚¬â€ writing "0" here would ENERGIZE
-    // the rail during a safety teardown on the operator's HOME unit. Gate on
-    // DCENT_AM2_PWR_CONTROL_ACTIVE_LOW (default-OFF Ã¢â€ â€™ fleet unchanged).
+    // Keep the exact captured wiring polarity for this prepared cut. On
+    // proved active-low .25/S17 wiring OFF is high; unknown wiring refused
+    // above, before export. Never re-read environment during the write.
     let off_value = if active_low { "1" } else { "0" };
     Ok(PreparedPwrControlCut {
         gpio,
@@ -666,15 +665,76 @@ pub fn force_pwr_control_low_checked(spec: Option<&str>, reason: &str) -> Result
 
 fn am2_pwr_control_active_low_for_gpio(gpio: u32) -> Result<bool> {
     let active_low = am2_env_flag("DCENT_AM2_PWR_CONTROL_ACTIVE_LOW");
-    let active_high = am2_env_flag("DCENT_AM2_PWR_CONTROL_ACTIVE_HIGH");
-    if gpio == dcentrald_hal::board_control::AM2_PSU_ENABLE_GPIO && active_low == active_high {
-        anyhow::bail!(
-            "AM2 PWR_CONTROL gpio{} polarity unknown or conflicting; set exactly one of DCENT_AM2_PWR_CONTROL_ACTIVE_LOW=1 or DCENT_AM2_PWR_CONTROL_ACTIVE_HIGH=1",
-            gpio
-        );
+    if gpio != dcentrald_hal::board_control::AM2_PSU_ENABLE_GPIO {
+        return Ok(active_low);
     }
-    Ok(active_low)
+    let lab_declared = dcentrald_common::lab_env::var_os("DCENT_AM2_PWR_CONTROL_ACTIVE_LOW").is_some()
+        || dcentrald_common::lab_env::var_os("DCENT_AM2_PWR_CONTROL_ACTIVE_HIGH").is_some();
+    dcentrald_common::runtime_hardware_recipe::resolve_power_control_polarity(
+        dcentrald_common::runtime_hardware_recipe::gpio907_polarity(),
+        lab_declared.then(|| (active_low, am2_env_flag("DCENT_AM2_PWR_CONTROL_ACTIVE_HIGH"))),
+    )
+    .map(|polarity| polarity.active_low())
+    .map_err(anyhow::Error::msg)
 }
+
+/// Check declared boot origin against the existing runtime selection before
+/// opening the safety watchdog. These booleans describe existing selection only;
+/// passing this check cannot mint a population/controller or cold-boot recipe.
+fn am2_boot_origin_preflight(
+    config: &DcentraldConfig,
+    trusts_inherited_rail: bool,
+    existing_standalone_selected: bool,
+) -> Result<()> {
+    use crate::config::Am2BootOrigin;
+    match config.mining.am2_boot_origin {
+        None => Ok(()),
+        Some(Am2BootOrigin::NativeCold) => {
+            anyhow::ensure!(
+                !config.mining.passthrough && !trusts_inherited_rail,
+                "AM2 native_cold configuration conflicts with inherited ASIC/rail state; \
+                 passthrough and DCENT_AM2_TRUST_RAIL_FALLBACK cannot satisfy clean startup"
+            );
+            anyhow::ensure!(
+                existing_standalone_selected,
+                "AM2 native_cold configuration has no existing standalone selection; \
+                 the generic AM2/BM1362 image and configured chip count do not qualify a cold recipe"
+            );
+            Ok(())
+        }
+        Some(Am2BootOrigin::InheritedHandoff) => {
+            anyhow::ensure!(
+                !existing_standalone_selected,
+                "AM2 inherited_handoff configuration conflicts with standalone selection"
+            );
+            anyhow::ensure!(
+                config.mining.passthrough || trusts_inherited_rail,
+                "AM2 inherited_handoff configuration has no existing inherited-state selection"
+            );
+            Ok(())
+        }
+    }
+}
+
+fn am2_boot_origin_runtime_preflight(config: &DcentraldConfig) -> Result<()> {
+    if config.mining.am2_boot_origin.is_none() {
+        return Ok(());
+    }
+    am2_boot_origin_preflight(
+        config,
+        am2_env_flag("DCENT_AM2_TRUST_RAIL_FALLBACK"),
+        am2_standalone_re_fix_enabled() && am2_xil_25_fingerprint_matches(),
+    )?;
+    info!(
+        boot_origin = ?config.mining.am2_boot_origin,
+        "AM2 declared boot origin agrees with existing selection; hardware admission remains separate"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "am2_xil_boot_origin_tests.rs"]
+mod boot_origin_tests;
 
 fn am2_wave56_override_runtime_preflight(config: &DcentraldConfig) -> Result<()> {
     if !am2_env_flag(AM2_XIL25_FINGERPRINT_OVERRIDE_ENV) {
@@ -877,6 +937,41 @@ fn am2_read_fan_rpm_max() -> u32 {
         .map(|(_, rpm)| *rpm)
         .max()
         .unwrap_or(0)
+}
+
+/// Pure all-observable-channels-motion rule over am2 per-fan tach readings
+/// (pin-tested independently of the UIO read). The am2 fan variant exposes
+/// ALL 4 tach channels — including 0-RPM entries, so a failed fan stays
+/// visible rather than disappearing (`FanController::get_per_fan_rpm`) —
+/// and every one of them must show motion. Empty reading list ⇒ `false`
+/// (fail-closed: no observable channel must not read as "all moving").
+fn am2_per_fan_all_motion(per_fan: &[(u8, u32)]) -> bool {
+    !per_fan.is_empty() && per_fan.iter().all(|(_, rpm)| *rpm > 0)
+}
+
+/// C3a fix lane (DCENT_Thermal merge condition): ALL-observable-channels-
+/// motion fan evidence for the am2 first-boot start gate. The old rule
+/// (`am2_read_fan_rpm_max() > 0`) was the weakest form — a single spinning
+/// fan passed even with the other three observable channels stalled at
+/// 0 RPM. Mirrors the daemon P0 preflight rule (`cooling_readiness_from_
+/// tach`) and the daemon gate publisher's hardened `autotuner_gate_fans_ok`
+/// (same all-motion semantics, am2 has no per-fan api state here so the
+/// check runs directly over the HAL readings). Fail-closed: fan UIO
+/// unreadable or no channels observable ⇒ `false`. Telemetry-style
+/// read-only open (no PWM/board-control write), same as
+/// `am2_read_fan_rpm_max`.
+fn am2_fans_all_channels_in_motion() -> bool {
+    let Some(disc) = dcentrald_hal::fan::discover_fan_uio() else {
+        return false;
+    };
+    let Ok(regs) = dcentrald_hal::uio::UioDevice::open(disc.uio_number) else {
+        return false;
+    };
+    let fan = dcentrald_hal::fan::FanController::new_with_variant(
+        regs,
+        dcentrald_hal::fan::FanVariant::Am2Uio16,
+    );
+    am2_per_fan_all_motion(&fan.get_per_fan_rpm())
 }
 
 fn force_am2_fans_to_configured_cap(fan_max_pwm: u8, reason: &str) {
@@ -2373,6 +2468,9 @@ const RE018_LOW_FREQ_MHZ: u16 = 320;
 /// (~50 MHz eco/heater default, or the gated bump) instead of the config label
 /// (which historically showed a misleading 525). 0 = unset Ã¢â€ â€™ non-RE-018 units
 /// fall back to `config.mining.frequency_mhz` (fleet byte-identical).
+static AM2_HINT_APPLIED_FREQ_MHZ: std::sync::atomic::AtomicU16 =
+    std::sync::atomic::AtomicU16::new(0);
+
 static AM2_RE018_APPLIED_FREQ_MHZ: std::sync::atomic::AtomicU16 =
     std::sync::atomic::AtomicU16::new(0);
 
@@ -2726,14 +2824,18 @@ fn log_bm1362_voltage_topology(chain_id: u8, chip_count: u8) {
 // PIC helper, so the firmware byte is not lost behind kernel-generated tails.
 
 fn am2_env_flag(name: &str) -> bool {
-    std::env::var(name)
+    dcentrald_common::lab_env::var(name)
         .map(|v| {
             matches!(
                 v.as_str(),
                 "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or_else(|error| {
+            matches!(error, std::env::VarError::NotPresent)
+                && dcentrald_common::runtime_hardware_recipe::Am2HardwareFlag::from_env_name(name)
+                    .is_some_and(dcentrald_common::runtime_hardware_recipe::am2_default)
+        })
 }
 
 /// Parse `name` as an explicit OFF switch: returns `true` only when the env var
@@ -2741,7 +2843,7 @@ fn am2_env_flag(name: &str) -> bool {
 /// other value returns `false`. Used by default-ON gates so they can be opted
 /// OUT without flipping the default-OFF semantics of `am2_env_flag`.
 fn am2_env_flag_off(name: &str) -> bool {
-    std::env::var(name)
+    dcentrald_common::lab_env::var(name)
         .map(|v| {
             matches!(
                 v.as_str(),
@@ -2779,60 +2881,75 @@ fn am2_baud_jig_pll1_reclock_enabled() -> bool {
     am2_env_flag("DCENT_AM2_BAUD_JIG_PLL1_RECLOCK")
 }
 
-/// Read one BM1362 chip register value via a broadcast READ at the current
-/// (115200) baud. Returns `None` if the chain UART RX is silent Ã¢â‚¬â€ the caller
-/// MUST treat that as fail-closed and abort before issuing any write, so the
-/// chain is never left half-reclocked. Mirrors the existing PLL-lock readback
-/// pattern (`send_read_reg_bm1397plus` + `read_all_responses` + `from_be_bytes`).
-fn read_bm1362_reg_value(serial: &SerialChainBackend, chip_addr: u8, reg: u8) -> Option<u32> {
-    hybrid_send_read_reg(serial, chip_addr, reg).ok()?;
-    let resps = serial.read_all_responses(50).unwrap_or_default();
-    for r in &resps {
-        if r.len() >= 4 {
-            return Some(u32::from_be_bytes([r[0], r[1], r[2], r[3]]));
-        }
-    }
-    None
+/// Read one correlated response through an exclusive, bounded owner borrow.
+/// Matching checks the exact body layout, response CRC, chip and register.
+/// Interleaved nonces return to the normal serial RX consumer after the RMW.
+fn read_bm1362_reg_value(
+    io: &mut dcentrald_hal::serial_chain::BoundedSerialResponseIo<'_>,
+    chip_addr: u8,
+    reg: u8,
+) -> dcentrald_hal::Result<u32> {
+    use dcentrald_asic::register_transaction::{read_register, RegisterResponseLayout};
+    let layout =
+        RegisterResponseLayout::from_body_len(io.response_body_len()).ok_or_else(|| {
+            dcentrald_hal::HalError::Platform("unsupported BM1362 register response layout".into())
+        })?;
+    let deadline = io.deadline();
+    read_register(io, layout, chip_addr, reg, deadline)
+        .map(|reply| reply.value)
+        .map_err(|error| {
+            dcentrald_hal::HalError::Platform(format!(
+                "BM1362 correlated register {reg:#04x}: {error:?}"
+            ))
+        })
 }
 
-/// Apply the BM1362 factory-jig `set_chain_baud` (PLL1 reclock RMW) at the
-/// current baud, faithful to the AMTC repair-jig binary (`FUN_0002cb14`). Gated,
-/// default-OFF. Fail-closed: if a chip register readback is silent, abort BEFORE
-/// any write so the chain is never left half-configured. The jig's
-/// `set_chain_baud` does NOT touch reg `0x18` MiscCtrl, so the caller skips the
-/// MiscCtrl-post-fast write while this gate is on.
-fn apply_bm1362_jig_pll1_reclock(serial: &SerialChainBackend, target_baud: u32) -> Result<()> {
-    let r60 = read_bm1362_reg_value(serial, 0x00, 0x60).context(
-        "jig-reclock: BM1362 reg 0x60 (PLL1) readback silent at 115200 Ã¢â‚¬â€ \
-         aborting before any baud-register write (fail-closed; chain untouched)",
-    )?;
-    let r28 = read_bm1362_reg_value(serial, 0x00, 0x28).context(
-        "jig-reclock: BM1362 reg 0x28 (FastUART) readback silent at 115200 Ã¢â‚¬â€ \
-         aborting before any baud-register write (fail-closed; chain untouched)",
-    )?;
-    let (w60, w28) = jig_pll1_reclock_regs(r60, r28, target_baud);
-    info!(
-        reg60_readback = format_args!("0x{:08X}", r60),
-        reg28_readback = format_args!("0x{:08X}", r28),
-        reg60_write = w60
-            .map(|v| format!("0x{:08X}", v))
-            .unwrap_or_else(|| "(none, low-baud path)".to_string()),
-        reg28_write = format_args!("0x{:08X}", w28),
-        target_baud,
-        "DCENT_AM2_BAUD_JIG_PLL1_RECLOCK=1 Ã¢â‚¬â€ applying BM1362 factory-jig set_chain_baud (PLL1 reclock RMW); reg 0x18 MiscCtrl skipped (jig does not write it in set_chain_baud)"
-    );
-    if let Some(w60) = w60 {
-        // reg 0x60 = PLL1, written twice @ 10 ms (jig order).
-        hybrid_send_write_reg_broadcast(serial, 0x60, w60)?;
-        std::thread::sleep(Duration::from_millis(10));
-        hybrid_send_write_reg_broadcast(serial, 0x60, w60)?;
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    hybrid_send_write_reg_broadcast(serial, 0x28, w28)?;
-    serial.drain_tx().ok();
-    // Jig timing: usleep(10ms) + usleep(50ms) after the reg 0x28 write.
-    std::thread::sleep(Duration::from_millis(60));
-    Ok(())
+/// Existing default-off factory-jig PLL1 RMW, now bounded and cancellable.
+/// The same 300 ms deadline covers both reads, writes and settles. No value
+/// from a wrong chip/register, nonce, CRC error or expired read may drive RMW.
+fn apply_bm1362_jig_pll1_reclock(
+    serial: &mut SerialChainBackend,
+    target_baud: u32,
+    shutdown: &CancellationToken,
+) -> Result<()> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(300);
+    serial
+        .with_bounded_response_io(deadline, &|| shutdown.is_cancelled(), |io| {
+            let r60 = read_bm1362_reg_value(io, 0x00, 0x60)?;
+            let r28 = read_bm1362_reg_value(io, 0x00, 0x28)?;
+            let (w60, w28) = jig_pll1_reclock_regs(r60, r28, target_baud);
+            info!(reg60_readback = r60, reg28_readback = r28, reg60_write = ?w60,
+            reg28_write = w28, target_baud, "BM1362 jig reclock: correlated readbacks admitted");
+            fn settle(
+                io: &dcentrald_hal::serial_chain::BoundedSerialResponseIo<'_>,
+                ms: u64,
+            ) -> dcentrald_hal::Result<()> {
+                let until = std::time::Instant::now() + Duration::from_millis(ms);
+                while std::time::Instant::now() < until {
+                    io.check_budget()?;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                io.check_budget()
+            }
+            fn write(
+                io: &mut dcentrald_hal::serial_chain::BoundedSerialResponseIo<'_>,
+                reg: u8,
+                value: u32,
+            ) -> dcentrald_hal::Result<()> {
+                let b = value.to_be_bytes();
+                io.send_command(&[0x51, 0x09, 0, reg, b[0], b[1], b[2], b[3]])
+            }
+            if let Some(value) = w60 {
+                write(io, 0x60, value)?;
+                settle(io, 10)?;
+                write(io, 0x60, value)?;
+                settle(io, 10)?;
+            }
+            write(io, 0x28, w28)?;
+            io.drain_tx()?;
+            settle(io, 60)
+        })
+        .context("BM1362 jig reclock owner conversation failed")
 }
 
 fn am2_work_tx_bosminer_idle_enabled() -> bool {
@@ -2914,70 +3031,42 @@ fn am2_bm1362_re018_cold_sequence_enabled() -> bool {
 /// (chain1-work-tx) open, which ENODEVs after the work-tx UIO is unbound to free
 /// IRQ 165 (see below).
 fn am2_prefer_kernel_uart() -> bool {
-    std::env::var_os("DCENT_PREFER_KERNEL_UART").is_some()
+    dcentrald_common::lab_env::var_os("DCENT_PREFER_KERNEL_UART").is_some()
 }
 
-/// .25 RE-018 KERNEL-UART TRANSPORT (2026-06-09, LIVE TEST 13). On `a lab unit` the Zynq
-/// PL UART `ttyS1` (16550A @ 0x41001000) shares GIC 62 / Linux IRQ 165 with the
-/// `43c03000.chain1-work-tx` UIO. While `uio_pdrv_genirq` holds that IRQ, the
-/// kernel `of_serial` 8250 port cannot request it, so a File-backed `/dev/ttyS1`
-/// open fails and DCENT falls back to DevmemUart (a second master on the same
-/// 16550 = RX-steal risk). Unbinding the work-tx platform device frees IRQ 165 ->
-/// `of_serial` claims `ttyS1` -> `selection=kernel-open` (bosminer's literal,
-/// single-owner transport; 8250 port-startup asserts MCR OUT2 itself).
-///
-/// SAFE only because `DCENT_AM2_SERIAL_WORK_DISPATCH=1` BYPASSES the FPGA work-tx
-/// FIFO entirely, so chain1-work-tx is UNUSED on this path. On success this sets
-/// `DCENT_PREFER_KERNEL_UART=1` for the process so the chain open selects the
-/// kernel File backend (atomic with a SUCCESSFUL unbind - no half-state).
-///
-/// Triple-gated default-OFF: explicit opt-in env
-/// `DCENT_AM2_KERNEL_UART_UNBIND_WORKTX=1` AND the `a lab unit` fingerprint AND
-/// serial-work-dispatch mode. Idempotent: if the work-tx platform device is
-/// already unbound, set `DCENT_PREFER_KERNEL_UART=1` and keep the kernel path.
-fn am2_free_chain1_work_tx_irq_for_kernel_uart() {
+/// Complete the lab-only IRQ handoff before constructing chain adapters.
+/// Return the captured preference directly; never mutate process environment.
+fn am2_free_chain1_work_tx_irq_for_kernel_uart() -> SerialBackendPreference {
+    let prior = if am2_prefer_kernel_uart() {
+        SerialBackendPreference::PreferKernel
+    } else {
+        SerialBackendPreference::PlatformDefault
+    };
     if !(am2_env_flag("DCENT_AM2_KERNEL_UART_UNBIND_WORKTX")
         && am2_zynq_bm1362_recipe_gate_matches()
         && am2_env_flag("DCENT_AM2_SERIAL_WORK_DISPATCH"))
     {
-        return;
+        return prior;
     }
     const UNBIND: &str = "/sys/bus/platform/drivers/uio_pdrv_genirq/unbind";
     const DEV: &str = "43c03000.chain1-work-tx";
     const DRIVER_LINK: &str = "/sys/bus/platform/devices/43c03000.chain1-work-tx/driver";
     if !std::path::Path::new(DRIVER_LINK).exists() {
-        std::env::set_var("DCENT_PREFER_KERNEL_UART", "1");
-        info!(
-            device = DEV,
-            "RE-018 kernel-UART: chain1-work-tx already unbound; set DCENT_PREFER_KERNEL_UART=1"
-        );
-        return;
+        info!(device = DEV, "RE-018 kernel-UART: chain1-work-tx already unbound");
+        return SerialBackendPreference::PreferKernel;
     }
     match std::fs::write(UNBIND, DEV) {
         Ok(()) => {
-            std::env::set_var("DCENT_PREFER_KERNEL_UART", "1");
-            info!(
-                device = DEV,
-                "RE-018 kernel-UART: unbound chain1-work-tx from uio_pdrv_genirq (freed IRQ 165); \
-                 set DCENT_PREFER_KERNEL_UART=1 -> chain opens via kernel of_serial (selection=kernel-open)"
-            );
+            info!(device = DEV, "RE-018 kernel-UART: freed IRQ 165; capturing kernel transport preference");
+            SerialBackendPreference::PreferKernel
+        }
+        Err(e) if !std::path::Path::new(DRIVER_LINK).exists() => {
+            info!(device = DEV, error = %e, "RE-018 kernel-UART: unbind errored but driver link is gone");
+            SerialBackendPreference::PreferKernel
         }
         Err(e) => {
-            if !std::path::Path::new(DRIVER_LINK).exists() {
-                std::env::set_var("DCENT_PREFER_KERNEL_UART", "1");
-                info!(
-                    device = DEV,
-                    error = %e,
-                    "RE-018 kernel-UART: unbind returned an error but driver link is gone; set DCENT_PREFER_KERNEL_UART=1"
-                );
-            } else {
-                warn!(
-                    device = DEV,
-                    error = %e,
-                    "RE-018 kernel-UART: chain1-work-tx unbind write failed and driver remains bound; \
-                     leaving transport selection unchanged (DevmemUart fallback)"
-                );
-            }
+            warn!(device = DEV, error = %e, "RE-018 kernel-UART: unbind failed; keeping prior transport selection");
+            prior
         }
     }
 }
@@ -3067,7 +3156,7 @@ fn am2_heartbeat_all_active_pics_enabled() -> bool {
 /// first pass whose value COLLAPSES names the culprit substep, which
 /// directly determines the G2 fix.
 fn am2_ablation_per_chip_stop_after() -> Option<&'static str> {
-    match std::env::var("DCENT_AM2_ABLATION_PER_CHIP_STOP_AFTER")
+    match dcentrald_common::lab_env::var("DCENT_AM2_ABLATION_PER_CHIP_STOP_AFTER")
         .ok()
         .map(|v| v.to_ascii_lowercase())
         .as_deref()
@@ -3124,7 +3213,7 @@ fn am2_dual_chain_ttys3_enabled() -> bool {
 const AM2_DUAL_CHAIN_SECOND_UART_DEFAULT: &str = "/dev/ttyS3";
 
 fn am2_dual_chain_second_uart() -> String {
-    std::env::var("DCENT_AM2_DUAL_CHAIN_SECOND_UART")
+    dcentrald_common::lab_env::var("DCENT_AM2_DUAL_CHAIN_SECOND_UART")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| AM2_DUAL_CHAIN_SECOND_UART_DEFAULT.to_string())
@@ -3420,12 +3509,12 @@ fn am2_re018_pll_hex_within_envelope(reg: u32) -> bool {
 ///   3. default [`RE018_LOW_FREQ_PLL_08`] = the proven 320 MHz efficiency sweet spot.
 /// POWER-RAISING vs the ~50 MHz eco/heater default ([`RE018_PLL_08`]) Ã¢â‚¬â€ wattmeter-gated live test.
 fn am2_re018_resolve_pll_override_reg() -> u32 {
-    if let Ok(s) = std::env::var("DCENT_AM2_RE018_TARGET_MHZ") {
+    if let Ok(s) = dcentrald_common::lab_env::var("DCENT_AM2_RE018_TARGET_MHZ") {
         if let Ok(mhz) = s.trim().parse::<u16>() {
             return pll_lookup_extended(mhz).0;
         }
     }
-    if let Ok(s) = std::env::var("DCENT_AM2_RE018_PLL_HEX") {
+    if let Ok(s) = dcentrald_common::lab_env::var("DCENT_AM2_RE018_PLL_HEX") {
         let t = s.trim().trim_start_matches("0x").trim_start_matches("0X");
         if let Ok(reg) = u32::from_str_radix(t, 16) {
             // Clamp the raw lab escape-hatch to the SAME VCO/operating envelope
@@ -3560,6 +3649,11 @@ const AM2_XIL109_FINGERPRINT_OVERRIDE_ENV: &str =
     crate::wave55a_recipe_guard::XIL_109_FINGERPRINT_OVERRIDE_ENV;
 
 fn am2_xil_25_fingerprint_matches() -> bool {
+    if !dcentrald_common::lab_env::compiled() {
+        return dcentrald_common::runtime_hardware_recipe::installed().is_some_and(|recipe| {
+            recipe.profile() == dcentrald_common::runtime_hardware_recipe::HardwareRecipeProfile::Xil25Loki
+        });
+    }
     let platform = std::fs::read_to_string("/etc/dcentos/platform")
         .or_else(|_| std::fs::read_to_string("/etc/bos_platform"))
         .unwrap_or_default();
@@ -3629,7 +3723,7 @@ fn am2_xil_109_fingerprint_matches() -> bool {
         &platform,
         &board_target,
         chip_type_hint.as_deref(),
-        |name| std::env::var(name).ok(),
+        |name| dcentrald_common::lab_env::var(name).ok(),
     )
 }
 
@@ -4282,7 +4376,7 @@ fn am2_freq_only_clamp_applied_mhz(requested_mhz: u16) -> u16 {
 /// operator opt-in works identically across both entry points.
 fn am2_frequency_autotune_opted_in(config: &DcentraldConfig) -> bool {
     config.autotuner.am2_frequency_autotune_enabled(
-        std::env::var(dcentrald_autotuner::config::AM2_FREQUENCY_AUTOTUNE_ENV)
+        dcentrald_common::lab_env::var(dcentrald_autotuner::config::AM2_FREQUENCY_AUTOTUNE_ENV)
             .ok()
             .as_deref(),
     )
@@ -4301,7 +4395,7 @@ fn am2_frequency_autotune_opted_in(config: &DcentraldConfig) -> bool {
 /// milestone path.
 fn am2_at3_rail_read_opted_in(config: &DcentraldConfig) -> bool {
     config.autotuner.at3_rail_read_enabled(
-        std::env::var(dcentrald_autotuner::config::AT3_RAIL_READ_ENV)
+        dcentrald_common::lab_env::var(dcentrald_autotuner::config::AT3_RAIL_READ_ENV)
             .ok()
             .as_deref(),
     )
@@ -4658,6 +4752,7 @@ impl Am2SerialChainState {
                 ntime: work.ntime,
                 nbits: work.nbits,
                 version: work.version,
+                pool_version_mask: job.version_mask,
                 share_target: work.share_target,
                 prev_block_hash: work.prev_block_hash,
                 merkle_root: work.merkle_root,
@@ -4769,11 +4864,10 @@ impl Am2SerialChainState {
                     extranonce2: entry.extranonce2.clone(),
                     ntime: format!("{:08x}", entry.ntime),
                     nonce: format!("{:08x}", nr.nonce),
-                    version_bits: if vbits_delta != 0 {
-                        Some(format!("{:08x}", vbits_delta))
-                    } else {
-                        None
-                    },
+                    version_bits: dcentrald_stratum::work::bip310_version_bits(
+                        rolled_version,
+                        entry.pool_version_mask,
+                    ),
                     version: rolled_version,
                     achieved_difficulty,
                 };
@@ -4917,7 +5011,7 @@ fn parse_ablation_fields(summary: &str) -> (usize, usize, usize, String) {
 /// shape vs the .79 BB serial-nonce frame the parser was tuned for. Default
 /// 0 = disabled.
 fn am2_log_rx_frames_max() -> u64 {
-    let raw = match std::env::var("DCENT_AM2_LOG_RX_FRAMES") {
+    let raw = match dcentrald_common::lab_env::var("DCENT_AM2_LOG_RX_FRAMES") {
         Ok(v) => v,
         Err(_) => return 0,
     };
@@ -4925,7 +5019,7 @@ fn am2_log_rx_frames_max() -> u64 {
 }
 
 fn am2_env_u32(name: &str, default: u32) -> u32 {
-    let Ok(raw) = std::env::var(name) else {
+    let Ok(raw) = dcentrald_common::lab_env::var(name) else {
         return default;
     };
     let trimmed = raw.trim();
@@ -4956,7 +5050,7 @@ fn am2_env_u32(name: &str, default: u32) -> u32 {
 /// Returns `default` when absent or unparseable so a malformed override can
 /// never change timing silently.
 fn am2_env_u64(name: &str, default: u64) -> u64 {
-    let Ok(raw) = std::env::var(name) else {
+    let Ok(raw) = dcentrald_common::lab_env::var(name) else {
         return default;
     };
     let trimmed = raw.trim();
@@ -6154,6 +6248,46 @@ mod am2_power_shutdown_evidence_tests {
     }
 }
 
+#[cfg(test)]
+mod am2_start_gate_fans_policy_tests {
+    //! C3a fix lane (DCENT_Thermal merge condition) pins for the am2
+    //! first-boot gate's all-observable-channels-motion fan rule — mirrors
+    //! the daemon's `cooling_readiness_from_tach` zero-channel and
+    //! partial-stall pins (`daemon.rs` `autotuner_start_gate_fans_policy_
+    //! tests`): the old `am2_read_fan_rpm_max() > 0` max-arm admitted a
+    //! 3-of-4-stalled array to characterization.
+    use super::am2_per_fan_all_motion;
+
+    #[test]
+    fn all_four_channels_moving_passes() {
+        assert!(am2_per_fan_all_motion(&[
+            (0, 2_400),
+            (1, 2_460),
+            (2, 2_400),
+            (3, 2_520),
+        ]));
+    }
+
+    /// MUTATION PIN (the merge condition itself): 3 of 4 am2 fans stalled
+    /// at 0 RPM must PARK even though the max channel shows motion.
+    #[test]
+    fn partial_stall_three_of_four_dead_parks() {
+        assert!(
+            !am2_per_fan_all_motion(&[(0, 4_560), (1, 0), (2, 0), (3, 0)]),
+            "one spinning fan must not open the gate for a stalled array"
+        );
+        assert!(!am2_per_fan_all_motion(&[(0, 0), (1, 0), (2, 0), (3, 120)]));
+    }
+
+    /// Zero-channel case (mirrors `cooling_readiness_from_tach`): no
+    /// observable channel is NOT "all moving" — fail-closed.
+    #[test]
+    fn empty_channel_list_refuses() {
+        assert!(!am2_per_fan_all_motion(&[]));
+        assert!(!am2_per_fan_all_motion(&[(0, 0)]));
+    }
+}
+
 /// Reclaim every feeder before entering the PSU critical section.
 ///
 /// A timeout deliberately skips `safe_shutdown_to_min`: a detached PSU
@@ -6901,10 +7035,23 @@ fn hybrid_send_set_address(serial: &SerialChainBackend, addr: u8) -> Result<()> 
 }
 
 fn hybrid_send_write_reg_broadcast(serial: &SerialChainBackend, reg: u8, value: u32) -> Result<()> {
-    hybrid_execute_bm1397plus_op(
+    let result = hybrid_execute_bm1397plus_op(
         serial,
         TransportOp::SendWriteRegBroadcastBm1397Plus { reg, value },
-    )
+    );
+    if reg == 0x08 {
+        // Passive record only: successful existing PLL writes supply hint
+        // frequency. Failed or undecodable writes withdraw the estimate.
+        AM2_HINT_APPLIED_FREQ_MHZ.store(
+            if result.is_ok() {
+                decode_pll_reg_to_freq(value).unwrap_or(0)
+            } else {
+                0
+            },
+            Ordering::Release,
+        );
+    }
+    result
 }
 
 fn hybrid_send_write_reg(
@@ -7051,6 +7198,7 @@ struct WorkEntry {
     ntime: u32,
     nbits: u32,
     version: u32,
+    pool_version_mask: u32,
     share_target: [u8; 32],
     prev_block_hash: [u8; 32],
     merkle_root: [u8; 32],
@@ -7523,6 +7671,9 @@ impl S19jHybridSafetyAdmission {
             )
             .map_err(anyhow::Error::msg)?;
 
+        // Resolve explicit boot origin before opening any safety watchdog.
+        am2_boot_origin_runtime_preflight(config)?;
+
         let liveness = SafetyLiveness::default();
         let expected_liveness = Duration::from_secs_f32(config.thermal.pid_interval_s.max(1.0));
         let (mut watchdog, admission) = SafetyWatchdogOwner::start_before_energizing(
@@ -7848,7 +7999,7 @@ impl S19jHybridMiner {
     /// the highest reply count, or `None` if all are silent.
     /// Caller is responsible for ensuring chain voltage is on before
     /// calling Ã¢â‚¬â€ chips need power to respond.
-    fn probe_uart_for_chips(default_device: &str) -> Option<(String, usize)> {
+    fn probe_uart_for_chips(default_device: &str, uart_preference: SerialBackendPreference) -> Option<(String, usize)> {
         // Live ground truth on XIL (2026-05-12): never include `/dev/ttyPS0`
         // in this fallback sweep. It is the Zynq PS console/control UART, not a
         // hash-chain UART, and the file-backed read path can park shutdown in
@@ -7861,7 +8012,7 @@ impl S19jHybridMiner {
             "UART probe: scanning {:?} for chip presence", candidates
         );
         for path in candidates.iter() {
-            let mut serial = match SerialChainBackend::open(0, path, 115_200) {
+            let mut serial = match SerialChainBackend::open_with_preference(0, path, 115_200, uart_preference) {
                 Ok(s) => s,
                 Err(e) => {
                     warn!(path, error = %e, "UART probe: open failed");
@@ -7922,7 +8073,7 @@ impl S19jHybridMiner {
     /// AM2 **value** residual: `am2_misc_control_pre_baud()` may differ from
     /// pure single-write `HOT_START_MISC_CTRL_BAUD_RESET`. Not dual-spray
     /// (serial-only; hybrid path stays BM1397+ composition).
-    fn reset_asic_baud(serial_device: &str) {
+    fn reset_asic_baud(serial_device: &str, uart_preference: SerialBackendPreference) {
         // AM2 hybrid is Zynq-class (BAUD_3125000 = pure HOT_START_ZYNQ_FAST_BAUD).
         let stages = plan_hot_start_baud_wake_ladder(HotStartHostClass::Zynq);
         let misc_value = am2_misc_control_pre_baud();
@@ -7934,7 +8085,7 @@ impl S19jHybridMiner {
             "Hot-start baud reset (pure Zynq ladder + pure hybrid wake plan + AM2 value residual)"
         );
         for stage in stages {
-            if let Ok(serial) = SerialChainBackend::open(0, serial_device, stage.baud) {
+            if let Ok(serial) = SerialChainBackend::open_with_preference(0, serial_device, stage.baud, uart_preference) {
                 info!(
                     baud = stage.baud,
                     label = stage.label,
@@ -7977,9 +8128,11 @@ impl S19jHybridMiner {
     /// is proven on live hardware.
     fn init_asic_chain(
         serial_device: &str,
+        uart_preference: SerialBackendPreference,
         chip_count: u8,
         target_freq_mhz: u16,
         pll_ramp: bool,
+        shutdown: &CancellationToken,
     ) -> Result<(SerialChainBackend, usize)> {
         info!(
             pll_ramp,
@@ -8063,7 +8216,7 @@ impl S19jHybridMiner {
                         ),
                     }
                 }
-                match SerialChainBackend::open(0, &companion_dev, 115_200) {
+                match SerialChainBackend::open_with_preference(0, &companion_dev, 115_200, uart_preference) {
                     Ok(mut c) => {
                         let _ = c.flush_io();
                         if let Err(e) = c.assert_mcr_out2() {
@@ -8102,10 +8255,10 @@ impl S19jHybridMiner {
                  perturb the chain UART before the first enum)"
             );
         } else {
-            Self::reset_asic_baud(serial_device);
+            Self::reset_asic_baud(serial_device, uart_preference);
         }
 
-        let mut serial = SerialChainBackend::open(0, serial_device, 115_200)
+        let mut serial = SerialChainBackend::open_with_preference(0, serial_device, 115_200, uart_preference)
             .context("Failed to open serial port at 115200")?;
         let _ = serial.flush_io();
         //  (2026-05-31): post-chain-reset / pre-enumeration settle.
@@ -8574,7 +8727,7 @@ impl S19jHybridMiner {
         // the MiscCtrl-post-fast write below is skipped when this gate is on.
         let jig_reclock = am2_baud_jig_pll1_reclock_enabled();
         if jig_reclock {
-            apply_bm1362_jig_pll1_reclock(&serial, fast_uart_baud)?;
+            apply_bm1362_jig_pll1_reclock(&mut serial, fast_uart_baud, shutdown)?;
         } else {
             hybrid_send_write_reg_broadcast(&serial, 0x28, fast_uart_value)?;
             serial.drain_tx()?;
@@ -8806,6 +8959,8 @@ impl S19jHybridMiner {
         profile_max_pwm: u8,
         pic_heartbeat_terminal_failed: Arc<AtomicBool>,
         watchdog_feed_stop: &WatchdogFeedStopSignal,
+        capacity_publisher: &crate::active_capacity::CapacityPublisher,
+        mut capacity_chains: (u32, u16),
     ) -> Result<()> {
         info!(
             chip_count,
@@ -9019,27 +9174,69 @@ impl S19jHybridMiner {
                     {
                         tuner.set_chain_sku(0, sku);
                     }
-                    // Readiness gate: wait for the serial path to be
-                    // producing nonces before characterizing. A fixed
-                    // sleep is not enough Ã¢â‚¬â€ the first snapshots after
-                    // chain bring-up can be empty.
-                    let mut ready_tick = tokio::time::interval(std::time::Duration::from_secs(5));
-                    ready_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                    // The tuner's own readiness is driven by the stats
-                    // it receives; just give the chain a brief settle
-                    // before starting so the first measurement window
-                    // isn't dominated by enumeration transients.
-                    tokio::select! {
-                        _ = tuner_shutdown.cancelled() => {
-                            info!("am2 freq-only autotuner stopping before characterization started");
-                            return;
+                    // ---- C3a: first-boot safe-stock start gate (visible park) ----
+                    //
+                    // The am2 freq-only path is ALREADY operator-acknowledged:
+                    // it only runs when the operator explicitly opted in via
+                    // `[autotuner] am2_frequency_autotune = true` (or
+                    // `DCENT_AM2_FREQUENCY_AUTOTUNE=1`), so the
+                    // ExperimentalOptIn ack condition is satisfied by that
+                    // runtime admission; measured health still controls characterization.
+                    // Health/fans/temp are still gated with real evidence:
+                    // the pre-existing one-settle-tick chain settle (health),
+                    // read-only fan tach motion (fans), and a fresh
+                    // in-plausibility-bounds XADC die temp (temp).
+                    //
+                    // The variant guard treats this path's cooling medium as
+                    // UNDECLARED (None + canonical forced-air ladder): every
+                    // registered BoardDesc row carries exactly that posture,
+                    // and an undeclared medium never earns the fan-management
+                    // bypass (fans stay managed - the conservative direction
+                    // from cooling_medium's contract).
+                    let (first_boot_gate_tx, first_boot_gate_rx) = tokio::sync::watch::channel(
+                        dcentrald_autotuner::FirstBootGateSnapshot::default(),
+                    );
+                    tuner.set_first_boot_gate(first_boot_gate_rx);
+                    let gate_publisher_shutdown = tuner_shutdown.clone();
+                    let gate_publisher = tokio::spawn(async move {
+                        let mut settled_tick = false;
+                        let mut gate_tick =
+                            tokio::time::interval(std::time::Duration::from_secs(5));
+                        gate_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                        loop {
+                            tokio::select! {
+                                _ = gate_publisher_shutdown.cancelled() => {
+                                    return;
+                                }
+                                _ = gate_tick.tick() => {
+                                    // One settle tick (the pre-C3a readiness
+                                    // semantics) before health reads OK.
+                                    settled_tick = true;
+                                    // C3a fix lane (DCENT_Thermal merge
+                                    // condition): ALL observable per-fan
+                                    // channels must show motion (was
+                                    // max-channel > 0 — the weakest form).
+                                    let fans_ok = am2_fans_all_channels_in_motion();
+                                    let temp_in_envelope = match dcentrald_hal::xadc::Xadc::read_temp() {
+                                        Ok(t) => t > 0.0 && t < 125.0,
+                                        Err(_) => false,
+                                    };
+                                    let _ = first_boot_gate_tx.send(
+                                        dcentrald_autotuner::FirstBootGateSnapshot {
+                                            health_snapshot_ok: settled_tick,
+                                            fans_ok,
+                                            temp_in_envelope,
+                                        },
+                                    );
+                                }
+                            }
                         }
-                        _ = ready_tick.tick() => {}
-                    }
-                    info!("am2 freq-only autotuner: beginning chain-level frequency characterization (Efficiency walk-down)");
+                    });
+                    info!("am2 freq-only autotuner: beginning chain-level frequency characterization (Efficiency walk-down; tuner parks in Idle until the first-boot gate opens)");
                     tuner
                         .run(&chain_infos, stats_rx, fc_tx, tuner_shutdown)
                         .await;
+                    gate_publisher.abort();
                 });
             }
         }
@@ -9084,6 +9281,8 @@ impl S19jHybridMiner {
         // tick otherwise.)
         rail_timer.reset();
 
+        let mut capacity_timer = tokio::time::interval(Duration::from_secs(1));
+
         'mining: loop {
             // Terminal revoke mid-run (PIC HB dead latch) Ã¢â‚¬â€ cut hash before
             // noise via the shared lifecycle; recovered HB cannot re-admit.
@@ -9103,6 +9302,9 @@ impl S19jHybridMiner {
             }
 
             tokio::select! {
+                _ = capacity_timer.tick(), if capacity_publisher.enabled() => {
+                    capacity_publisher.publish(dispatch_life.is_admitted() && !self.shutdown.is_cancelled(), 0x1362, &[capacity_chains]);
+                }
                 _ = self.shutdown.cancelled() => {
                     info!("Shutdown requested");
                     if dispatch_life.is_admitted() {
@@ -9153,8 +9355,9 @@ impl S19jHybridMiner {
                                 // Chain-wide broadcast PLL on the serial
                                 // path. ack is Result<(), String>.
                                 let result = apply_am2_bm1362_chain_pll(&serial, freq_mhz)
-                                    .map(|_applied| ())
+                                    .map(|applied| { capacity_chains.1 = applied; })
                                     .map_err(|e| e.to_string());
+                                if result.is_err() { capacity_chains.1 = 0; }
                                 if let Some(tx) = ack_tx {
                                     let _ = tx.send(result);
                                 }
@@ -9166,7 +9369,9 @@ impl S19jHybridMiner {
                                 // broadcast PLL. ack is Result<u16,
                                 // String> (the applied freq).
                                 let result = apply_am2_bm1362_chain_pll(&serial, freq_mhz)
+                                    .inspect(|applied| { capacity_chains.1 = *applied; })
                                     .map_err(|e| e.to_string());
+                                if result.is_err() { capacity_chains.1 = 0; }
                                 if let Some(tx) = ack_tx {
                                     let _ = tx.send(result);
                                 }
@@ -9346,6 +9551,7 @@ impl S19jHybridMiner {
                                 ntime: work.ntime,
                                 nbits: work.nbits,
                                 version: work.version,
+                                pool_version_mask: job.version_mask,
                                 share_target: work.share_target,
                                 prev_block_hash: work.prev_block_hash,
                                 merkle_root: work.merkle_root,
@@ -9539,11 +9745,7 @@ impl S19jHybridMiner {
                                 extranonce2: entry.extranonce2.clone(),
                                 ntime: format!("{:08x}", entry.ntime),
                                 nonce: format!("{:08x}", nr.nonce),
-                                version_bits: if vbits_delta != 0 {
-                                    Some(format!("{:08x}", vbits_delta))
-                                } else {
-                                    None
-                                },
+                                version_bits: dcentrald_stratum::work::bip310_version_bits(rolled_version, entry.pool_version_mask),
                                 version: rolled_version,
                                 achieved_difficulty,
                             };
@@ -9622,6 +9824,7 @@ impl S19jHybridMiner {
                                     ) {
                                         match apply_am2_bm1362_chain_pll(&serial, target) {
                                             Ok(applied) => {
+                                                capacity_chains.1 = applied;
                                                 AM2_RE018_APPLIED_FREQ_MHZ
                                                     .store(applied, Ordering::Relaxed);
                                                 warn!(
@@ -9632,10 +9835,13 @@ impl S19jHybridMiner {
                                                     "AM2 graded thermal throttle: reduced chain frequency (cut-hash-before-noise; fans NOT raised)"
                                                 );
                                             }
-                                            Err(e) => warn!(
+                                            Err(e) => {
+                                                capacity_chains.1 = 0;
+                                                warn!(
                                                 error = %e,
                                                 "AM2 graded thermal throttle: PLL write failed"
-                                            ),
+                                            );
+                                            },
                                         }
                                     }
                                 }
@@ -9905,6 +10111,8 @@ impl S19jHybridMiner {
         profile_max_pwm: u8,
         pic_heartbeat_terminal_failed: Arc<AtomicBool>,
         watchdog_feed_stop: &WatchdogFeedStopSignal,
+        capacity_publisher: &crate::active_capacity::CapacityPublisher,
+        mut capacity_chains: [(u32, u16); 2],
     ) -> Result<()> {
         info!(
             chip_count,
@@ -9975,6 +10183,8 @@ impl S19jHybridMiner {
             thermal_poll_ms.max(AM2_THERMAL_MIN_POLL_MS),
         ));
 
+        let mut capacity_timer = tokio::time::interval(Duration::from_secs(1));
+
         'mining: loop {
             if pic_heartbeat_terminal_failed.load(Ordering::SeqCst) && dispatch_life.is_admitted() {
                 let action = hybrid_revoke_and_stop_watchdog_feed(
@@ -9992,6 +10202,9 @@ impl S19jHybridMiner {
             }
 
             tokio::select! {
+                _ = capacity_timer.tick(), if capacity_publisher.enabled() => {
+                    capacity_publisher.publish(dispatch_life.is_admitted() && !self.shutdown.is_cancelled(), 0x1362, &capacity_chains);
+                }
                 _ = self.shutdown.cancelled() => {
                     info!("Shutdown requested");
                     if dispatch_life.is_admitted() {
@@ -10138,6 +10351,8 @@ impl S19jHybridMiner {
                                     ) {
                                         let a = apply_am2_bm1362_chain_pll(&serial_a, target);
                                         let b = apply_am2_bm1362_chain_pll(&serial_b, target);
+                                        capacity_chains[0].1 = a.as_ref().copied().unwrap_or(0);
+                                        capacity_chains[1].1 = b.as_ref().copied().unwrap_or(0);
                                         match (a, b) {
                                             (Ok(applied), _) | (_, Ok(applied)) => {
                                                 AM2_RE018_APPLIED_FREQ_MHZ
@@ -10334,6 +10549,11 @@ impl S19jHybridMiner {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        let firstlight_trial = crate::firstlight_census::operation_requested();
+        let census_only = crate::firstlight_census::requested();
+        let mut firstlight_network_tasks = crate::firstlight_census::RetainedTrialTasks::default();
+        let software_closeout_run =
+            dcentrald_common::mutation_disposition::capture_software_closeout_run("am2-s19j");
         // Declare the fail-closed owner before every hardware resource created
         // below. Early returns drop later owners first and never magic-close
         // the watchdog without receipt-bearing teardown.
@@ -10347,6 +10567,18 @@ impl S19jHybridMiner {
             .safety_admission
             .take()
             .ok_or_else(|| anyhow::anyhow!("AM2 hybrid safety admission was already consumed"))?;
+        // Recheck after consuming the original owner, so any later selection
+        // contradiction retires that owner through its existing Drop path.
+        am2_boot_origin_runtime_preflight(&self.config)?;
+        if firstlight_trial {
+            anyhow::ensure!(
+                !self.config.mining.passthrough && am2_serial_work_dispatch_enabled()
+                    && !am2_dual_chain_ttys3_enabled()
+                    && !am2_diag_stop_after_bm1362_enum_enabled()
+                    && !am2_frequency_autotune_opted_in(&self.config),
+                "firstlight requires the admitted primary-chain native BM1362 owner; alternate lab routes remain unavailable"
+            );
+        }
         info!("=== S19J PRO HYBRID MINING (Serial init + FPGA work, APW121215a PSU) ===");
 
         if self.shutdown.is_cancelled() {
@@ -10439,7 +10671,7 @@ impl S19jHybridMiner {
         // work-dispatch lifecycle (Phase 10). Passthrough never starts the HB
         // thread; the flag stays false.
         let pic_heartbeat_terminal_failed = Arc::new(AtomicBool::new(false));
-        let mut chain_uart_device = std::env::var("DCENT_AM2_CHAIN_UART_OVERRIDE")
+        let mut chain_uart_device = dcentrald_common::lab_env::var("DCENT_AM2_CHAIN_UART_OVERRIDE")
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| serial_device.clone());
@@ -10462,7 +10694,7 @@ impl S19jHybridMiner {
         // kernel of_serial can claim /dev/ttyS1 (selection=kernel-open). No-op
         // unless DCENT_AM2_KERNEL_UART_UNBIND_WORKTX=1 + .25 fingerprint +
         // SERIAL_WORK_DISPATCH all hold -> fleet/handoff byte-identical.
-        am2_free_chain1_work_tx_irq_for_kernel_uart();
+        let uart_preference = am2_free_chain1_work_tx_irq_for_kernel_uart();
 
         let am2_controller_plan = if passthrough {
             None
@@ -11736,7 +11968,7 @@ impl S19jHybridMiner {
 
         if passthrough {
             info!("PASSTHROUGH: skipping Phase 1-7 (bosminer owns PIC+chain init)");
-            match SerialChainBackend::open_passthrough(0, &serial_device) {
+            match SerialChainBackend::open_passthrough_with_preference(0, &serial_device, uart_preference) {
                 Ok(mut s) => {
                     s.set_response_len(BM1362_RESP_BODY_LEN);
                     post_init_serial = Some(s);
@@ -12741,7 +12973,7 @@ impl S19jHybridMiner {
             // preserves PWR_CONTROL HIGH (gpio:907) across the pulse via
             // RMW so the PSU stays armed.
             //
-            // (DCENT_RE / Codex 2026-04-25 Ã¢â‚¬â€ confirmed via bosminer wire
+            // (DCENT_RE review 2026-04-25 Ã¢â‚¬â€ confirmed via bosminer wire
             // trace `12-bosminer-startup-timeline.md:80,85,94,95`.)
             // Pulse ALL 4 HB resets Ã¢â‚¬â€ the configured `relay_phys_idx` is the
             // FPGA chain index (chain1=2, chain4=3), but the BoardControl
@@ -14670,10 +14902,11 @@ impl S19jHybridMiner {
             // line ~1547); double-write is harmless (chip has same value
             // already). We send here as well so the chain UART RX gate has a
             // chance to see chip output before init_asic_chain runs.
-            match dcentrald_hal::serial_chain::SerialChainBackend::open(
+            match SerialChainBackend::open_with_preference(
                 fpga_chain_id,
                 &chain_uart_device,
                 115_200,
+                uart_preference,
             ) {
                 Ok(serial_pre) => {
                     let relay_result =
@@ -14756,7 +14989,7 @@ impl S19jHybridMiner {
                             "DCENT_AM2_UART_FALLBACK_SCAN=1; scanning all AM2 UART candidates before power teardown"
                         );
                         if let Some((fallback_device, chip_like_count)) =
-                            Self::probe_uart_for_chips(&chain_uart_device)
+                            Self::probe_uart_for_chips(&chain_uart_device, uart_preference)
                         {
                             warn!(
                                 selected_pic_serial_device = %serial_device,
@@ -14895,7 +15128,7 @@ impl S19jHybridMiner {
             // FIFO is bypassed anyway.
             if am2_env_flag("DCENT_AM2_FPGA_CTRL_PREINIT")
                 && am2_xil_25_fingerprint_matches()
-                && !am2_prefer_kernel_uart()
+                && uart_preference != SerialBackendPreference::PreferKernel
             {
                 let fpga_pre = if fpga_chain_id == 1 && std::path::Path::new("/dev/uio0").exists() {
                     FpgaChain::open_am2(fpga_chain_id, 0).map(Am2FpgaChain::Uio)
@@ -14987,7 +15220,14 @@ impl S19jHybridMiner {
                         "shutdown requested before BM1362 init attempt {hb_attempt}"
                     ))
                 } else {
-                    Self::init_asic_chain(&chain_uart_device, chip_count, target_freq, pll_ramp)
+                    Self::init_asic_chain(
+                        &chain_uart_device,
+                        uart_preference,
+                        chip_count,
+                        target_freq,
+                        pll_ramp,
+                        &self.shutdown,
+                    )
                 };
                 match init_result {
                     Ok((serial, unique_count)) => {
@@ -15067,7 +15307,7 @@ impl S19jHybridMiner {
                             );
                         }
                         if am2_env_flag("DCENT_AM2_UART_FALLBACK_SCAN") {
-                            match Self::probe_uart_for_chips(&chain_uart_device) {
+                            match Self::probe_uart_for_chips(&chain_uart_device, uart_preference) {
                                 Some((path, count)) => info!(
                                     fallback_path = %path,
                                     unique_chip_replies = count,
@@ -15427,11 +15667,11 @@ impl S19jHybridMiner {
             // 126/126 enum. In SERIAL_WORK_DISPATCH the FPGA work-tx FIFO is bypassed
             // (work goes over ttyS1), so the FPGA object is only needed for the
             // chain-common CTRL/BAUD, which the `/dev/mem` path provides without the
-            // unbound UIO. Guard with `!am2_prefer_kernel_uart()` (the SAME guard the
+            // unbound UIO. Guard with `uart_preference != SerialBackendPreference::PreferKernel` (the SAME guard the
             // Fix-C pre-init UIO open already uses) so the kernel-UART path falls to
             // the devmem branch below. Fleet/.109 (DevmemUart, UIO stays bound) never
             // set DCENT_PREFER_KERNEL_UART -> byte-identical UIO path, no regression.
-            1 if std::path::Path::new("/dev/uio0").exists() && !am2_prefer_kernel_uart() => {
+            1 if std::path::Path::new("/dev/uio0").exists() && uart_preference != SerialBackendPreference::PreferKernel => {
                 info!(
                     "Phase 8: Opening FPGA chain {} via UIO base {} (am2 layout)",
                     fpga_chain_id, 0
@@ -15441,7 +15681,7 @@ impl S19jHybridMiner {
                         .context("Failed to open am2 chain1 via UIO")?,
                 )
             }
-            4 if std::path::Path::new("/dev/uio12").exists() && !am2_prefer_kernel_uart() => {
+            4 if std::path::Path::new("/dev/uio12").exists() && uart_preference != SerialBackendPreference::PreferKernel => {
                 info!(
                     "Phase 8: Opening FPGA chain {} via UIO base {} (am2 layout)",
                     fpga_chain_id, 12
@@ -15698,17 +15938,40 @@ impl S19jHybridMiner {
         // P2-9: prefer live unique enum; fall back to configured chip_count.
         let hybrid_enum_chips =
             live_enumerated_chips.or_else(|| (chip_count > 0).then_some(u32::from(chip_count)));
-        let stratum_config = crate::config::build_stratum_config_with_enumerated_chips(
-            &self.config,
-            crate::config::stratum_donation_config(&self.config.donation),
-            serial_work_dispatch && self.config.mining.version_rolling,
-            false,
-            hybrid_enum_chips,
+        let (capacity_publisher, capacity_rx) = crate::active_capacity::CapacityPublisher::new(
+            self.config.pool.v1_policy.dynamic_difficulty,
         );
-        let stratum_router = dcentrald_stratum::StratumRouter::new(stratum_config);
-        tokio::spawn(async move {
-            stratum_router.run(job_tx, share_rx, status_tx).await;
-        });
+        let primary_capacity = (
+            live_enumerated_chips.unwrap_or(0),
+            AM2_HINT_APPLIED_FREQ_MHZ.load(Ordering::Acquire),
+        );
+        if !census_only {
+            let stratum_config = crate::config::build_stratum_config_with_enumerated_chips(
+                &self.config,
+                crate::config::stratum_donation_config(&self.config.donation),
+                serial_work_dispatch && self.config.mining.version_rolling,
+                false,
+                hybrid_enum_chips,
+            );
+            let mut stratum_router = dcentrald_stratum::StratumRouter::new(stratum_config);
+            if let Some(rx) = capacity_rx {
+                stratum_router = stratum_router.with_capacity_rx(rx);
+            }
+            let stratum_shutdown = self.shutdown.clone();
+            let task = tokio::spawn(async move {
+                if firstlight_trial {
+                    tokio::select! {
+                        _ = stratum_shutdown.cancelled() => {},
+                        _ = stratum_router.run(job_tx, share_rx, status_tx) => {},
+                    }
+                } else {
+                    stratum_router.run(job_tx, share_rx, status_tx).await;
+                }
+            });
+            if firstlight_trial {
+                firstlight_network_tasks.retain(task);
+            }
+        }
 
         // AT-DASH (2026-06-14): shared pool-share accounting. The status-logger
         // task below is the SOLE writer (accepted/rejected counts + achieved
@@ -15724,7 +15987,8 @@ impl S19jHybridMiner {
         let ss = self.shutdown.clone();
         let status_accounting = share_accounting.clone();
         let status_pool_quality = pool_quality.clone();
-        tokio::spawn(async move {
+        if !census_only {
+        let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = ss.cancelled() => break,
@@ -15762,6 +16026,10 @@ impl S19jHybridMiner {
                 }
             }
         });
+        if firstlight_trial {
+            firstlight_network_tasks.retain(task);
+        }
+        }
 
         // ---- AM2 thermal supervision: pre-stratum hard proof ----
         //
@@ -15868,6 +16136,7 @@ impl S19jHybridMiner {
             1,
         );
         let dispatch_inputs = hybrid_work_dispatch_inputs(wd_state, hb_req, &hb_obs, thermal_state);
+        if !census_only {
         match hybrid_admit_standard_work_dispatch(&mut dispatch_life, &dispatch_inputs) {
             Ok(receipt) => {
                 info!(
@@ -15889,12 +16158,13 @@ impl S19jHybridMiner {
                 ));
             }
         }
+        }
         // P1-5 post-admit re-authorization: when multi-PIC rail enable ran under
         // PowerUpOnly (Phase 3 precedes enter_mining + thermal proof), re-plan the
         // remaining-active PIC set with full green dispatch pillars. Fail-closed
         // if production stagger refuses; expect Composed authority now that pillars
         // exist (evaluator residual: compose where dispatch pillars exist).
-        if all_active_voltage_enable {
+        if !census_only && all_active_voltage_enable {
             let other_pics: Vec<u8> = active_dspic_addrs(active_chains)
                 .into_iter()
                 .filter(|&a| a != selected_pic_addr)
@@ -15950,6 +16220,20 @@ impl S19jHybridMiner {
 
         // ---- Route: serial-work-dispatch alternative (DCENT_AM2_SERIAL_WORK_DISPATCH=1) ----
         let mining_route_result: Result<()> = 'mining_route: {
+            if census_only {
+                // This count came from the successful fresh GetAddress return
+                // above. Never use hybrid_enum_chips' configured fallback or
+                // claim that this primary-chain owner enumerated a whole unit.
+                let report = (|| -> Result<()> {
+                    anyhow::ensure!(!self.shutdown.is_cancelled(), "firstlight census deadline/cancellation preceded observation");
+                    let chips = live_enumerated_chips.context("firstlight has no fresh BM1362 enumeration")?;
+                    let chips = u16::try_from(chips).context("firstlight census count exceeds its bound")?;
+                    let chain_id = am2_chain_id_for_pic_addr(selected_pic_addr)
+                        .context("firstlight primary chain has no exact controller identity")?;
+                    crate::firstlight_census::publish("am2-s19j", &[(chain_id, 0x1362, chips)])
+                })();
+                break 'mining_route report;
+            }
             if serial_work_dispatch {
                 let Some(serial) = post_init_serial.take() else {
                     break 'mining_route Err(anyhow::anyhow!(
@@ -15985,8 +16269,14 @@ impl S19jHybridMiner {
                             pic_addr_b = ?pic_addr_b.map(|a| format!("0x{:02X}", a)),
                             "DCENT_AM2_DUAL_CHAIN_TTYS3=1 Ã¢â‚¬â€ attempting second BM1362 chain bring-up (RE-ASK-XIL-6: order/timing pending operator live-validation)"
                         );
-                        match Self::init_asic_chain(&second_uart, chip_count, target_freq, pll_ramp)
-                        {
+                        match Self::init_asic_chain(
+                            &second_uart,
+                            uart_preference,
+                            chip_count,
+                            target_freq,
+                            pll_ramp,
+                            &self.shutdown,
+                        ) {
                             Ok((serial_b, unique_b)) => {
                                 info!(
                                     second_uart = %second_uart,
@@ -16022,6 +16312,14 @@ impl S19jHybridMiner {
                                         home_profile_pwm,
                                         pic_heartbeat_terminal_failed.clone(),
                                         &watchdog_feed_stop,
+                                        &capacity_publisher,
+                                        [
+                                            primary_capacity,
+                                            (
+                                                unique_b as u32,
+                                                AM2_HINT_APPLIED_FREQ_MHZ.load(Ordering::Acquire),
+                                            ),
+                                        ],
                                     )
                                     .await;
                                 break 'mining_route dispatch_result;
@@ -16070,6 +16368,8 @@ impl S19jHybridMiner {
                         home_profile_pwm,
                         pic_heartbeat_terminal_failed.clone(),
                         &watchdog_feed_stop,
+                        &capacity_publisher,
+                        primary_capacity,
                     )
                     .await;
                 break 'mining_route dispatch_result;
@@ -16138,6 +16438,7 @@ impl S19jHybridMiner {
                 thermal_poll_ms.max(AM2_THERMAL_MIN_POLL_MS),
             ));
 
+            let mut capacity_timer = tokio::time::interval(Duration::from_secs(1));
             loop {
                 if pic_heartbeat_terminal_failed.load(Ordering::SeqCst)
                     && dispatch_life.is_admitted()
@@ -16157,6 +16458,9 @@ impl S19jHybridMiner {
                 }
 
                 tokio::select! {
+                    _ = capacity_timer.tick(), if capacity_publisher.enabled() => {
+                        capacity_publisher.publish(dispatch_life.is_admitted() && !self.shutdown.is_cancelled(), 0x1362, &[primary_capacity]);
+                    }
                     _ = self.shutdown.cancelled() => {
                         info!("Shutdown requested");
                         if dispatch_life.is_admitted() {
@@ -16357,6 +16661,7 @@ impl S19jHybridMiner {
                                     ntime: work.ntime,
                                     nbits: work.nbits,
                                     version: work.version,
+                                    pool_version_mask: job.version_mask,
                                     share_target: work.share_target,
                                     prev_block_hash: work.prev_block_hash,
                                     merkle_root: work.merkle_root,
@@ -16485,7 +16790,7 @@ impl S19jHybridMiner {
                                 continue;
                             }
 
-                            if let Some((entry, rolled_version, share_version_bits)) =
+                            if let Some((entry, rolled_version, _share_version_bits)) =
                                 bookkeeping.history.iter_newest_first(work_id).find_map(|candidate| {
                                 let ms_idx = (solution_id as usize)
                                     .min(candidate.version_bits_per_midstate.len().saturating_sub(1));
@@ -16506,7 +16811,6 @@ impl S19jHybridMiner {
                                 }
                             }) {
                                 shares_submitted += 1;
-                                let vdelta = rolled_version ^ entry.version;
                                 let share = dcentrald_stratum::types::ValidShare {
                                     work_generation: entry.work_generation,
                                     worker_name: self.config.pool.worker.clone(),
@@ -16514,13 +16818,7 @@ impl S19jHybridMiner {
                                     extranonce2: entry.extranonce2.clone(),
                                     ntime: format!("{:08x}", entry.ntime),
                                     nonce: format!("{:08x}", nonce),
-                                    version_bits: share_version_bits.or_else(|| {
-                                        if vdelta != 0 {
-                                            Some(format!("{:08x}", vdelta))
-                                        } else {
-                                            None
-                                        }
-                                    }),
+                                    version_bits: dcentrald_stratum::work::bip310_version_bits(rolled_version, entry.pool_version_mask),
                                     version: rolled_version,
                                     achieved_difficulty: None,
                                 };
@@ -16627,6 +16925,9 @@ impl S19jHybridMiner {
         // fails, the armed watchdog becomes the independent backstop after any
         // already in-flight heartbeat transfer drains.
         // ================================================================
+        if firstlight_trial {
+            self.shutdown.cancel();
+        }
         let revoked_api_commit_fence = hardware_mutation_owner.revoke_commit_fence();
         info!("=== SHUTDOWN: graceful PSU teardown ===");
         let teardown_request = watchdog
@@ -16663,6 +16964,29 @@ impl S19jHybridMiner {
                 "s19j-hybrid: early checked PWR_CONTROL cutoff lacked positive evidence; all later safe-off work continues with watchdog Disarm forbidden"
             );
         }
+        let firstlight_reporting_result = if crate::firstlight_census::work_requested() && early_power_cut_result.is_ok() {
+            // Read actual SoC temperature and commanded fan PWM. The ordinary
+            // API's configured fan floor is display-only and is not evidence.
+            // Retain reporting errors until after every checked shutdown leg.
+            (|| -> Result<()> {
+                let temperature = Xadc::read_temp().context("firstlight final XADC observation unavailable")?;
+                anyhow::ensure!(temperature.is_finite() && temperature > 0.0 && temperature < 125.0,
+                    "firstlight final XADC observation is invalid");
+                let (_, pwm) = am2_read_fan_rpm_and_pwm().context("firstlight final fan readback unavailable")?;
+                crate::firstlight_census::publish_work("am2-s19j",
+                    share_accounting.accepted(), share_accounting.rejected(),
+                    share_accounting.hashrate_ghs_since(cold_boot_start),
+                    cold_boot_start.elapsed().as_secs(), &[temperature], pwm)
+            })()
+        } else if crate::firstlight_census::work_requested() {
+            Err(anyhow::anyhow!("firstlight reporting requires the completed early power cutoff"))
+        } else {
+            Ok(())
+        };
+        let firstlight_tasks_result = firstlight_network_tasks.retire(
+            teardown_view.remaining_capped_at(TeardownStage::CleanupComplete,
+                Duration::from_secs(2), Instant::now()).unwrap_or(Duration::ZERO),
+        ).await;
         let watchdog_teardown_admission_result = watchdog
             .observe_teardown_admission(watchdog_teardown_admission, &teardown_view)
             .await;
@@ -17069,9 +17393,12 @@ impl S19jHybridMiner {
         } else {
             finalize_am2_dispatch_shutdown(mining_route_result, shutdown_evidence).err()
         };
+        let terminal_error = terminal_error
+            .or_else(|| firstlight_reporting_result.err())
+            .or_else(|| firstlight_tasks_result.err());
         match terminal_error {
             Some(error) => Err(terminal_safe_off_error(error, closeout)),
-            None => Ok(()),
+            None => crate::daemon::publish_orderly_software_closeout(software_closeout_run, &closeout),
         }
     }
 }
@@ -18174,6 +18501,7 @@ worker = "test"
             ntime: 0x6655_4433,
             nbits: 0x1d00_ffff,
             version: base_version,
+            pool_version_mask: 0x1fff_e000,
             share_target: [0xff; 32],
             prev_block_hash: [0x11; 32],
             merkle_root: [0x22; 32],
@@ -18291,6 +18619,7 @@ worker = "test"
                 ntime: 0x6655_4433,
                 nbits: 0x1d00_ffff,
                 version: 0x2000_0000,
+                pool_version_mask: 0x1fff_e000,
                 share_target: [0xff; 32], // permissive: any header validates
                 prev_block_hash: [0x11; 32],
                 merkle_root: [0x22; 32],
@@ -18315,10 +18644,7 @@ worker = "test"
         // Explicit truthy turns it on; falsey/garbage keep it off.
         for on in ["1", "true", "yes", "on", "ON"] {
             std::env::set_var(ENV, on);
-            assert!(
-                am2_dual_chain_ttys3_enabled(),
-                "'{on}' must enable dual-chain"
-            );
+            assert_eq!(am2_dual_chain_ttys3_enabled(), dcentrald_common::lab_env::compiled(), "{on}");
         }
         for off in ["0", "false", "no", "off", "", "maybe"] {
             std::env::set_var(ENV, off);
@@ -18346,8 +18672,8 @@ worker = "test"
         std::env::set_var(ENV, "/dev/ttyS4");
         assert_eq!(
             am2_dual_chain_second_uart(),
-            "/dev/ttyS4",
-            "operator override must select the configured second UART"
+            if dcentrald_common::lab_env::compiled() { "/dev/ttyS4" } else { AM2_DUAL_CHAIN_SECOND_UART_DEFAULT },
+            "only compiled lab builds honor the second UART override"
         );
         // Empty override falls back to the default (defense in depth).
         std::env::set_var(ENV, "");
@@ -18480,6 +18806,19 @@ worker = "test"
         // above) must match the canonical helper.
         let (expected_rolled, _) = am2_hybrid_reconstruct_rolled_version(0x2000_0000, vbits_raw);
         assert_eq!(shares[0].share.version, expected_rolled);
+
+        // Drive the actual RX/share path with a nonzero masked pool base.
+        let slot = am2_serial_echoed_job_id(sent);
+        let mut masked_base_entry = chain.bookkeeping.history.latest(slot).unwrap().clone();
+        masked_base_entry.version = 0x2000_6000;
+        chain.bookkeeping.history.push(slot, masked_base_entry);
+        let frame = make_dual_chain_nonce_frame(sent, 0x0000_0043, 0);
+        let shares = chain.ingest_rx(&frame, "w", &mut errors);
+        assert_eq!(shares.len(), 1);
+        let submitted =
+            u32::from_str_radix(shares[0].share.version_bits.as_deref().unwrap(), 16).unwrap();
+        let pool_reconstructed = (0x2000_6000 & !0x1fff_e000) | (submitted & 0x1fff_e000);
+        assert_eq!(pool_reconstructed, shares[0].share.version);
     }
 
     /// W24-CRASH-1 (w24-thermal-safety F-1): the process-global panic-hook
@@ -18558,6 +18897,7 @@ fan_max_pwm = 28
     #[test]
     fn am2_fastuart_settle_ms_default_override_and_clamp() {
         const ENV: &str = "DCENT_AM2_FASTUART_SETTLE_MS";
+        let expected = |value| if dcentrald_common::lab_env::compiled() { value } else { AM2_FASTUART_SETTLE_MS_DEFAULT };
 
         // Pin the canonical hardcoded default so a future edit to the live
         // sleep value cannot silently diverge from the env default.
@@ -18578,25 +18918,25 @@ fan_max_pwm = 28
 
         // 2. Valid in-range override is parsed + applied verbatim.
         std::env::set_var(ENV, "750");
-        assert_eq!(am2_fast_uart_settle_ms(), 750);
+        assert_eq!(am2_fast_uart_settle_ms(), expected(750));
         std::env::set_var(ENV, "100");
-        assert_eq!(am2_fast_uart_settle_ms(), AM2_FASTUART_SETTLE_MS_MIN);
+        assert_eq!(am2_fast_uart_settle_ms(), expected(AM2_FASTUART_SETTLE_MS_MIN));
         std::env::set_var(ENV, "3000");
-        assert_eq!(am2_fast_uart_settle_ms(), AM2_FASTUART_SETTLE_MS_MAX);
+        assert_eq!(am2_fast_uart_settle_ms(), expected(AM2_FASTUART_SETTLE_MS_MAX));
 
         // 3. Out-of-range clamps to the bounds.
         std::env::set_var(ENV, "0");
         assert_eq!(
             am2_fast_uart_settle_ms(),
-            AM2_FASTUART_SETTLE_MS_MIN,
+            expected(AM2_FASTUART_SETTLE_MS_MIN),
             "below-floor MUST clamp UP to MIN"
         );
         std::env::set_var(ENV, "50");
-        assert_eq!(am2_fast_uart_settle_ms(), AM2_FASTUART_SETTLE_MS_MIN);
+        assert_eq!(am2_fast_uart_settle_ms(), expected(AM2_FASTUART_SETTLE_MS_MIN));
         std::env::set_var(ENV, "999999");
         assert_eq!(
             am2_fast_uart_settle_ms(),
-            AM2_FASTUART_SETTLE_MS_MAX,
+            expected(AM2_FASTUART_SETTLE_MS_MAX),
             "above-ceiling MUST clamp DOWN to MAX"
         );
 
@@ -18619,7 +18959,7 @@ fan_max_pwm = 28
 
         for off in ["0", "false", "FALSE", "no", "NO", "off", "OFF"] {
             std::env::set_var(ENV, off);
-            assert!(am2_env_flag_off(ENV), "'{off}' must parse as explicit OFF");
+            assert_eq!(am2_env_flag_off(ENV), dcentrald_common::lab_env::compiled(), "{off}");
         }
         for on in ["1", "true", "yes", "on", "", "maybe", "2"] {
             std::env::set_var(ENV, on);
@@ -18658,10 +18998,7 @@ fan_max_pwm = 28
         // Explicit falsey opts OUT (restores the legacy minimal teardown).
         for off in ["0", "false", "off", "no"] {
             std::env::set_var(ENV, off);
-            assert!(
-                !am2_safe_teardown_enabled(),
-                "'{off}' must opt OUT of SAFE-TEARDOWN"
-            );
+            assert_eq!(am2_safe_teardown_enabled(), !dcentrald_common::lab_env::compiled(), "{off}");
         }
 
         std::env::remove_var(ENV);
@@ -18912,11 +19249,7 @@ fan_max_pwm = 28
              to today's 5Ãƒâ€”1Hz heartbeat path for .109/.79/.139)"
         );
         std::env::set_var("DCENT_AM2_DSPIC_BOSMINER_FAITHFUL", "1");
-        assert!(
-            super::am2_dspic_bosminer_faithful_enabled(),
-            "operator opt-in via '1' must enable Wave-42 (skip 5Ãƒâ€”1Hz heartbeats; \
-             emit single 500-ms settle instead Ã¢â‚¬â€ matches bosminer i2c-0 strace)"
-        );
+        assert_eq!(super::am2_dspic_bosminer_faithful_enabled(), dcentrald_common::lab_env::compiled());
         std::env::remove_var("DCENT_AM2_DSPIC_BOSMINER_FAITHFUL");
     }
 
@@ -19489,10 +19822,10 @@ fan_max_pwm = 28
 
         // Explicit env override wins (still generous in practice; the operator owns it).
         std::env::set_var(ENV_AM2_MID_RUN_NONCE_STALL_TIMEOUT_S, "600");
-        assert_eq!(am2_mid_run_nonce_stall_timeout(90), Some(dur(600)));
+        assert_eq!(am2_mid_run_nonce_stall_timeout(90), Some(dur(if dcentrald_common::lab_env::compiled() { 600 } else { 300 })));
         // Override of 0 disables even when the base would arm.
         std::env::set_var(ENV_AM2_MID_RUN_NONCE_STALL_TIMEOUT_S, "0");
-        assert_eq!(am2_mid_run_nonce_stall_timeout(90), None);
+        assert_eq!(am2_mid_run_nonce_stall_timeout(90), if dcentrald_common::lab_env::compiled() { None } else { Some(dur(300)) });
 
         std::env::remove_var(ENV_AM2_MID_RUN_NONCE_STALL_TIMEOUT_S);
     }

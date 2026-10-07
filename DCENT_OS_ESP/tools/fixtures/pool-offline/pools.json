@@ -1,0 +1,359 @@
+[
+ {
+  "actual_pct": 100,
+  "authorized": false,
+  "connected": false,
+  "difficulty": 2986,
+  "dispatched": 44144,
+  "failover_active": false,
+  "index": 0,
+  "last_primary_failback_unix_ms": 0,
+  "last_primary_reprobe_unix_ms": 0,
+  "last_reject_reason": "",
+  "last_share_accepted_unix_ms": 1788419280232,
+  "last_share_rejected_unix_ms": 1788418989721,
+  "last_share_response_unix_ms": 1788420173775,
+  "last_share_submit_unix_ms": 1788420173621,
+  "oldest_pending_submit_age_ms": 186000,
+  "primary_failback_detail": "",
+  "primary_failback_state": "idle",
+  "recent_events": [
+   {
+    "detail": "job=6a72bdc0000157bd diff=6049.9",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420084800
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=6049.9",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420084994
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=7234.0",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420086299
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=7234.0",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420086431
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=7409.9",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420089656
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=7409.9",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420089810
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=16936.9",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420090114
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=16936.9",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420090216
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=16954.3",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420091382
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=16954.3",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420091547
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=51429.0",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420095255
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=51429.0",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420095453
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=9795.1",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420099681
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=9795.1",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420099841
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=3977.2",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420107548
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=3977.2",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420107729
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=8078.1",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420108734
+   },
+   {
+    "detail": "job=6a72bdc0000157bd diff=8078.1",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420108853
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=3995.4",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420113017
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=3798.4",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420113102
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=3995.4",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420113134
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=3798.4",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420113212
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=65502.7",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420115436
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=65502.7",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420115611
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=11052.6",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420117936
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=11052.6",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420118069
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=11374.5",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420121955
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=11374.5",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420122073
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=15171.8",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420123699
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=15171.8",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420123806
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=3377.0",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420127273
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=3377.0",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420127395
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=3692.2",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420136081
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=3692.2",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420136196
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=3406.1",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420136781
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=3406.1",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420136912
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=3056.8",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420138257
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=3056.8",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420138447
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=5382.9",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420139151
+   },
+   {
+    "detail": "job=6a72bdc0000157be diff=5382.9",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420139268
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=7952.9",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420141843
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=7952.9",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420142031
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=27004.8",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420153240
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=27004.8",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420153326
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=3429.6",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420153990
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=3429.6",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420154115
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=9739.6",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420156019
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=4617.1",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420156063
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=9739.6",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420156105
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=4617.1",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420156153
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=4782.7",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420159397
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=4782.7",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420159485
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=622650.5",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420161940
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=622650.5",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420162047
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=5568.7",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420162112
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=5568.7",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420162312
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=7446.9",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420163236
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=7446.9",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420163438
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=4467.4",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420164571
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=4467.4",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420164767
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=3584.8",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420166032
+   },
+   {
+    "detail": "job=6a72bdc0000157bf diff=3584.8",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420166197
+   },
+   {
+    "detail": "job=6a72bdc0000157c0 diff=10399.9",
+    "kind": "share_submitted",
+    "tsUnixMs": 1788420173621
+   },
+   {
+    "detail": "job=6a72bdc0000157c0 diff=10399.9",
+    "kind": "share_accepted",
+    "tsUnixMs": 1788420173775
+   }
+  ],
+  "reject_reason_counts": [
+   {
+    "count": 1,
+    "key": "Stale",
+    "lastSeenUnixMs": 1788418989721
+   }
+  ],
+  "response_time_ms": 155.977,
+  "shares_accepted": 869,
+  "shares_pending": 0,
+  "shares_rejected": 1,
+  "shares_submitted": 870,
+  "shares_unresolved": 0,
+  "target_pct": 100,
+  "url": "solo.ckpool.org:3333",
+  "worker": "bc1pMOCK…MOCK"
+ }
+]

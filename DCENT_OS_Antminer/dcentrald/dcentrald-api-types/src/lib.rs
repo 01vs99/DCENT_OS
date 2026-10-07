@@ -24,6 +24,8 @@ pub mod autotune_phase;
 pub mod autotune_policy;
 ///  baud-A: per-chip baud-upgrade plan + triple-write rule (HAL-free).
 pub mod baud_switch;
+/// Complete, checked Classic BB factory data; no acquisition or actuator authority.
+pub mod bb_factory_profile;
 /// BHB56902 (BM1366 / S19k Pro) hashboard-EEPROM block â€” the BHB56xxx sibling of
 /// `zhiju_eeprom`, byte-exact from the AMTC S19k Pro jig. Same CRC5 + identity layout,
 /// 6-byte-longer block. Unblocks native-BM1366 identity-gated admission.

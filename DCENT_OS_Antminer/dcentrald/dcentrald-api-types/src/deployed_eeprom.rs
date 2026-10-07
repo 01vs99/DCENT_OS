@@ -57,6 +57,17 @@
 //! Cipher/key material is public: `skot/amlogic-cb-tools` (MIT) — the same source
 //! the shipped GPL toolbox already ships.
 //!
+//! ## G3 live datum (2026-09-02)
+//!
+//! The first live page whose header falls OUTSIDE the `0x04`/`0x05` rows above:
+//! the bench-captured S19 Pro (NBP1901, BM1398) pages carry header `0x11`/`0x42`
+//! and decode as **zhiju single blocks** (window `[2..0x42)`, see
+//! [`crate::zhiju_eeprom`]) under the BM1398-generation factory slot-1 key —
+//! NOT under any `KEY_LARGE` slot. The full version→key evidence table (both
+//! desk-derived rows and the LIVE-PROVEN row, with caveats) lives at
+//! [`LIVE_PROVEN_BM1398_GENERATION_SLOT1_KEY`]. Decode dispatch in this module
+//! is unchanged by that row.
+//!
 //! # Status & scope
 //!
 //! **Experimental — decode only.** Pure data: no HAL, no I/O, no write path, and no
@@ -94,6 +105,52 @@ pub const KEY_LARGE: [[u8; 16]; 4] = [
     *b"uohzoahzuhidkgna",
     *b"uileynimdpfnangr",
 ];
+
+// --- G3 header version→key evidence rows (2026-09-02) -----------------------
+//
+// Which factory XXTEA key real pages of each header shape have been PROVEN to
+// decode under. EVIDENCE RECORD ONLY: `decode_deployed_eeprom` does not read
+// this table and its dispatch is unchanged — decode stays keyed by explicit
+// key selection (this module routes the header byte-1 nibble into `KEY_LARGE`;
+// the zhiju path takes an explicit caller-supplied key). A 2-byte header is
+// not authenticated, so a header value can RECORD the key real pages decoded
+// under without becoming a trusted selector.
+//
+// | byte 0 | byte 1 | page shape | key the real pages decode under | provenance |
+// |---|---|---|---|---|
+// | `0x04` | `0x11` | deployed 3-region (BHB42xxx, BM1362) | `KEY_LARGE[1]` (`7451ed7c…`) | DESK-DERIVED: 22 held deployed pages; CRC5 known-answer 5/5 real pages |
+// | `0x05` | `0x11` | deployed 3-region (BHB56xxx/BHB68xxx, BM1366/BM1368) | `KEY_LARGE[1]` | DESK-DERIVED: same corpus; refutes the old "BHB56 = AES" reading |
+// | `0x11` | `0x42` | zhiju single block, XXTEA window `[2..0x42)` (BM1398-generation NBP1901) | [`LIVE_PROVEN_BM1398_GENERATION_SLOT1_KEY`] = `uileynimggnagnau` (AMTC jig table slot 1) | **LIVE-PROVEN** bench-20260902-nbp1901 (`.77`, BraiinsOS): 3 EEPROMs / 2 distinct pages, serials byte-exact vs the independent Braiins boot-table oracle, both decoded blocks' CRC5 recompute Match |
+//
+// Caveats on the live `0x11` row: n=1 unit; boards 1/2 carried byte-identical
+// pages (one factory serial on two physical boards), so the sample is 2
+// distinct pages, not 3; one key-generation sample. The nibble reading of
+// byte 0 (`0x11` → algorithm 1 = XXTEA, key slot 1) is consistent with the
+// empirically required slot-1 key and with the jig's own byte-0 field name
+// `algorithm_and_key_version`, but the slot was arbitrated by the serial
+// oracle, not by the header value. `decode_deployed_eeprom` still refuses a
+// `0x11`-headed 256-byte page (pinned by test): the BM1398-generation page is
+// a zhiju-window page, not a 3-region deployed page.
+
+/// Two-byte header of the live-proven BM1398-generation zhiju pages
+/// (bench-20260902-nbp1901): byte 0 `algorithm_and_key_version = 0x11`, byte 1
+/// `zhiju_information_length = 0x42` (= 66 = the full zhiju block span, which
+/// is the corroborating datum for the G3 live row).
+pub const BM1398_GENERATION_LIVE_HEADER: [u8; 2] = [0x11, 0x42];
+
+/// The BM1398-generation factory slot-1 XXTEA key the live NBP1901 pages
+/// decode under: `uileynimggnagnau`, slot 1 of the AMTC S19 Pro jig table
+/// (`dcentrald-silicon-profiles::s19_family_stock::AMTC_S19PRO_JIG_XXTEA_KEY_TABLE`).
+///
+/// This crate cannot name that path (silicon-profiles depends on
+/// dcentrald-api-types, so importing back would be a dependency cycle), so the
+/// bytes are pinned here and a test in that crate cross-checks that the two
+/// copies stay equal. It is deliberately NOT a `KEY_LARGE` entry and is
+/// byte-distinct from every `KEY_LARGE` slot (pinned by test, including the
+/// near-miss `uileynimdpfnangr` at slot 3): it is evidence, not a dispatch
+/// target, and conflating it with the deployed binary key `KEY_LARGE[1]` is
+/// exactly the misreading those pins guard against.
+pub const LIVE_PROVEN_BM1398_GENERATION_SLOT1_KEY: [u8; 16] = *b"uileynimggnagnau";
 
 /// The three independently-enciphered regions of a 256-byte deployed page.
 ///
@@ -457,7 +514,7 @@ fn mix(y: u32, z: u32, sum: u32, key: &[u32; 4], p: u32, e: u32) -> u32 {
     (a.wrapping_add(b)) ^ (c.wrapping_add(d))
 }
 
-fn key_words(k: &[u8; 16]) -> [u32; 4] {
+pub(crate) fn key_words(k: &[u8; 16]) -> [u32; 4] {
     [
         u32::from_le_bytes([k[0], k[1], k[2], k[3]]),
         u32::from_le_bytes([k[4], k[5], k[6], k[7]]),
@@ -468,7 +525,7 @@ fn key_words(k: &[u8; 16]) -> [u32; 4] {
 
 /// Decrypt one region `[start, end)` of `raw` and return its plaintext bytes.
 /// The span is a whole number of words on every real page (96/16/136 bytes).
-fn decrypt_region(raw: &[u8], start: usize, end: usize, key: &[u32; 4]) -> Vec<u8> {
+pub(crate) fn decrypt_region(raw: &[u8], start: usize, end: usize, key: &[u32; 4]) -> Vec<u8> {
     let bytes = &raw[start..end];
     let mut words: Vec<u32> = bytes
         .chunks_exact(4)
@@ -807,6 +864,91 @@ mod tests {
         raw
     }
 
+    #[test]
+    fn bm1398_named_identity_uses_decoded_name_and_both_crc_regions() {
+        // Reconstructed named-format pages exercise the existing cipher and
+        // framing contract. They are not held physical NBS/NBT/S19a/S19+ captures.
+        // The deployed format's name field is nine bytes. The jig spelling
+        // NBP1901-38 cannot be represented and is never silently truncated.
+        for name in ["NBP1901", "NBS1902", "NBT1903", "BHB28611", "BHB28701"] {
+            let raw = synthetic_page_with_crc5(4, name, false);
+            let identity = crate::hashboard_eeprom::decode_bm1398_factory_page(&raw).unwrap();
+            assert_eq!(identity.board_name(), Some(name));
+            assert_eq!(identity.serial(), "SYNTH0000000000AB");
+            let chip = crate::bm1398_get_address::parse_bm1398_get_address_body(&[
+                0x13, 0x98, 0x18, 0, 0, 0, 4,
+            ])
+            .unwrap();
+            assert_eq!(
+                crate::hashboard_eeprom::observed_protocol_from_bm1398_factory_page(
+                    &raw,
+                    name,
+                    Some(chip),
+                ),
+                Some(dcentrald_common::AsicProtocolIdentity::Bm1398)
+            );
+            for sibling in crate::hashboard_eeprom::BM1398_NATIVE_STOCK_BOARD_NAMES {
+                if sibling != name {
+                    assert_eq!(
+                        crate::hashboard_eeprom::observed_protocol_from_bm1398_factory_page(
+                            &raw,
+                            sibling,
+                            Some(chip),
+                        ),
+                        None
+                    );
+                }
+            }
+            assert!(crate::hashboard_eeprom::decode_bm1398_factory_page(
+                &synthetic_page_with_crc5(4, name, true),
+            )
+            .is_err());
+            // Corrupt each stored CRC independently while preserving every
+            // covered data byte. Random cipher mutations can collide under a
+            // five-bit checksum and do not prove an integrity guarantee.
+            let key = key_words(&KEY_LARGE[1]);
+            for ((start, end), crc_offset) in [
+                (REGION_1, REGION_1_CRC5_PAGE_OFFSET),
+                (REGION_2, REGION_2_CRC5_PAGE_OFFSET),
+            ] {
+                let mut corrupt = raw.clone();
+                let mut plain = decrypt_region(&raw, start, end, &key);
+                plain[crc_offset - start] ^= 1;
+                encrypt_region_into(&mut corrupt, start, end, &plain, &key);
+                let decoded = decode_deployed_eeprom(&corrupt).unwrap();
+                assert_eq!(decoded.board_name, name);
+                assert_eq!(
+                    decoded.region_1_crc5 == Crc5Check::Match,
+                    start != REGION_1.0
+                );
+                assert_eq!(
+                    decoded.region_2_crc5 == Crc5Check::Match,
+                    start != REGION_2.0
+                );
+                assert!(
+                    crate::hashboard_eeprom::decode_bm1398_factory_page(&corrupt).is_err(),
+                    "{name} invalid stored CRC at {crc_offset}"
+                );
+            }
+        }
+        for name in [
+            "NBP1901-38",
+            "BHB42601",
+            "BHB56903",
+            "BHB28601",
+            "NBS1902L",
+            "NBT1903X",
+        ] {
+            assert!(
+                crate::hashboard_eeprom::decode_bm1398_factory_page(&synthetic_page_with_crc5(
+                    4, name, false
+                ),)
+                .is_err(),
+                "uncovered exact name {name}"
+            );
+        }
+    }
+
     /// Block 1's CRC covers the two PLAINTEXT header bytes, not just the cipher
     /// region — this is the whole span question, and it is the one thing a
     /// synthetic page can prove without shipping a real board's serial.
@@ -1111,6 +1253,30 @@ f825543962db6d5a5bcf22b0438c6e3bad67545b71fc57a10dc0d22dae63d298";
                 0xE4, 0xF5
             ]
         );
+    }
+
+    /// G3: the live-proven BM1398-generation key is EVIDENCE, not a `KEY_LARGE`
+    /// dispatch target. It must stay byte-distinct from every shipped slot —
+    /// especially `KEY_LARGE[1]` (the deployed binary key the live pages
+    /// demonstrably do NOT decode under) and the near-miss ASCII slot 3
+    /// (`uileynimdpfnangr`, two characters away from `uileynimggnagnau`).
+    #[test]
+    fn live_proven_bm1398_key_is_distinct_from_every_key_large_slot() {
+        assert_eq!(
+            LIVE_PROVEN_BM1398_GENERATION_SLOT1_KEY,
+            *b"uileynimggnagnau"
+        );
+        for slot in KEY_LARGE {
+            assert_ne!(
+                LIVE_PROVEN_BM1398_GENERATION_SLOT1_KEY, slot,
+                "the BM1398-generation slot-1 key must never be conflated with a KEY_LARGE entry"
+            );
+        }
+        // The live header row itself: 0x11 algorithm_and_key_version + 0x42 length.
+        assert_eq!(BM1398_GENERATION_LIVE_HEADER, [0x11, 0x42]);
+        // The structural corroboration pinned: 0x11 = XXTEA nibble | slot-1 nibble.
+        assert_eq!(BM1398_GENERATION_LIVE_HEADER[0] >> 4, 0x1);
+        assert_eq!(BM1398_GENERATION_LIVE_HEADER[0] & 0x0F, 0x1);
     }
 
     #[test]

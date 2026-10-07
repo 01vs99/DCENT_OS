@@ -1,8 +1,12 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../../api/client';
 import type { SystemUpgradeStatusResponse } from '../../api/types';
 import { InfoDot } from './Tooltip';
 import type { GlossaryKey } from '../../utils/glossary';
+import {
+  loadUpdateJob, matchingUpdateJob, updateJobCopy, UPDATE_JOB_CHANGED,
+  type TrackedUpdateJob,
+} from '../../utils/updateJob';
 
 function getUpgradeStateCopy(state?: string) {
   switch (state) {
@@ -91,23 +95,56 @@ export function UpgradeStatusPanel({ compact = false }: { compact?: boolean }) {
   const [status, setStatus] = useState<SystemUpgradeStatusResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [tracked, setTracked] = useState(loadUpdateJob);
+  const requestPending = useRef(false);
+  const mounted = useRef(false);
 
   const refresh = useCallback(async () => {
+    if (requestPending.current) return;
+    requestPending.current = true;
     setLoading(true);
-    setError('');
     try {
-      setStatus(await api.getSystemUpgradeStatus());
+      const next = await api.getSystemUpgradeStatus();
+      if (mounted.current) {
+        setStatus(next);
+        setError('');
+      }
     } catch (err) {
-      setStatus(null);
-      setError(err instanceof Error ? err.message : 'Upgrade status unavailable');
+      if (mounted.current) {
+        setError(err instanceof Error ? err.message : 'Upgrade status unavailable');
+      }
     } finally {
-      setLoading(false);
+      requestPending.current = false;
+      if (mounted.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void refresh();
+    mounted.current = true;
+    const changed = (event: Event) => {
+      setTracked((event as CustomEvent<TrackedUpdateJob>).detail);
+      setStatus(null);
+      void refresh();
+    };
+    const storageChanged = () => setTracked(loadUpdateJob());
+    window.addEventListener(UPDATE_JOB_CHANGED, changed);
+    window.addEventListener('storage', storageChanged);
+    return () => {
+      mounted.current = false;
+      window.removeEventListener(UPDATE_JOB_CHANGED, changed);
+      window.removeEventListener('storage', storageChanged);
+    };
   }, [refresh]);
+
+  const job = tracked ? matchingUpdateJob(tracked, status?.jobs) : null;
+  const jobCopy = updateJobCopy(job);
+  const tracking = tracked !== null && !jobCopy.terminal;
+  useEffect(() => {
+    void refresh();
+    if (!tracking) return;
+    const timer = window.setInterval(() => void refresh(), 5000);
+    return () => window.clearInterval(timer);
+  }, [refresh, tracking, tracked?.job_id]);
 
   const packages = status?.staged_packages ?? [];
   const state = getUpgradeStateCopy(status?.state);
@@ -129,7 +166,7 @@ export function UpgradeStatusPanel({ compact = false }: { compact?: boolean }) {
             Upgrade Status
           </div>
           <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
-            Read-only package, preflight, and rollback state.
+            {tracked ? 'Progress is saved and checked automatically.' : 'Package and update status.'}
           </div>
         </div>
         <button
@@ -142,7 +179,26 @@ export function UpgradeStatusPanel({ compact = false }: { compact?: boolean }) {
         </button>
       </div>
 
-      {error ? (
+      {tracked ? (
+        <div aria-live="polite" aria-atomic="true" style={{ fontSize: '0.8rem', lineHeight: 1.5 }}>
+          <div style={{ fontWeight: 700, color: jobCopy.failed ? 'var(--red)' : jobCopy.terminal ? 'var(--green)' : 'var(--text)' }}>
+            {jobCopy.label}
+          </div>
+          {tracked.filename && <div style={{ wordBreak: 'break-word' }}>{tracked.filename}</div>}
+          <div style={{ color: 'var(--text-dim)' }}>{jobCopy.detail}</div>
+          {error && (
+            <div style={{ marginTop: 8, color: 'var(--yellow)' }}>
+              Connection lost. {tracking ? 'Reconnecting automatically; the last known result is shown above.' : 'The last confirmed result is shown above. Refresh to reconnect.'}
+            </div>
+          )}
+          {job?.exit_code != null && jobCopy.failed && <div>Installer exit code: {job.exit_code}</div>}
+          <details style={{ marginTop: 8, color: 'var(--text-dim)', fontSize: '0.72rem' }}>
+            <summary>Update reference</summary>
+            <div style={{ wordBreak: 'break-all' }}>{tracked.job_id}</div>
+            <div style={{ wordBreak: 'break-all' }}>SHA-256: {tracked.package_sha256}</div>
+          </details>
+        </div>
+      ) : error ? (
         <div className="cp-empty-note is-error">
           Upgrade status unavailable: {error}
         </div>

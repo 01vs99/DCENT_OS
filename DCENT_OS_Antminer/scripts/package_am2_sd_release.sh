@@ -49,6 +49,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+if [ -n "${DROP:-}" ] && { [ "$ALLOW_INCOMPLETE_LAB" -eq 1 ] || [ "$ALLOW_DEV_IMAGE" -eq 1 ]; }; then
+    echo "ERROR: a Beta DROP cannot package incomplete or DEV/LAB SD media" >&2
+    exit 1
+fi
+
 if [ -z "$IMAGE" ] || [ -z "$LABEL" ]; then
     echo "ERROR: --image and --label are required" >&2
     usage >&2
@@ -101,6 +106,20 @@ elif [ "$ALLOW_INCOMPLETE_LAB" -eq 1 ]; then
     fi
 fi
 
+RUNTIME_PAIR=0
+if [ -e "${IMAGE}.runtime-image.json" ] || [ -L "${IMAGE}.runtime-image.json" ] ||
+   [ -e "${IMAGE}.runtime-image.sig" ] || [ -L "${IMAGE}.runtime-image.sig" ]; then
+    [ -f "${IMAGE}.runtime-image.json" ] && [ ! -L "${IMAGE}.runtime-image.json" ] &&
+    [ -f "${IMAGE}.runtime-image.sig" ] && [ ! -L "${IMAGE}.runtime-image.sig" ] || {
+        echo "ERROR: native SD runtime companions must be a complete regular pair" >&2
+        exit 1
+    }
+    RUNTIME_PAIR=1
+elif [ -n "${DROP:-}" ]; then
+    echo "ERROR: a Beta DROP requires the actual-image runtime companions" >&2
+    exit 1
+fi
+
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 if [ -z "$OUT_ROOT" ]; then
     OUT_ROOT="$PROJECT_DIR/releases/am2-sd/$LABEL"
@@ -111,6 +130,10 @@ IMG_BASENAME="dcentos-${LABEL}.img"
 cp -f "$IMAGE" "$OUT_ROOT/$IMG_BASENAME"
 [ -f "$MANIFEST" ] && cp -f "$MANIFEST" "$OUT_ROOT/${IMG_BASENAME}.manifest.json"
 [ -f "${IMAGE}.sig" ] && cp -f "${IMAGE}.sig" "$OUT_ROOT/${IMG_BASENAME}.sig"
+if [ "$RUNTIME_PAIR" -eq 1 ]; then
+    cp -f "${IMAGE}.runtime-image.json" "$OUT_ROOT/${IMG_BASENAME}.runtime-image.json"
+    cp -f "${IMAGE}.runtime-image.sig" "$OUT_ROOT/${IMG_BASENAME}.runtime-image.sig"
+fi
 
 (
     cd "$OUT_ROOT"
@@ -124,11 +147,14 @@ cp -f "$IMAGE" "$OUT_ROOT/$IMG_BASENAME"
         if [ -f "${IMG_BASENAME}.sig" ]; then
             sha256sum "${IMG_BASENAME}.sig" >>SHA256SUMS
         fi
+        if [ -f "${IMG_BASENAME}.runtime-image.json" ]; then
+            sha256sum "${IMG_BASENAME}.runtime-image.json" "${IMG_BASENAME}.runtime-image.sig" >>SHA256SUMS
+        fi
     fi
 )
 
 cat >"$OUT_ROOT/TESTER_README.txt" <<EOF
-DCENT_OS AM2 S19j Pro SD recovery / try media
+DCENT_OS AM2 SD recovery / try media
 Label: $LABEL
 
 THIS IS NOT A NAND INSTALLER.
@@ -136,6 +162,11 @@ THIS IS NOT A NAND INSTALLER.
 - Persistent DCENT_OS install on AM2 uses DCENT_Toolbox + signed sysupgrade tar with
   restore_verified gates — not this SD alone.
 - Incomplete / lab images must not be treated as production release media.
+- If this label carries an experimental / opt-in ring marking, the media is
+  for acknowledged experimental testers only; boot-trial media never writes
+  NAND and never persists without a separate, signed install step.
+
+Fund DCENT_OS development: https://d-central.tech/fund/
 
 Write with balenaEtcher or DCENT_OS_Antminer/scripts/write_sd_card.sh (dry-run first).
 After boot, optional read-only proof:

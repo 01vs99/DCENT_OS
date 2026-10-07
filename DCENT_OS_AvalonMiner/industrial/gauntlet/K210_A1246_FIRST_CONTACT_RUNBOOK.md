@@ -74,8 +74,7 @@ Hardware / bench:
 Host / tooling (verified on the bench host 2026-08-23):
 
 - `py -3` (Python 3.12) available; scripts run as
-  `py -3 DCENT_OS_AvalonMiner/scripts/...` from the repository root
-   Code\DCENT Projects`.
+  `py -3 DCENT_OS_AvalonMiner/scripts/...` from the repository root.
 - OpenSSH `ssh-keygen` available (needed for `create`/`verify`).
 - `nc` is **not** present in Git Bash on this host — use the Python 4028
   fallback in Section 5 wherever this runbook shows an `nc` form.

@@ -8,18 +8,22 @@
 # The DCENT_OS public-image trust boundary is split into TWO image postures,
 # selected at Buildroot time by the DCENT_RELEASE_IMAGE build flag:
 #
-#   DEV/LAB image  (default; DCENT_RELEASE_IMAGE unset/0):
+#   DEV/LAB image  (explicit opt-out: DCENT_DEV_IMAGE=1, or an explicit
+#                   DCENT_RELEASE_IMAGE=0/false):
 #     * root password stays "dcentral" (the shared dcentos-common.fragment
 #       BR2_TARGET_GENERIC_ROOT_PASSWD), so the operator's ssh_cmd.js / fleet
 #       tooling keeps working unchanged.
 #     * the dashboard/API "freedom-first" passwordless opt-out
 #       (/api/setup/skip-password, /api/setup/skip-safety) still works.
 #     * NO /etc/dcentos/release-image marker is stamped.
-#     => this helper is a NO-OP. The dev/lab rootfs is byte-identical to today.
+#     => this helper is a NO-OP. The dev/lab rootfs is byte-identical to the
+#       historical DEV image. Since WS-A4 (2026-09-01, operator T-OP-7) this
+#       posture is NEVER the implicit default: a lab/bench build must request
+#       it explicitly.
 #
-#   PRODUCTION/RELEASE image (DCENT_RELEASE_IMAGE=1):
+#   PRODUCTION/RELEASE image (DEFAULT since WS-A4; was DCENT_RELEASE_IMAGE=1):
 #     * the root account is LOCKED at the defconfig layer — build_in_docker.sh
-#       appends BR2_TARGET_GENERIC_ROOT_PASSWD="*" AFTER the per-product
+#       disables BR2_TARGET_ENABLE_ROOT_LOGIN AFTER the per-product
 #       defconfig (last-wins). This helper verifies the resulting /etc/shadow
 #       entry before it stamps the marker, so alternate build entry points fail
 #       closed unless they provide the same lock. NO default SSH password login
@@ -39,15 +43,65 @@
 #
 # POSIX sh only (BusyBox ash / Buildroot host sh). No bashisms.
 
-dcent_release_image_truthy() {
-    case "${1:-}" in
-        1|true|TRUE|yes|YES|y|Y) return 0 ;;
-        *) return 1 ;;
+# Canonical posture resolution (WS-A4): DCENT_RELEASE_IMAGE defaults to 1;
+# DCENT_DEV_IMAGE=1 is the canonical DEV/LAB opt-out. Resolve the canonical
+# helper from the known Buildroot/checkout layout. Consumers run either under
+# Buildroot (BR2_EXTERNAL_DCENTOS_PATH exported) or from a checkout
+# (PROJECT_ROOT exported). The inline fallback below MUST stay byte-identical
+# to scripts/lib/release_posture.sh — pinned by
+# scripts/test_release_posture_default.sh.
+if ! command -v dcent_release_posture_is_release >/dev/null 2>&1; then
+    _dcent_posture_lib=""
+    if [ -n "${BR2_EXTERNAL_DCENTOS_PATH:-}" ] &&
+        [ -f "${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/release_posture.sh" ]; then
+        _dcent_posture_lib="${BR2_EXTERNAL_DCENTOS_PATH}/../scripts/lib/release_posture.sh"
+    elif [ -n "${PROJECT_ROOT:-}" ] &&
+        [ -f "${PROJECT_ROOT}/scripts/lib/release_posture.sh" ]; then
+        _dcent_posture_lib="${PROJECT_ROOT}/scripts/lib/release_posture.sh"
+    fi
+    if [ -n "$_dcent_posture_lib" ]; then
+        . "$_dcent_posture_lib"
+    fi
+    unset _dcent_posture_lib
+fi
+if ! command -v dcent_release_posture_is_release >/dev/null 2>&1; then
+dcent_release_posture_is_release() {
+    if [ -n "${DCENT_RELEASE_IMAGE:-}" ]; then
+        case "$DCENT_RELEASE_IMAGE" in
+            1|true|TRUE|yes|YES|y|Y) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+    case "${DCENT_DEV_IMAGE:-}" in
+        1|true|TRUE|yes|YES|y|Y) return 1 ;;
     esac
+    return 0
 }
+
+dcent_release_posture_value() {
+    if dcent_release_posture_is_release; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+fi
 
 dcent_release_path_exists() {
     [ -e "$1" ] || [ -L "$1" ]
+}
+
+dcent_release_distro_python3() {
+    # Buildroot's target-finalize hooks run with $HOST_DIR/bin first on PATH
+    # (needed whenever BR2_PACKAGE_PYTHON3=y forces a host-python3 build).
+    # That Buildroot-built interpreter has no third-party modules, and the
+    # release helpers here import dcent_toolbox cryptography bindings. Prefer
+    # the distro interpreter when it exists; fall back to PATH elsewhere.
+    if [ -x /usr/bin/python3 ]; then
+        /usr/bin/python3 "$@"
+    else
+        python3 "$@"
+    fi
 }
 
 dcent_release_require_directory() {
@@ -195,6 +249,10 @@ dcent_release_open_locked_root() {
         *)
             dcent_release_close_locked_root
             echo "release_image_provision: ERROR: release root account is not locked in /etc/shadow" >&2
+            echo "release_image_provision: RELEASE is the default image posture (WS-A4);" >&2
+            echo "release_image_provision: build through build_in_docker.sh (appends the" >&2
+            echo "release_image_provision: disabled BR2_TARGET_ENABLE_ROOT_LOGIN defconfig lock) or" >&2
+            echo "release_image_provision: opt out explicitly for a lab image: DCENT_DEV_IMAGE=1" >&2
             return 1
             ;;
     esac
@@ -215,6 +273,11 @@ dcent_release_abort_marker() {
     if ! dcent_release_remove_exact_entry "$_dcent_abort_marker" "failed release-image marker" >/dev/null 2>&1; then
         _dcent_abort_cleanup=failed
     fi
+    for _dcent_abort_metadata in runtime-image.json runtime-image.sig; do
+        if ! dcent_release_remove_exact_entry "${_dcent_abort_marker%/*}/${_dcent_abort_metadata}" "failed signed runtime metadata" >/dev/null 2>&1; then
+            _dcent_abort_cleanup=failed
+        fi
+    done
     dcent_release_close_locked_root
     echo "release_image_provision: ERROR: ${_dcent_abort_message}" >&2
     if [ "$_dcent_abort_cleanup" != ok ]; then
@@ -225,8 +288,9 @@ dcent_release_abort_marker() {
 
 # dcent_provision_release_image TARGET_DIR LABEL
 #
-# Stamps the release-image marker + tightens the first-boot SSH posture when
-# DCENT_RELEASE_IMAGE is truthy. No-op otherwise (dev/lab byte-identical).
+# Stamps the release-image marker + tightens the first-boot SSH posture on a
+# RELEASE build (the default since WS-A4). No-op on an explicit DEV/LAB
+# opt-out (dev/lab byte-identical).
 dcent_provision_release_image() {
     _dcent_target_dir="$1"
     _dcent_label="${2:-unknown}"
@@ -237,8 +301,9 @@ dcent_provision_release_image() {
     fi
     dcent_release_require_directory "$_dcent_target_dir" "TARGET_DIR" || return 1
 
-    if ! dcent_release_image_truthy "${DCENT_RELEASE_IMAGE:-0}"; then
-        # DEV/LAB image — keep everything byte-identical to today. Defensive:
+    if ! dcent_release_posture_is_release; then
+        # DEV/LAB image (explicit opt-out) — keep everything byte-identical to
+        # the historical DEV image. Defensive:
         # if a stale marker somehow exists in an overlay, remove it so a dev
         # build can never silently inherit the stricter release posture.
         _dcent_etc_dir="${_dcent_target_dir}/etc"
@@ -254,7 +319,10 @@ dcent_provision_release_image() {
             dcent_release_remove_exact_entry "$_dcent_marker" "stray release-image marker" || return 1
             echo "DCENTos post-build (${_dcent_label}): removed stray release-image marker (this is a DEV/LAB build)"
         fi
-        echo "DCENTos post-build (${_dcent_label}): DEV/LAB image (DCENT_RELEASE_IMAGE unset) — root:dcentral SSH + passwordless opt-out preserved"
+        for _dcent_metadata in runtime-image.json runtime-image.sig; do
+            dcent_release_remove_exact_entry "${_dcent_config_dir}/${_dcent_metadata}" "stray signed runtime metadata" || return 1
+        done
+        echo "DCENTos post-build (${_dcent_label}): DEV/LAB image (explicit opt-out DCENT_DEV_IMAGE=1 / DCENT_RELEASE_IMAGE=0) — root:dcentral SSH + passwordless opt-out preserved"
         return 0
     fi
 
@@ -272,10 +340,13 @@ dcent_provision_release_image() {
     fi
     # No failed release preflight may leave a stale runtime release claim.
     dcent_release_remove_exact_entry "$_dcent_marker" "prior release-image marker" || return 1
+    for _dcent_metadata in runtime-image.json runtime-image.sig; do
+        dcent_release_remove_exact_entry "${_dcent_config_dir}/${_dcent_metadata}" "prior signed runtime metadata" || return 1
+    done
     dcent_release_open_locked_root "${_dcent_etc_dir}/shadow" || return 1
 
     # 1. First-boot SSH credential posture. The root account is locked at the
-    #    defconfig layer (BR2_TARGET_GENERIC_ROOT_PASSWD="*"), so NO default
+    #    defconfig layer (BR2_TARGET_ENABLE_ROOT_LOGIN disabled), so NO default
     #    SSH password login is possible. The existing S50dropbear lockdown
     #    already requires a first-boot credential (wizard Argon2id password OR
     #    an uploaded authorized_keys) before SSH comes up. On a release image
@@ -299,6 +370,25 @@ dcent_provision_release_image() {
             return 1
         fi
         echo "DCENTos post-build (${_dcent_label}): release image — stripped AM3-BB rescue SSH marker"
+    fi
+
+    # Bind the final staged daemon (post-build copies are complete) before any
+    # rootfs archive is created. No strings/receipt inference can mint metadata.
+    _dcent_recovery_helper="${BR2_EXTERNAL_DCENTOS_PATH:-}/../scripts/provision_recovery_defaults.py"
+    if ! dcent_release_distro_python3 "$_dcent_recovery_helper" --rootfs "$_dcent_target_dir"; then
+        dcent_release_abort_marker "$_dcent_marker" "recovery default/build metadata preparation failed"
+        return 1
+    fi
+    _dcent_runtime_helper="${BR2_EXTERNAL_DCENTOS_PATH:-}/../scripts/runtime_image_manifest.py"
+    if [ ! -f "$_dcent_runtime_helper" ] ||
+        ! _dcent_runtime_board="$(cat "${_dcent_config_dir}/board_target")" ||
+        ! _dcent_runtime_version="$(cat "${_dcent_etc_dir}/dcentos-version")" ||
+        ! dcent_release_distro_python3 "$_dcent_runtime_helper" prepare --rootfs "$_dcent_target_dir" \
+            --board-target "$_dcent_runtime_board" --version "$_dcent_runtime_version" \
+            --channel "${DCENT_RELEASE_CHANNEL:-beta}" \
+            --hardware-recipe "${DCENT_RELEASE_HARDWARE_RECIPE:-board-default}"; then
+        dcent_release_abort_marker "$_dcent_marker" "signed runtime image preparation failed"
+        return 1
     fi
 
     # 2. Publish the runtime posture marker only after every prerequisite has

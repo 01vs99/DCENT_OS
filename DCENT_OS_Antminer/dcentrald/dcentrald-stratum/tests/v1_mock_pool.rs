@@ -13,6 +13,7 @@ fn test_config(pool_url: String) -> StratumConfig {
     let mut donation = DonationConfig::default();
     donation.enabled = false;
     StratumConfig {
+        v1_policy: Default::default(),
         pool1: PoolConfig {
             url: pool_url,
             worker: "dcent.sim.worker".to_string(),

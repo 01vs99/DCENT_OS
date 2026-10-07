@@ -1,0 +1,67 @@
+{
+  "hardware_contact": false,
+  "scope": "Derive complete coinbase/Merkle/header probes from immutable mainnet blocks.\n\nThe Blockstream endpoint supplies raw public ledger data; complete transaction\nparsing and independent SHA256d/Merkle/PoW checks admit the retained bytes. No\nFPGA, ticket threshold, physical probe or mining behavior is inferred.\n",
+  "cases": [
+    {
+      "network": "mainnet",
+      "height": 400001,
+      "header_hex": "040000006f3f6e272452ff8f324bedc2dd1cedf1e62f73e46c46ec04000000000000000045a538470243362a5ff6ce322196179b9644cc8668ffcad329eed5637ea49430bb32cf569fb906187d9e951c",
+      "coinbase_hex": "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff1b03811a0604c032cf5609037002890f594e4300072f425443432f20000000000103a9d098000000001976a9142c30a6aaac6d96687291475d7d52f4b469f665a688ac00000000",
+      "merkle_branches": [
+        "9bd8a1a9e54ff06d03ea26b52a42f69ac4125b88291995cc203f6ac1331d7f7e",
+        "6ac07837c88302e9515cdb13cb7e63aa43e086bf2051dba0a443224c789ff31e",
+        "4632b30024bf43c7817e3447d8244a9d97487f427db5db4a26e0333968f118d5",
+        "c0943b54d39eb08d98681386b95770b1f5a0dbcdb436cf3395f4be612bdddb74",
+        "f4675c911b5d7b1e2a69f4aca75055e8c743f403514faf969f7ad6ddedf92f5e",
+        "828a0e7cd2f4ce4337e7b789cc179d021602d25cf9649ebdd2cfd19d35c57af1",
+        "94f5a2e40ccacbe749b328633ef1375b9d2f9e3aed7f448f68e5f0862ea49d6c",
+        "ed060cf7447682704da9f93b5d781d45517744cdccd65a227ccc84031d431add",
+        "9fd1c1866948444082533f49fe7391b5b9ce27fc54df29f422b36333d0ebda62",
+        "62411a8f72c8347d2d4ee608374ef5eb231f6a396fff3b4eae4c95b1a5d66f2d",
+        "5216e03ee921b1cacaf7a76bcef90ccaaefc804e0ea5e535099711855f5c97ca"
+      ],
+      "header_hash": "000000000000000005421b1b2ee6d06d037557d7f5ec96852542413cfed40c22",
+      "canonical_nonce": 479567485,
+      "raw_nonce": 2107544860,
+      "wire_chip_address": 207,
+      "chip_ordinal": 69,
+      "core_id": 62,
+      "leading_zero_bits": 69,
+      "transaction_count": 1298,
+      "raw_block_url": "https://blockstream.info/api/block/000000000000000005421b1b2ee6d06d037557d7f5ec96852542413cfed40c22/raw",
+      "raw_block_sha256": "dc05ce5b793a8ade858a085b895aec5ffb44c8308270d5651755e2a12f97a901",
+      "raw_block_bytes": 979159
+    },
+    {
+      "network": "mainnet",
+      "height": 400002,
+      "header_hex": "04000000220cd4fe3c4142258596ecf5d75775036dd0e62e1b1b42050000000000000000c0780fccbdfd9ed8a24430e0f4f6940c5ab2167ba29021141a4866bdb2f95fd63233cf569fb90618589d4e0d",
+      "coinbase_hex": "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff6403821a0637e4b883e5bda9e7a59ee4bb99e9b1bcb6e497478493ad0b54b23628db940c2e4ed1ef6cd3190535cb5b16fcf9be3e8b02000000f09f909f0e4d696e65642062792068616e626100000000000000000000000000000000000000000000000000b74005000136d9a097000000001976a914c825a1ecf2a6830c4401620c3a16f1995057c2ab88ac3ffa723a",
+      "merkle_branches": [
+        "17fdbbecdfba43cd0610a6b256fb77b357bec631d4f6132de1dbe86b074b4dd5",
+        "13abeb2b8fe576b38dba1721f08042523a7d919c0ada167a8a764c4525abc9e8",
+        "0b95321cf70a69ae12e8af9af1f57ac788c73a72ab285cfd4a9e4184ec6c9f16",
+        "ac647b90ec055fcfaa6b52e39d69c07f45b418f0b64c7f48ad5fb05f44b0208f",
+        "be1a7b22934e6ab7f5e55beda17d9bacb73c0f568e631c7417a7f27dc2fd9b87",
+        "b030f561b2b7660612233bafa0932039cc0efbabf6cfc3e1d8f9b530d368aa17",
+        "d09e42f87a76ff6f1389586bf8c5df6405c829d8fbeb894db5ae543ed54322fa",
+        "a6a9af76c8aed863f38ef1832cf885dadb1472e1e3bb5a2819935fcecfe326bd",
+        "3fcc25b7ee320013b9d176c0d9463e5c30e008c4e62a7d4ee26febb3e4ef4f4a",
+        "c05cab06fb03697e4ab27ba2ace854c1eb439e32d98db93b053629d2b74ef808",
+        "8dbab2b75d748c83ff93c2053acb2ec73ad065660a69bf246c8d3da3f866a808",
+        "17fbdcbcbd4264b670c09f4add8cc04bf5e598dade27f009c8c59e68f833f361"
+      ],
+      "header_hash": "0000000000000000016578099aab6d26d41c8815e9ab5f204f505ba4ac3c084d",
+      "canonical_nonce": 223255896,
+      "raw_nonce": 1486704141,
+      "wire_chip_address": 78,
+      "chip_ordinal": 26,
+      "core_id": 44,
+      "leading_zero_bits": 71,
+      "transaction_count": 2849,
+      "raw_block_url": "https://blockstream.info/api/block/0000000000000000016578099aab6d26d41c8815e9ab5f204f505ba4ac3c084d/raw",
+      "raw_block_sha256": "843f7e72f4088c166855dfc00d2b1419357916a4221c6077cf762d169b8de804",
+      "raw_block_bytes": 999930
+    }
+  ]
+}

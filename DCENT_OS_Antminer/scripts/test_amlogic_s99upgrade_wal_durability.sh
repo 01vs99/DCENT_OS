@@ -13,7 +13,8 @@ fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/dcent-amlogic-wal.XXXXXX")
 mkdir -p "$WORK/identity"
-# Exercise the strict WAL policy on a non-S19k admitted Amlogic identity.
+# Exercise the WAL consumer with an explicit test-only OTA capability. The
+# generated S21 image policy does not admit this legacy on-target writer.
 # S19k is tested separately below because its evidenced `a lab unit` bootcmd ignores
 # firstboot and uses the recovery byte as the sole revert arm.
 printf 'am3-aml-s21\n' > "$WORK/identity/platform"
@@ -34,6 +35,8 @@ mkdir -p "$SHIM" "$WORK/data"
 : > "$WORK/flash.log"
 printf 'ota-storage\n' > "$WORK/mutation_policy"
 chmod 0600 "$WORK/mutation_policy"
+export DCENTOS_MUTATION_POLICY_FILE="$WORK/mutation_policy"
+export DCENTOS_MUTATION_POLICY_HELPER="$MUTATION_POLICY_HELPER"
 
 cat > "$SHIM/nanddump" <<'EOF'
 #!/bin/sh

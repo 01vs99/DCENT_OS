@@ -113,11 +113,13 @@ signal_cancel=$(awk -v start="$signal_handler_spawn" -v end="$signal_handler_end
     'NR > start && NR < end && /shutdown_token_signal\.cancel\(\)/ { print NR; exit }' \
     "$DAEMON_MAIN_SOURCE")
 hardware_route=$(awk -v start="$run_main_start" \
-    'NR > start && /(S19jTapMiner|S19jHybridMiner|SerialMiner|StockMiner|Daemon)::new\(/ { print NR; exit }' \
+    'NR > start && (/(S19jTapMiner|S19jHybridMiner|SerialMiner|StockMiner|Daemon)::new\(/ || /(bm1396_mining_work::runtime|bm1391_mining|c43_bm1393_mining)::run\(/) { print NR; exit }' \
     "$DAEMON_MAIN_SOURCE")
-runtime_route_admission=$(grep -nF 'let runtime_dispatch = selected_runtime_dispatch(' \
+# This binding now dispatches exact native routes before the legacy selector.
+# Locate the actual run_main statement, not a historical initializer string.
+runtime_route_admission=$(awk -v start="$run_main_start" \
+    'NR > start && /^    let runtime_dispatch =/ { print NR; exit }' \
     "$DAEMON_MAIN_SOURCE")
-runtime_route_admission=${runtime_route_admission%%:*}
 case "$run_main_start:$sigint_registration:$sigterm_registration:$signal_handler_spawn:$signal_handler_end:$sigint_recv:$sigterm_recv:$signal_cancel:$hardware_route" in
     :*|*::*|*:) fail 'daemon signal-registration, handler-task, or hardware-route anchor is missing' ;;
     *)
@@ -338,8 +340,12 @@ for supervisor in $(find "$BOARD_DIR" -type f -name S82dcentrald 2>/dev/null | s
     fi
     case "$relative" in
         br2_external_dcentos/board/amlogic/rootfs-overlay/etc/init.d/S82dcentrald)
-            grep -Fq 'restart is refused before stop' "$supervisor" \
-                || fail "$relative can stop a healthy owner before refusing unsafe readmission"
+            grep -Fq '"$SCRIPT" stop || return $?' "$supervisor" \
+                || fail "$relative restart does not preserve stop failure"
+            grep -Fq 'RESTART_STATE=$(/bin/sh "$SESSION_LATCH_HELPER" status)' "$supervisor" \
+                || fail "$relative restart does not await supervisor proof consumption"
+            grep -Fq '0:clear) "$SCRIPT" start; return $? ;;' "$supervisor" \
+                || fail "$relative restart can bypass clean-session readmission"
             ;;
         *)
             grep -Fq '"$0" stop || exit $?' "$supervisor" \

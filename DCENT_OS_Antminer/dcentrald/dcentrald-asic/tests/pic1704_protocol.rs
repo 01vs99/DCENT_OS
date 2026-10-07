@@ -267,21 +267,11 @@ fn assert_authorized<P: Pic1704Authorized>() {}
 
 #[test]
 fn whitelisted_platforms_satisfy_pic1704_authorized() {
-    // The  marker triple — CV1835 / AM335x BB / Amlogic S19j Pro.
-    // The trait bound below (`assert_authorized::<T>`) is the load-bearing
-    // guarantee — if it stops compiling for any of these, the
-    // construction whitelist has been silently broken.
-    assert_authorized::<platforms::Cv1835S19jPro>();
+    // These supported markers remain in the normal external library API.
+    // Retired CV markers exist only in library unit fixtures; their public
+    // absence is checked by the service module's compile-fail doctests.
     assert_authorized::<platforms::Am335xBbS19jPro>();
     assert_authorized::<platforms::AmlogicS19jPro>();
-
-    // W11.3 expansion (2026-05-09) — three additional CV183x SKUs
-    // documented in RE2 hardware catalog §2.5 + §6.1 row "PIC MCU".
-    // Same `CVCtrl_BHB42XXX` subtype family + 0x20 ACK probe gate as
-    // the existing CV1835 S19j Pro entry.
-    assert_authorized::<platforms::Cv1835S19>();
-    assert_authorized::<platforms::Cv1835S19i>();
-    assert_authorized::<platforms::Cv1835S19XP>();
 }
 
 #[test]
@@ -295,14 +285,7 @@ fn s21_amlogic_has_no_pic1704_marker() {
     // review and the `// NOTE: NO S21* PIC1704 marker` comment in
     // `service.rs`. Document the semantic invariant here so it is not
     // lost across refactors.
-    let _markers: &[&'static str] = &[
-        "Cv1835S19jPro",
-        "Am335xBbS19jPro",
-        "AmlogicS19jPro",
-        "Cv1835S19",
-        "Cv1835S19i",
-        "Cv1835S19XP",
-    ];
+    let _markers: &[&'static str] = &["Am335xBbS19jPro", "AmlogicS19jPro"];
     // Sanity: no `S21` substring in any marker name.
     for name in _markers {
         assert!(

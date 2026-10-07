@@ -123,17 +123,39 @@ class AmlRouteEvidenceLedgerConvergenceTests(unittest.TestCase):
                 self.assertGreaterEqual(permit_bodies.count("false\n    }"), 5)
 
     def test_model_specific_asic_and_management_only_compositions_stay_distinct(self) -> None:
-        expected_protocol = {
-            "t21_aml_production_route": "AsicProtocolIdentity::Bm1368",
-            "x19_aml_production_route": "AsicProtocolIdentity::Bm1366",
-            "s21xp_aml_evidence": "AsicProtocolIdentity::Bm1370",
+        # 2026-09-12 drift-13 adjudication: the XP pair and S21 XP rows landed
+        # their exact typed native serial lanes (SerialWork over
+        # AmlogicNativeSerial, generic construction Refused), so the old
+        # ManagementOnly markers are gone from those two modules. T21 keeps
+        # its ManagementOnly posture. Distinctness law unchanged: each module
+        # pins its own protocol + engine + lifecycle, and every install
+        # posture stays Denied.
+        expected = {
+            "t21_aml_production_route": (
+                "AsicProtocolIdentity::Bm1368",
+                "WorkEngineKind::ManagementOnly",
+                "RuntimeStatus::ManagementOnlyByPolicy",
+            ),
+            "x19_aml_production_route": (
+                "AsicProtocolIdentity::Bm1366",
+                "WorkEngineKind::SerialWork",
+                "LifecycleLane::AmlogicNativeSerial",
+            ),
+            "s21xp_aml_evidence": (
+                "AsicProtocolIdentity::Bm1370",
+                "WorkEngineKind::SerialWork",
+                "LifecycleLane::AmlogicNativeSerial",
+            ),
         }
-        for module, protocol in expected_protocol.items():
+        for module, needles in expected.items():
             with self.subTest(module=module):
                 source = (COMMON_SRC / f"{module}.rs").read_text(encoding="utf-8")
-                self.assertIn(protocol, source)
-                self.assertIn("WorkEngineKind::ManagementOnly", source)
-                self.assertIn("RuntimeStatus::ManagementOnlyByPolicy", source)
+                for needle in needles:
+                    self.assertIn(needle, source)
+        for module in ("x19_aml_production_route", "s21xp_aml_evidence"):
+            source = (COMMON_SRC / f"{module}.rs").read_text(encoding="utf-8")
+            self.assertIn("InstallAuthorization::Denied", source)
+            self.assertIn("GenericConstruction::Refused", source)
         self.assertIn(
             "ArtifactInstallContract::PackageOnlyDenied",
             (COMMON_SRC / "t21_aml_production_route.rs").read_text(encoding="utf-8"),

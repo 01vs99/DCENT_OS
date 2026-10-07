@@ -1,0 +1,18 @@
+#!/bin/sh
+# Retain this boot's exact AM2 FPGA programming identity before daemon startup.
+case "${1:-}" in
+    start)
+        . /usr/libexec/dcentos/am2-fabric-identity.sh
+        if ! dcent_am2_fabric_identity \
+            /etc/dcentos/board_target /proc/cmdline /proc/sys/kernel/random/boot_id \
+            /sys/class/xdevcfg/xdevcfg/device/prog_done \
+            /sys/class/xdevcfg/xdevcfg/device/fclk_export \
+            /sys/class/fclk/fclk0/set_rate /run/dcentos; then
+            echo "AM2 FPGA programming identity unavailable; management remains available."
+        fi
+        ;;
+    stop) ;;
+    restart) "$0" start ;;
+    *) echo "Usage: $0 {start|stop|restart}" >&2; exit 1 ;;
+esac
+exit 0

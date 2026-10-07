@@ -1,0 +1,70 @@
+# Exact S19k Pro NoPic (Amlogic A113D) native beta; boots idle for pool setup.
+# Desk analog of the A126/Plus120 NoPic image configs. Hardware envelope values
+# mirror the reviewed am3-s19k runtime overlay; the admission identity is the
+# distinct S19k Pro NoPic image pair (am3-s19kpro / am3-aml-s19kpro).
+# Voltage is TAS5782M kernel-managed (NoPic) - no voltage_mv is claimed here.
+[general]
+hostname = "dcentos-s19kpro"
+log_level = "info"
+
+[mining]
+enabled = false
+model = "s19kpro"
+frequency_mhz = 670
+version_rolling = true
+passthrough = false
+suggest_difficulty = 8192
+serial_device = "/dev/ttyS2"
+# BM1366 chains: 77 chips each, three chains (ttyS1/ttyS2/ttyS3), NoPic.
+serial_chip_count = 77
+serial_chip_type = "BM1366"
+
+[platform]
+target = "am3-aml-s19kpro"
+board_target = "am3-s19kpro"
+
+[pool]
+url = ""
+worker = ""
+password = "x"
+protocol = "sv1"
+
+[thermal]
+target_temp_c = 65
+hot_temp_c = 75
+dangerous_temp_c = 88
+fan_min_pwm = 10
+fan_max_pwm = 30
+
+[psu]
+model = "APW121215f"
+power_target_w = 754
+power_step_w = 300
+hashrate_target_ths = 120.0
+hashrate_step_ths = 11.0
+
+[hashboard]
+eeprom_parser = "x21_aes"
+decoded_reference_file = "/etc/dcentos/hashboard_decoded.json"
+
+[watchdog]
+enabled = true
+timeout_s = 30
+kick_interval_s = 5
+
+[hash_on_disconnect]
+enabled = false
+
+[mode]
+active = "home"
+
+[autotuner]
+# Initial native beta uses the selected fixed frequency.
+enabled = false
+min_freq_mhz = 400
+max_freq_mhz = 670
+
+[api]
+# Unsupported observer image retains local access only.
+cgminer_bind_lan = false
+cgminer_lan_writes = false

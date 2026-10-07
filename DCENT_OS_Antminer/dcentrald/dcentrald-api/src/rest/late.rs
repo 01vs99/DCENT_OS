@@ -7,7 +7,12 @@ pub(super) const DEFAULT_DONATION_FALLBACK_POOL_URL: &str =
     "stratum+tcp://stratum.braiins.com:3333";
 pub(super) const DEFAULT_DONATION_FALLBACK_WORKER: &str = "DungeonMaster";
 pub(super) const DEFAULT_DONATION_CYCLE_S: i64 = 3600;
-pub(super) const DEFAULT_DONATION_PERCENT: f64 = 2.0;
+/// Mirrors `DonationConfig::default().percent` — the 0% default posture
+/// (operator decision 2026-09-01). Only used when the persisted
+/// `[donation]` section omits `percent`.
+pub(super) const DEFAULT_DONATION_PERCENT: f64 = 0.0;
+/// Mirrors `DonationConfig::default().enabled` — donation is opt-in.
+pub(super) const DEFAULT_DONATION_ENABLED: bool = false;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HomeNightModeView {
@@ -113,7 +118,7 @@ pub(super) fn donation_config_value_from_table(table: &toml::Table) -> serde_jso
         "enabled": donation
             .and_then(|section| section.get("enabled"))
             .and_then(|value| value.as_bool())
-            .unwrap_or(true),
+            .unwrap_or(DEFAULT_DONATION_ENABLED),
         "percent": donation
             .and_then(|section| section.get("percent"))
             .and_then(toml_value_as_f64)
@@ -591,7 +596,7 @@ target_watts = 800
         )
         .expect("valid toml");
 
-        apply_home_power_target_to_table(&mut table, 1200, Some("high"));
+        apply_home_power_target_to_table(&mut table, 1200, Some("high")).unwrap();
 
         // The home keys updated.
         let home = table.get("home").and_then(|v| v.as_table()).unwrap();
@@ -1506,6 +1511,26 @@ end_hour = 5
             .contains("dB"));
     }
 
+    #[test]
+    fn s19j_heater_presets_join_post_names_without_inventing_measurements() {
+        let response = home_presets_for_board("am2-s19j");
+        assert_eq!(response["scope"]["family"], "s19j_pro");
+        let presets = response["presets"].as_array().unwrap();
+        assert_eq!(presets.len(), 3);
+        for preset in presets {
+            let watts = dcentrald_thermal::profiles::heater_target_watts("am2-s19j", preset["name"].as_str().unwrap()).unwrap();
+            assert_eq!(preset["watts"], watts);
+            assert!(preset["noise_db"].is_null());
+            assert!(preset.get("hashrate_ths").is_none());
+            assert!(preset.get("wall_watts").is_none());
+            assert_eq!(preset["estimates_available"], false);
+        }
+        for board in ["unknown", "am3-bb-s19jpro", "am3-s19jpro-aml", "am2-s19pro"] {
+            assert!(home_presets_for_board(board)["presets"].as_array().unwrap().is_empty());
+        }
+        assert_eq!(home_presets_for_board("am1-s9")["presets"].as_array().unwrap().len(), 5);
+    }
+
     fn route_path_is_manifest_relevant(path: &str) -> bool {
         path.starts_with("/api/") || path == "/metrics" || path == MCP_HTTP_PATH
     }
@@ -1537,6 +1562,8 @@ end_hour = 5
             include_str!("../routes/profiles.rs"),
             include_str!("../routes/restore_to_stock.rs"),
             include_str!("../routes/stock_parity.rs"),
+            include_str!("../routes/reset_settings.rs"),
+            include_str!("../channel_update.rs"),
         ] {
             collect_route_literals(source, &mut routes);
         }
@@ -4520,8 +4547,24 @@ end_hour = 5
             let update_table = json_object_to_toml_table(&update_json);
             let expected = model_config_update_merge(current_table.clone(), update_table.clone());
 
-            let merged = merge_config_update_table(current_table.clone(), &update_json)
-                .expect("generated validation-safe config update should merge");
+            // Arbitrary sections include malformed API values. The merge
+            // model remains independent; validate its result against the public
+            // boolean/table contract before expecting persistence to succeed.
+            let expected_api_valid = match expected.get("api") {
+                None => true,
+                Some(toml::Value::Table(api)) => {
+                    ["cgminer_bind_lan", "cgminer_lan_writes"].iter().all(|key| {
+                        api.get(*key).map_or(true, |value| value.as_bool().is_some())
+                    })
+                }
+                Some(_) => false,
+            };
+            let result = merge_config_update_table(current_table.clone(), &update_json);
+            if !expected_api_valid {
+                prop_assert!(result.is_err(), "malformed API controls must refuse persistence");
+                return Ok(());
+            }
+            let merged = result.expect("validation-safe config update should merge");
 
             prop_assert_eq!(&merged, &expected);
 
@@ -4732,6 +4775,25 @@ end_hour = 5
             serde_json::json!("fallback-pass")
         );
         assert_eq!(config["cycle_duration_s"], serde_json::json!(7200));
+    }
+
+    #[test]
+    fn donation_config_value_from_table_defaults_to_zero_fee() {
+        // C6 (operator 2026-09-01): GET /api/config/donation on a config
+        // without a [donation] section must report the 0% opt-in posture —
+        // the API view defaults mirror DonationConfig::default() so the
+        // dashboard never tells the operator a donation is active when the
+        // daemon would not route one. Opt-in route fields stay pinned for
+        // the presets UI.
+        let config = donation_config_value_from_table(&toml::Table::new());
+        assert_eq!(config["enabled"], serde_json::json!(false));
+        assert_eq!(config["percent"], serde_json::json!(0.0));
+        assert_eq!(
+            config["pool_url"],
+            serde_json::json!("stratum+tcp://pool.d-central.tech:3333")
+        );
+        assert_eq!(config["worker"], serde_json::json!("DungeonMaster"));
+        assert_eq!(config["cycle_duration_s"], serde_json::json!(3600));
     }
 
     #[test]
@@ -10769,12 +10831,24 @@ pub(crate) async fn post_profiles(
 
 // ─── Action Handlers ───────────────────────────────────────────────────
 
-/// POST /api/action/restart -- Refuse an unsafe in-process daemon restart.
+/// POST /api/action/restart -- Activate initial idle, or retain a hardware owner.
 ///
 /// A clean process exit is not a physical SafeOff receipt. Preserve the live
 /// hardware owner and return a conflict until a durable typed-disposition
 /// protocol can authorize supervisor re-admission.
 pub(super) async fn post_action_restart(State(state): State<Arc<AppState>>) -> Response {
+    // Installed only by the hardware-free first-boot branch. Authentication
+    // and CSRF still run in the router; this requests config validation and
+    // same-PID activation, not a machine reboot or hardware disposition.
+    if crate::cold_activation::request_initial_idle_activation() {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "activation_requested",
+                "message": "Saved configuration will be checked. Mining starts when a valid pool is configured and mining is enabled.",
+            })),
+        ).into_response();
+    }
     if let Err(response) = require_antminer_runtime_capability(
         &state,
         RuntimeCapability::Reboot,
@@ -14789,7 +14863,7 @@ pub(super) async fn get_home_status(State(state): State<Arc<AppState>>) -> impl 
         "noise_source": noise_source,
         "noise_note": noise_note,
         "airflow_cfm": airflow_cfm,
-        "preset": "medium",
+        "preset": targeting.preset,
         "room_temp_c": room_temp_val,
         "cost_today_usd": daily_cost_usd_rounded,
         "daily_cost_usd": daily_cost_usd_rounded,
@@ -14845,9 +14919,8 @@ pub(super) async fn get_home_status(State(state): State<Arc<AppState>>) -> impl 
 /// POST /api/home/target -- Set home power target.
 ///
 /// Body: `{ "preset": "medium" }` or `{ "watts": 800 }`
-/// Writes the target to the [home] section of dcentrald.toml.
-/// The thermal loop reads the config on each tick, so changes take effect
-/// within one thermal cycle (~5s).
+/// Atomically saves canonical home and autotuner policy, then requests an
+/// owner acknowledgement. Saving is never reported as measured watt delivery.
 pub(super) async fn post_home_target(
     State(state): State<Arc<AppState>>,
     Json(body): Json<HomeTargetRequest>,
@@ -14869,6 +14942,15 @@ pub(super) async fn post_home_target(
 
     tracing::info!(preset = ?body.preset, watts = ?body.watts, "Home target change requested");
 
+    let hardware = state.hardware_info.lock().map(|guard| guard.clone()).unwrap_or_default();
+    let board_target = antminer_board_target(&hardware);
+
+    if body.preset.is_some() && body.watts.is_some() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "status": "error", "message": "Provide either preset or watts, not both",
+        }))).into_response();
+    }
+
     // Resolve preset to watts if needed
     let target_watts = match (&body.preset, body.watts) {
         (_, Some(w)) => {
@@ -14884,36 +14966,31 @@ pub(super) async fn post_home_target(
             const MIN_HOME_WATTS: u32 = 50;
             const MAX_HOME_WATTS: u32 = 1800;
             if !(MIN_HOME_WATTS..=MAX_HOME_WATTS).contains(&w) {
-                return Json(serde_json::json!({
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
                     "status": "error",
                     "message": format!(
                         "watts {} out of range. Valid: {}-{} W.",
                         w, MIN_HOME_WATTS, MAX_HOME_WATTS
                     ),
-                }))
+                })))
                 .into_response();
             }
             w
         }
-        (Some(preset), None) => match preset.as_str() {
-            "whisper" => 300,
-            "low" => 500,
-            "medium" => 800,
-            "high" => 1200,
-            "max" => 1400,
-            _ => {
-                return Json(serde_json::json!({
+        (Some(preset), None) => match dcentrald_thermal::profiles::heater_target_watts(&board_target, preset) {
+            Some(watts) => watts,
+            None => {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
                     "status": "error",
-                    "message": format!("Unknown preset '{}'. Valid: whisper, low, medium, high, max", preset),
-                }))
-                .into_response();
+                    "message": "Preset is not available for this exact model and controller; refresh the available presets",
+                }))).into_response();
             }
         },
         (None, None) => {
-            return Json(serde_json::json!({
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
                 "status": "error",
                 "message": "Either 'preset' or 'watts' must be provided",
-            }))
+            })))
             .into_response();
         }
     };
@@ -14927,7 +15004,7 @@ pub(super) async fn post_home_target(
     // `[auth]` sections on the next reboot. The dead `if/else` (both arms were
     // `/data/dcentrald.toml`) is removed.
     let config_path = get_writable_config_path();
-    let write_result = (|| -> std::result::Result<(), String> {
+    let write_result = home_target::save_and_dispatch(&state, &board_target, target_watts, body.preset.as_deref(), || -> std::result::Result<(), String> {
         // RELIAB-2b: serialize load→modify→write (lost-update guard). Scoped to
         // this synchronous closure so it drops before any `.await`.
         let _cfg_write_guard = crate::atomic_io::config_write_lock();
@@ -14938,40 +15015,35 @@ pub(super) async fn post_home_target(
                 .map_err(|e| format!("Failed to create config directory: {}", e))?;
         }
 
-        apply_home_power_target_to_table(&mut table, target_watts, body.preset.as_deref());
+        if !home_target::supports_persisted_power_policy(&state, &board_target) {
+            home_target::apply_home_request_to_table(&mut table, target_watts, body.preset.as_deref(), false)?;
+        } else {
+            apply_home_power_target_to_table(&mut table, target_watts, body.preset.as_deref())?;
+        }
 
         let output =
             toml::to_string_pretty(&table).map_err(|e| format!("Serialize error: {}", e))?;
         atomic_write(config_path, output).map_err(|e| format!("Write error: {}", e))?;
         Ok(())
-    })();
+    }).await;
 
     match write_result {
-        Ok(()) => {
-            tracing::info!(
-                target_watts,
-                "Home power target saved — thermal loop will apply on next tick"
-            );
+        Ok(result) => {
+            tracing::info!(target_watts, applied_runtime = ?result["applied_runtime"], "Home power request saved");
             // W21 audit-coverage: record the operator-set home power target.
             push_rest_audit_free(
                 &state,
                 "home",
                 format!("Home power target set: {target_watts} W"),
             );
-            Json(serde_json::json!({
-                "status": "ok",
-                "message": "Home power target updated",
-                "target_watts": target_watts,
-                "preset": body.preset,
-            }))
-            .into_response()
+            Json(result).into_response()
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to save home target");
-            Json(serde_json::json!({
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
                 "status": "error",
                 "message": format!("Failed to save: {}", e),
-            }))
+            })))
             .into_response()
         }
     }
@@ -15021,22 +15093,46 @@ pub(super) fn home_preset_values() -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// GET /api/home/presets -- Available home-heating presets.
-///
-/// These estimates are currently S9/BM1387-scoped, not universal across all miners.
-pub(super) async fn get_home_presets(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
-    let presets = home_preset_values();
+pub(super) fn home_presets_for_board(board_target: &str) -> serde_json::Value {
+    match board_target {
+        "am1-s9" => serde_json::json!({
+            "scope": { "kind": "model", "family": "s9", "chip_type": "BM1387", "label": "S9 / BM1387", "universal": false },
+            "presets": home_preset_values(),
+        }),
+        "am2-s19j" => serde_json::json!({
+            "scope": { "kind": "model", "family": "s19j_pro", "chip_type": "BM1362", "label": "S19j Pro / Xilinx", "universal": false },
+            "presets": dcentrald_thermal::profiles::S19J_PRO_HEATER_TARGETS.iter().map(|preset| serde_json::json!({
+                "name": preset.name,
+                "display_name": format!("{} W target", preset.watts),
+                "watts": preset.watts,
+                "btu_h": 0,
+                "noise_db": null,
+                "estimates_available": false,
+                "description": "Requested board-power ceiling. Check live wall power; achieved heat, hashrate and noise depend on your unit.",
+            })).collect::<Vec<_>>(),
+        }),
+        _ => serde_json::json!({
+            "scope": { "kind": "unavailable", "family": "unknown", "chip_type": "unknown", "label": "No presets for this model and controller", "universal": false },
+            "presets": [],
+        }),
+    }
+}
 
-    Json(serde_json::json!({
-        "scope": {
-            "kind": "family",
-            "family": "s9",
-            "chip_type": "BM1387",
-            "label": "S9 / BM1387",
-            "universal": false,
-        },
-        "presets": presets,
-    }))
+/// GET /api/home/presets -- Presets scoped to the resolved exact board identity.
+pub(super) async fn get_home_presets(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let hardware = state.hardware_info.lock().map(|guard| guard.clone()).unwrap_or_default();
+    let board = antminer_board_target(&hardware);
+    let mut response = home_presets_for_board(&board);
+    let available = state.autotuner_command_tx.as_ref().is_some_and(|tx| !tx.is_closed());
+    response["scope"]["live_control_available"] = serde_json::json!(available);
+    response["scope"]["control_note"] = serde_json::json!(if board == "am2-s19j" && !available {
+        "These S19j presets save requests only. This hybrid runtime has no watt-control owner with admitted power inputs."
+    } else if !available {
+        "Targets can be saved, but live power control is unavailable in this runtime."
+    } else {
+        "The autotuner must acknowledge each request. Achieved power can differ; check live telemetry."
+    });
+    Json(response)
 }
 
 /// POST /api/home/room-temp -- Set room temperature (manual/userinput source).
@@ -18306,6 +18402,20 @@ pub(super) async fn get_system_update_capability(
             "board_target": board_target,
             "update_authorized": update_authorized,
             "upload_endpoint": update_authorized.then_some("/api/system/upgrade"),
+            "channel_update": {
+                "feed_base_compiled": option_env!("DCENT_UPDATE_FEED_BASE_URL").is_some(),
+                "compiled_key_required": true,
+                "signed_installed_image_required": true,
+                "requests_revalidate_local_policy": true,
+                "check_endpoint": "/api/system/update/check",
+                "fetch_endpoint": "/api/system/update/fetch",
+                "apply_endpoint": "/api/system/update/apply",
+                "operation_status_endpoint": "/api/system/update/operation",
+                "stored_downloads_endpoint": "/api/system/update/downloads",
+                "discard_endpoint": "/api/system/update/discard",
+                "explicit_install_confirmation_required": true,
+                "automatic_installation": false,
+            },
             "storage_topology": board_desc.map(|desc| desc.enablement.storage_topology.as_str()).unwrap_or("unknown"),
             "update_mechanism": board_desc.map(|desc| desc.enablement.update_mechanism.as_str()).unwrap_or("none"),
             "install_authorization": board_desc.map(|desc| desc.enablement.install_authorization.as_str()).unwrap_or("denied"),
@@ -20726,7 +20836,7 @@ pub(super) async fn post_auth_setup(
             StatusCode::CONFLICT,
             Json(serde_json::json!({
                 "error": "Password already configured",
-                "detail": "Use the physical reset button (hold 15s) to reset the password",
+                "detail": "Use an administrator session to reset DCENT_OS settings, or follow the external-media recovery instructions. No reset-button timing is qualified for this image.",
             })),
         )
             .into_response();
@@ -23252,12 +23362,16 @@ pub(super) async fn get_system_upgrade_status() -> impl IntoResponse {
     let stage_root = Path::new(SYSTEM_UPGRADE_STAGE_ROOT);
     let stage_entries = read_upgrade_stage_entries(stage_root);
     let fwenv = read_upgrade_fwenv_snapshot();
-    Json(build_system_upgrade_status_payload(
+    let mut body = build_system_upgrade_status_payload(
         SYSTEM_UPGRADE_STAGE_ROOT,
         stage_root.exists(),
         &stage_entries,
         &fwenv,
-    ))
+    );
+    body["jobs"] = serde_json::json!(crate::update_job::read_jobs(Path::new(
+        "/data/dcent/update-jobs"
+    )));
+    Json(body)
 }
 
 #[derive(Debug, Default)]
@@ -23491,6 +23605,9 @@ pub(super) async fn post_system_upgrade(
     };
     if let Err(message) = crate::ota_signature::require_public_update_policy(&running_board_target)
     {
+        return system_upgrade_error(StatusCode::FORBIDDEN, message);
+    }
+    if let Err(message) = crate::ota_signature::require_active_storage_policy() {
         return system_upgrade_error(StatusCode::FORBIDDEN, message);
     }
 
@@ -23744,6 +23861,50 @@ pub(super) async fn post_system_upgrade(
         );
     }
 
+    finish_staged_sysupgrade(state, running_board_target, staged_path, uploaded_name,
+        bytes_written, reused_staged_path, apply_update, None).await
+}
+
+pub(crate) async fn require_channel_update_policy(state: &Arc<AppState>) -> Result<String, String> {
+    let descriptor = current_antminer_capability_descriptor(state);
+    if let Some(error) = runtime_capability_guard_error(&descriptor, RuntimeCapability::FlashOta,
+        "/api/system/update/check") {
+        let (_, Json(body)) = capability_error_tuple(error);
+        return Err(body.to_string());
+    }
+    let board = read_running_board_target_for_update().await?;
+    crate::ota_signature::require_public_update_policy(&board)?;
+    crate::ota_signature::require_active_storage_policy()?;
+    Ok(board)
+}
+
+pub(crate) async fn finish_channel_package(
+    state: Arc<AppState>, package: std::path::PathBuf,
+    target: dcent_schema::update::ChannelFeedTarget, apply: bool,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let board = match require_channel_update_policy(&state).await {
+        Ok(board) if board == target.board_target => board,
+        Ok(_) => return system_upgrade_error(StatusCode::FORBIDDEN, "Channel board changed before package preflight"),
+        Err(error) => return system_upgrade_error(StatusCode::FORBIDDEN, error),
+    };
+    let path = package.to_string_lossy().into_owned();
+    let checked = target.clone();
+    let validation = tokio::task::spawn_blocking(move ||
+        crate::channel_download::verify_package_bytes(&package, &checked)).await;
+    match validation {
+        Ok(Ok(())) => (),
+        Ok(Err(error)) => return system_upgrade_error(StatusCode::BAD_REQUEST, error),
+        Err(_) => return system_upgrade_error(StatusCode::INTERNAL_SERVER_ERROR, "Channel byte verification task failed"),
+    }
+    finish_staged_sysupgrade(state, board, path, Some("package.tar".into()),
+        target.size, true, apply, Some(target)).await
+}
+
+async fn finish_staged_sysupgrade(
+    state: Arc<AppState>, running_board_target: String, staged_path: String,
+    uploaded_name: Option<String>, bytes_written: u64, reused_staged_path: bool,
+    apply_update: bool, channel_target: Option<dcent_schema::update::ChannelFeedTarget>,
+) -> (StatusCode, Json<serde_json::Value>) {
     let verified_bundle = match crate::ota_signature::verify_sysupgrade_bundle(
         Path::new(&staged_path),
         false,
@@ -23778,6 +23939,12 @@ pub(super) async fn post_system_upgrade(
             );
         }
     };
+
+    if let Some(target) = &channel_target {
+        if let Err(error) = crate::channel_feed::check_package_identity(&authorized_sysupgrade, target) {
+            return system_upgrade_error(StatusCode::BAD_REQUEST, error);
+        }
+    }
 
     tracing::info!(
         staged_path = %staged_path,
@@ -23886,77 +24053,27 @@ pub(super) async fn post_system_upgrade(
     );
 
     if apply_update {
-        let upgrade_path = staged_path.clone();
+        let launch = if let Some(target) = &channel_target {
+            match require_channel_update_policy(&state).await {
+                Ok(board) if board == target.board_target => (),
+                _ => return system_upgrade_error(StatusCode::FORBIDDEN, "Channel storage policy changed before apply"),
+            }
+            crate::update_job::launch_pinned(&staged_path, &authorized_sysupgrade, &target.sha256).await
+        } else {
+            crate::update_job::launch(&staged_path, &authorized_sysupgrade).await
+        };
+        let job = match launch {
+            Ok(job) => job,
+            Err(error) => return system_upgrade_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+        };
         crate::push_audit_event(
             &state,
             "operator",
             dcentrald_api_types::audit_log::AuditEvent::Free {
-                category: "firmware_update".to_string(),
-                message: format!("DCENT_OS sysupgrade scheduled: path={staged_path}"),
+                category: "firmware_update".into(),
+                message: format!("DCENT_OS update job scheduled: {}", job["job_id"]),
             },
         );
-        // wf_c00e5d9e no-brick A/B follow-up (2026-05-29): the flash runs in a
-        // detached task AFTER the HTTP 200, so previously its success/failure was
-        // visible ONLY in the daemon tracing log — an operator polling the API
-        // could not tell whether the inactive-slot write actually completed. Push
-        // a terminal firmware_update audit event on every outcome so the result is
-        // operator-pollable via the audit-log API (mirrors the "scheduled" event
-        // pushed above). Pure observability addition — the flash behavior, the
-        // tracing logs, and the HTTP response are all unchanged. The completion
-        // event is still NOT version/boot/rollback proof (the unit reboots after);
-        // it only reports the sysupgrade command's own exit disposition.
-        let audit_state = state.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            tracing::info!(upgrade_path = %upgrade_path, "Launching validated sysupgrade from browser upload");
-            match tokio::process::Command::new("sysupgrade")
-                .args(["-f", &upgrade_path])
-                .output()
-                .await
-            {
-                Ok(output) => {
-                    let message = command_output_message(&output);
-                    if output.status.success() {
-                        tracing::info!(upgrade_path = %upgrade_path, sysupgrade_output = %message, "Browser sysupgrade command completed");
-                        crate::push_audit_event(
-                            &audit_state,
-                            "system",
-                            dcentrald_api_types::audit_log::AuditEvent::Free {
-                                category: "firmware_update".to_string(),
-                                message: format!(
-                                    "DCENT_OS sysupgrade command completed (inactive slot written; reboot/boot-commit pending — not yet version/rollback proof): path={upgrade_path}"
-                                ),
-                            },
-                        );
-                    } else {
-                        tracing::error!(upgrade_path = %upgrade_path, sysupgrade_output = %message, "Browser sysupgrade command failed after validation");
-                        crate::push_audit_event(
-                            &audit_state,
-                            "system",
-                            dcentrald_api_types::audit_log::AuditEvent::Free {
-                                category: "firmware_update".to_string(),
-                                message: format!(
-                                    "DCENT_OS sysupgrade command FAILED after validation (inactive slot NOT confirmed written): path={upgrade_path}: {message}"
-                                ),
-                            },
-                        );
-                    }
-                }
-                Err(err) => {
-                    tracing::error!(upgrade_path = %upgrade_path, error = %err, "Failed to launch browser sysupgrade command");
-                    crate::push_audit_event(
-                        &audit_state,
-                        "system",
-                        dcentrald_api_types::audit_log::AuditEvent::Free {
-                            category: "firmware_update".to_string(),
-                            message: format!(
-                                "DCENT_OS sysupgrade FAILED to launch (no flash performed): path={upgrade_path}: {err}"
-                            ),
-                        },
-                    );
-                }
-            }
-        });
 
         return (
             StatusCode::OK,
@@ -23972,6 +24089,7 @@ pub(super) async fn post_system_upgrade(
                 "bytes_written": if reused_staged_path { serde_json::Value::Null } else { serde_json::json!(bytes_written) },
                 "validation_only": false,
                 "update_started": true,
+                "job": job,
                 "reused_staged_path": reused_staged_path,
             })),
         );
@@ -24222,7 +24340,7 @@ mod capability_contract_tests {
     }
 
     #[test]
-    fn hardware_identity_exact_s9_declaration_is_beta_but_read_only() {
+    fn hardware_identity_exact_s9_declaration_permits_config_without_power() {
         let descriptor = build_antminer_capability_descriptor(
             &empty_miner(),
             &declared_hardware("BM1387", "am1-s9", "am1-s9"),
@@ -24230,8 +24348,8 @@ mod capability_contract_tests {
 
         assert_eq!(descriptor.support, CapabilitySupportTier::Beta);
         assert_eq!(descriptor.identity.confidence, IdentityConfidence::Low);
-        assert!(descriptor.fail_safe.read_only);
-        assert!(!descriptor
+        assert!(!descriptor.fail_safe.read_only);
+        assert!(descriptor
             .runtime_caps
             .contains(&RuntimeCapability::ConfigRw));
         assert!(!descriptor.power.writes_enabled);

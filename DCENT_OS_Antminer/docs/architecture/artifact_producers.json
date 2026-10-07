@@ -19,7 +19,8 @@
     {"board_target":"am3-s19k","build_target":"am3-s19kpro","artifact_filename":"dcentos-sysupgrade-am3-s19kpro.tar","install_contract":"guarded_amlogic_rootfs_window"},
     {"board_target":"am3-s19xp","build_target":"am3-s19xp","artifact_filename":"dcentos-sysupgrade-am3-s19xp.tar","install_contract":"package_only_denied"},
     {"board_target":"am3-s19jxp","build_target":"am3-s19jxp","artifact_filename":"dcentos-sysupgrade-am3-s19jxp.tar","install_contract":"package_only_denied"},
+    {"board_target":"am3-s19jproa","build_target":"am3-s19jproa","artifact_filename":"dcentos-sysupgrade-am3-s19jproa.tar","install_contract":"package_only_denied"},
     {"board_target":"am3-s19jproplus","build_target":"am3-s19jproplus","artifact_filename":"dcentos-sysupgrade-am3-s19jproplus.tar","install_contract":"guarded_amlogic_rootfs_window"},
-    {"board_target":"am3-s19jpro-aml","build_target":"am3-s19jpro-aml","artifact_filename":"dcentos-sysupgrade-am3-s19jpro-aml.tar","install_contract":"guarded_amlogic_rootfs_window"}
+    {"board_target":"am3-s19jpro-aml","build_target":"am3-s19jpro-aml","artifact_filename":"dcentos-sysupgrade-am3-s19jpro-aml.tar","install_contract":"package_only_denied"}
   ]
 }

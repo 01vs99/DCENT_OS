@@ -152,10 +152,11 @@ INVARIANT_MACROS = [
             "bm1398_protocol.rs"
         ),
         "macro": "panic",
-        "count": 1,
+        "count": 2,
         "boundary": (
-            "Compile-time construction of the built-in literal 0/114/2 address "
-            "plan; invalid literals fail compilation and no caller input reaches it."
+            "Compile-time construction of the two built-in literal address plans "
+            "(NBP1901 0/114/2 and the shared 76-chip 0/76/3 for NBS1902/NBT1903); "
+            "invalid literals fail compilation and no caller input reaches them."
         ),
     },
     {
@@ -196,6 +197,10 @@ def test_count(text: str) -> int:
 
 
 def surface_class(name: str) -> str:
+    if name == "bb_factory_profile_tests":
+        return "test_fixture"
+    if name == "bb_factory_profile":
+        return "topology_identity"
     if name in CODEC_PARSER_MODULES:
         return "codec_parser"
     if name in CLASSIFIER_PLANNER_MODULES:
@@ -211,6 +216,16 @@ def rust_sources() -> tuple[Path, list[Path]]:
     root = SOURCE_ROOT / "lib.rs"
     modules = sorted(path for path in SOURCE_ROOT.glob("*.rs") if path != root)
     return root, modules
+
+
+def private_test_children() -> dict[str, str]:
+    children = {"bb_factory_profile_tests": "bb_factory_profile"}
+    for child, parent in children.items():
+        source = (SOURCE_ROOT / f"{parent}.rs").read_text(encoding="utf-8")
+        marker = f'#[cfg(test)]\n#[path = "{child}.rs"]\nmod tests;'
+        if marker not in source:
+            raise AssertionError(f"private test-child binding drifted: {parent}/{child}")
+    return children
 
 
 def build_registry() -> dict[str, object]:
@@ -257,7 +272,7 @@ def build_registry() -> dict[str, object]:
         ),
         "source_policy": {
             "rust_source_files": len(module_paths) + 1,
-            "declared_public_modules": len(module_paths),
+            "declared_public_modules": len(module_paths) - len(private_test_children()),
             "features": [],
             "unsafe_blocks": 0,
             "forbidden_runtime_surfaces": [
@@ -270,6 +285,10 @@ def build_registry() -> dict[str, object]:
             ],
         },
         "surface_classes": {
+            "test_fixture": (
+                "Exact private cfg(test) child; its assertions and test-only "
+                "macros grant no production API, identity, readiness, or hardware authority."
+            ),
             "codec_parser": (
                 "Byte/JSON/text codecs and parsers transform caller-owned data "
                 "only; successful decoding does not authenticate origin, "
@@ -298,6 +317,7 @@ def build_registry() -> dict[str, object]:
             ),
         },
         "modules": rows,
+        "private_test_children": private_test_children(),
         "root_surface": {
             "nested_public_modules": {"api_error_codes": API_ERROR_CODES},
             "public_structs": ROOT_STRUCTS,
@@ -387,7 +407,10 @@ def production_macro_census() -> dict[tuple[str, str], int]:
     }
     observed: dict[tuple[str, str], int] = {}
     _, module_paths = rust_sources()
+    children = private_test_children()
     for path in [SOURCE_ROOT / "lib.rs", *module_paths]:
+        if path.stem in children:
+            continue
         production = path.read_text(encoding="utf-8").split("#[cfg(test)]", 1)[0]
         for macro, pattern in patterns.items():
             count = len(re.findall(pattern, production))
@@ -404,11 +427,12 @@ class DcentraldApiTypesModuleRegistryTests(unittest.TestCase):
 
     def test_registry_is_exact_and_complete(self) -> None:
         self.assertEqual(self.registry, self.expected)
-        self.assertEqual(len(self.registry["modules"]), 90)
-        self.assertEqual(self.registry["module_tests"], 1408)
+        self.assertEqual(len(self.registry["modules"]), 92)
+        self.assertEqual(self.registry["module_tests"], 1435)
         self.assertEqual(self.registry["root_surface"]["tests"], 37)
-        self.assertEqual(self.registry["total_tests"], 1445)
-        self.assertEqual(sum(self.registry["public_definition_totals"].values()), 1263)
+        self.assertEqual(self.registry["total_tests"], 1472)
+        self.assertEqual(sum(self.registry["public_definition_totals"].values()), 1294)
+        self.assertEqual(self.registry["source_policy"]["declared_public_modules"], 91)
 
     def test_declared_modules_sources_and_test_prefixes_are_one_to_one(self) -> None:
         root_text = (SOURCE_ROOT / "lib.rs").read_text(encoding="utf-8")
@@ -416,12 +440,19 @@ class DcentraldApiTypesModuleRegistryTests(unittest.TestCase):
             re.findall(r"^pub mod ([A-Za-z0-9_]+);", root_text, re.MULTILINE)
         )
         rows = {row["module"]: row for row in self.registry["modules"]}
-        self.assertEqual(set(rows), declared)
+        children = private_test_children()
+        self.assertEqual(self.registry["private_test_children"], children)
+        self.assertTrue(declared.isdisjoint(children))
+        self.assertEqual(set(rows), declared | set(children))
         self.assertEqual(
             {path.stem for path in SOURCE_ROOT.glob("*.rs") if path.name != "lib.rs"},
-            declared,
+            declared | set(children),
         )
-        self.assertTrue(all(row["tests"] > 0 for row in rows.values()))
+        for name, row in rows.items():
+            owned_tests = row["tests"] + sum(
+                rows[child]["tests"] for child, parent in children.items() if parent == name
+            )
+            self.assertGreater(owned_tests, 0, name)
         self.assertEqual(self.registry["benchmarks"], 0)
         self.assertNotRegex("\n".join(path.read_text(encoding="utf-8") for path in SOURCE_ROOT.glob("*.rs")), r"#\[bench\]")
 

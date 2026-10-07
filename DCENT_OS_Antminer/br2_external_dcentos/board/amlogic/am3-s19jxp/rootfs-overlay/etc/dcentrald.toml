@@ -1,7 +1,5 @@
-# Package-only management identity for Antminer S19j XP.
-# Exact held identity: fw-info model=s19j-xp/platform=aml/install_type=nand,
-# shared BM1366 A113D kernel/DTB bytes, BHB56XXX stock controller family.
-
+# Exact R12 s19jxp native BM1366 beta; boots idle for pool setup.
+# Production PSU owner, protected EEPROM identity, all selected UARTs.
 [general]
 hostname = "dcentos-s19jxp"
 log_level = "info"
@@ -9,14 +7,13 @@ log_level = "info"
 [mining]
 enabled = false
 model = "s19jxp"
-chip = "BM1366"
-chips_per_chain = 110
-chains = 3
-frequency_mhz = 550
-voltage_mv = 13400
+frequency_mhz = 400
+voltage_mv = 12800
 version_rolling = true
 passthrough = false
 suggest_difficulty = 8192
+serial_device = "/dev/ttyS2"
+# The native XP executor fixes cold and mining UART to 115200.
 serial_chip_count = 110
 serial_chip_type = "BM1366"
 
@@ -28,16 +25,17 @@ board_target = "am3-s19jxp"
 url = ""
 worker = ""
 password = "x"
+protocol = "sv1"
 
 [thermal]
-target_temp_c = 65.0
-hot_temp_c = 75.0
-dangerous_temp_c = 88.0
+target_temp_c = 60
+hot_temp_c = 70
+dangerous_temp_c = 80
 fan_min_pwm = 10
 fan_max_pwm = 30
 
 [watchdog]
-enabled = false
+enabled = true
 timeout_s = 30
 kick_interval_s = 5
 
@@ -48,4 +46,10 @@ enabled = false
 active = "home"
 
 [autotuner]
-enabled = false
+# Runtime requires the exact board envelope before each tuning step.
+enabled = true
+
+[api]
+# Read-only LAN monitoring; remote control requires separate explicit opt-in.
+cgminer_bind_lan = true
+cgminer_lan_writes = false

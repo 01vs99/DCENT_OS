@@ -18,12 +18,18 @@ bad() {
 # row must fail one representative live phase before transport; a separate
 # phase-completeness loop below proves all live/deploy/install entry points use
 # the same release-state gate without multiplying every phase by every SKU.
+capture_sku=
+capture_target=
 while IFS='|' read -r sku target arch chip chip_id enum_expect soc boot_chain release_state package note
 do
     case "$sku" in
         ''|'#'*) continue ;;
     esac
     [ "$release_state" = "NOT-IMPLEMENTED" ] || continue
+    if [ -z "$capture_sku" ]; then
+        capture_sku=$sku
+        capture_target=$target
+    fi
 
     phase=enum
     output=$(sh "$harness" "$phase" "$sku" 192.0.2.1 2>&1)
@@ -41,19 +47,21 @@ do
     esac
 done < "$here/skus.conf"
 
+[ -n "$capture_sku" ] || { bad "required NOT-IMPLEMENTED control is absent from skus.conf"; exit 1; }
+
 for phase in detect backup firstlight enum shares soak bench all ota install-hint; do
-    output=$(sh "$harness" "$phase" S15 192.0.2.1 2>&1)
+    output=$(sh "$harness" "$phase" "$capture_sku" 192.0.2.1 2>&1)
     rc=$?
     if [ "$rc" -ne 1 ]; then
-        bad "S15 $phase returned $rc instead of refusal rc=1"
+        bad "$capture_sku $phase returned $rc instead of refusal rc=1"
     fi
     case "$output" in
-        *"$phase is refused for NOT-IMPLEMENTED route S15 (am1-s15)"*) : ;;
-        *) bad "S15 $phase did not report the release-state refusal" ;;
+        *"$phase is refused for NOT-IMPLEMENTED route $capture_sku ($capture_target)"*) : ;;
+        *) bad "$capture_sku $phase did not report the release-state refusal" ;;
     esac
 done
 
-boot_output=$(printf '%s\n' 'accepted share' | sh "$harness" bootlog S15 - 2>&1)
+boot_output=$(printf '%s\n' 'accepted share' | sh "$harness" bootlog "$capture_sku" - 2>&1)
 boot_rc=$?
 if [ "$boot_rc" -ne 0 ]; then
     bad "bootlog returned $boot_rc instead of accepting offline evidence"

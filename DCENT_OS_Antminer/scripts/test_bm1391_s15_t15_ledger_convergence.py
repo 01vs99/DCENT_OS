@@ -82,19 +82,26 @@ class Bm1391S15T15LedgerConvergenceTests(unittest.TestCase):
             self.assertIn(needle, row)
 
     def test_driver_and_registry_keep_every_live_path_scaffold_only(self) -> None:
+        # Re-pinned 2026-09-12 (R04 wave-1 landing, V01-confirmed): the driver
+        # is now release-scoped and evidence-backed — decode_nonce and the
+        # stock-FPGA metadata are REAL (RESPONSE_BYTES_VERIFIED = true, 8-byte
+        # record), while every CARRIER-BOUND operation (init_chain /
+        # set_frequency / send_work) still REFUSES naming the owning artifacts
+        # (stock_bm1391::Transport, dcentrald::bm1391_mining) and set_voltage
+        # routes through the ownership SSOT that refuses before any I/O.
+        # Registry invariant unchanged: production detect(0x1391) stays None.
         driver = (ASIC_DRIVERS / "bm1391.rs").read_text(encoding="utf-8")
         registry = (ASIC_DRIVERS / "mod.rs").read_text(encoding="utf-8")
         self.assertIn("impl ChipDriver for Bm1391Driver", driver)
         self.assertIn("DEFAULT_CHIPS_PER_CHAIN: Option<u8> = None", driver)
-        self.assertIn("RESPONSE_BYTES_VERIFIED: bool = false", driver)
-        for operation in (
-            "init_chain",
-            "set_frequency",
-            "set_voltage",
-            "send_work",
-            "decode_nonce",
+        self.assertIn("RESPONSE_BYTES_VERIFIED: bool = true", driver)
+        for needle in (
+            "CARRIER_REFUSAL",
+            "FREQ_REFUSAL",
+            "WORK_TX_REFUSAL",
+            "stock_bm1391::Transport",
         ):
-            self.assertIn(f'refuse_live_operation("{operation}")', driver)
+            self.assertIn(needle, driver)
         self.assertIn(
             "ChipRegistry::production().detect(bm1391::CHIP_ID).is_none()",
             registry,

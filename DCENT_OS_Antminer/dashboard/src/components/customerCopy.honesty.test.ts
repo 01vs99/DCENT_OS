@@ -65,9 +65,8 @@ describe('customer-facing dashboard copy', () => {
     ];
     for (const rel of required) {
       const source = readFileSync(join(COMPONENTS_DIR, rel), 'utf8');
-      expect(source, `${rel} must include the canonical Fund URL`).toContain(
-        'https://d-central.tech/fund/',
-      );
+      expect(source, `${rel} must import the shared Fund helper`).toMatch(/import \{[^}]*fundContributeUrl[^}]*\} from '[^']*utils\/links'/);
+      expect(source, `${rel} must render the shared Fund destination`).toContain('href={fundContributeUrl(');
     }
   });
 });

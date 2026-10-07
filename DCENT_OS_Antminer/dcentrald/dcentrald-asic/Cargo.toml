@@ -12,9 +12,12 @@ dcentrald-hal = { path = "../dcentrald-hal" }
 thiserror.workspace = true
 bytes.workspace = true
 tracing.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 libc = "0.2"
 
 [features]
+# Hardware environment overrides; excluded from signed Beta/Stable builds.
+lab = ["dcentrald-common/lab", "dcentrald-hal/lab"]
 default = []
 # Host-only golden/replay harness support. This only propagates the HAL's
 # non-shipping simulator symbols; production/default builds remain unchanged.
@@ -26,7 +29,7 @@ sim-hal = ["dcentrald-hal/sim-hal"]
 # recovery executor must use discovered endpoints, manifested artifacts,
 # target-bound single-use permits, readback verification, and fault injection
 # before this feature can gain a runtime consumer.
-recovery-tool = ["dcentrald-hal/recovery-tool"]
+recovery-tool = ["dcentrald-common/lab", "dcentrald-hal/recovery-tool"]
 # `scrypt-l7` compiles the ScryptL7 (L7 / BM1489 Litecoin **Scrypt**) chip driver
 # — DCENT_OS's first non-SHA256 driver (W3-B kickoff). DEFAULT-OFF so production
 # SHA256 builds are byte-unchanged. When enabled, chip-id 0x1489 dispatches to

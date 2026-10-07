@@ -17,14 +17,14 @@ url      = "stratum+tcp://your.pool:3333"
 worker   = "your-btc-address-or-account"
 password = "x"
 
-[donation]               # optional, transparent, fully disableable
-enabled       = true
-percent       = 2.0      # 0.0–5.0; set 0 or enabled=false to turn it off
+[donation]               # 0% default — opt-in, transparent, fully disableable
+enabled       = false    # DCENT_OS ships with ZERO mandatory fee
+percent       = 0.0      # opt in at 1.0–5.0; set 0 or enabled=false to turn it off
 pool_url      = "stratum+tcp://pool.d-central.tech:3333"   # DCENT_Pool (Solo/Guild)
 worker        = "DungeonMaster"
 fallback_pool_url = "stratum+tcp://stratum.braiins.com:3333"  # used only if the primary is down
 fallback_worker   = "DungeonMaster"
-cycle_duration_s  = 3600 # at 2%, that's ~72s of donation per hour
+cycle_duration_s  = 3600 # at an opted-in 2%, that's ~72s of donation per hour
 
 [thermal]
 fan_max_pwm = 30         # home/quiet cap; the daemon cuts hash before exceeding this
@@ -37,7 +37,8 @@ voltage_v = 12.8
 
 ## Donation
 
-The donation is a voluntary, transparent slice of hashtime — never a hidden dev fee. It routes to
+DCENT_OS ships with the donation **off — 0% by default, no mandatory fee, ever**. The donation is
+a voluntary, opt-in, transparent slice of hashtime — never a hidden dev fee. It routes to
 **DCENT_Pool**, D-Central's [Solo/Guild pool](FAQ.md#what-is-dcent_pool), and shows a live
 "DONATING" indicator on the dashboard whenever it's active. Set `percent = 0` or `enabled = false`
 to disable it entirely. If the primary donation endpoint is temporarily unreachable, a visible

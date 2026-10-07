@@ -29,11 +29,15 @@ fn s23_env_gate_registers_scaffold_via_new() {
     std::env::set_var(SCAFFOLD_STUB_ACK_ENV, "1");
     let resolved = ChipRegistry::new()
         .detect(bm1373::ENUM_CHIP_ID)
-        .map(|drv| (drv.chip_name(), drv.chip_id()))
-        .expect("both gates -> 0x1372 resolves via ChipRegistry::new()");
+        .map(|drv| (drv.chip_name(), drv.chip_id()));
     std::env::remove_var(ALLOW_SCAFFOLD_ASIC_DRIVERS_ENV);
     std::env::remove_var(SCAFFOLD_STUB_ACK_ENV);
 
-    assert_eq!(resolved.0, "BM1373");
-    assert_eq!(resolved.1, bm1373::CHIP_ID, "driver reports canonical id");
+    if dcentrald_common::lab_env::compiled() {
+        let resolved = resolved.expect("laboratory build honors both scaffold gates");
+        assert_eq!(resolved.0, "BM1373");
+        assert_eq!(resolved.1, bm1373::CHIP_ID, "driver reports canonical id");
+    } else {
+        assert!(resolved.is_none(), "release build must ignore both scaffold overrides");
+    }
 }

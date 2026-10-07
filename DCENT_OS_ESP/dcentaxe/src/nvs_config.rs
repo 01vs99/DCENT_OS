@@ -508,6 +508,15 @@ pub fn evolution_stage(lifetime_shares: u32) -> (&'static str, &'static str) {
 }
 
 /// Generate a deterministic creature name from the device MAC address.
+///
+/// Called only from the OLED carousel's companion page (`main.rs:7066`),
+/// which sits entirely inside a `#[cfg(feature = "display-ssd1306")]` span
+/// (P1-O4). A `display-none` build has no caller, so the function is
+/// dead-code-warned there without this attribute (CE/EE review,
+/// `EVIDENCE_LEDGER.md` `P1-O4-r1`, LOW). It stays a real, non-`#[cfg]`
+/// function — only the warning is silenced on headless builds — so a future
+/// headless caller costs nothing to add.
+#[cfg_attr(not(feature = "display-ssd1306"), allow(dead_code))]
 pub fn creature_name(mac_byte: u8) -> &'static str {
     const NAMES: &[&str] = &[
         "Sparky", "Nugget", "Bolt", "Pixel", "Chip", "Wattson", "Ohm", "Nonce", "Blocky", "Hashy",
@@ -694,6 +703,11 @@ fn migrate_axeos_config(nvs_partition: &EspDefaultNvsPartition) -> Option<DcentA
     };
 
     Some(DcentAxeConfig {
+        // XPSAFE-8: fan population is per-unit physical truth that no
+        // migration source or setup form knows. Default to the reference
+        // both-headers build; the operator declares otherwise via
+        // `fansPopulated` on /api/system.
+        fans_populated: dcentaxe_hal::board::FanPopulation::Both,
         wifi_ssid,
         wifi_password: read_str("wifipass"),
         stratum: dcentaxe_stratum::StratumConfig {

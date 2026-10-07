@@ -369,12 +369,34 @@ def resolve_signature_output(
     return output, parent
 
 
+def require_signature_windows_acl(path: Path, label: str, *, staged: bool) -> None:
+    """Verify the signature's Windows DACL at its declared canonical tier.
+
+    Published signatures carry the public canonical DACL (one Everyone
+    read ACE); a silent downgrade to a private DACL is a rejection-worthy
+    integrity event there. Staged capsule signatures are created private
+    because the release-set seal admits only private members — the
+    publication flow flips the whole stage public later.
+    """
+    admission = (
+        release_io.require_private_windows_acl
+        if staged
+        else release_io.require_public_windows_acl
+    )
+    try:
+        admission(path, label)
+    except release_io.ReleaseSetError as error:
+        fail(str(error))
+
+
 def reconcile_published_signature(
     path: Path,
     expected: bytes,
     openssl: str,
     receipt: PinnedFile,
     public_key: PinnedFile,
+    *,
+    staged: bool = False,
 ) -> None:
     """Accept only the exact deterministic signature already made authoritative."""
 
@@ -387,12 +409,9 @@ def reconcile_published_signature(
         if os.name == "posix" and stat.S_IMODE(published.initial.st_mode) != 0o644:
             fail(f"published {subject} signature must use canonical mode 0644")
         if os.name == "nt":
-            try:
-                release_io.require_public_windows_acl(
-                    path, f"published {subject} signature"
-                )
-            except release_io.ReleaseSetError as error:
-                fail(str(error))
+            require_signature_windows_acl(
+                path, f"published {subject} signature", staged=staged
+            )
         if published.size != 64 or published.read_bytes() != expected:
             fail(f"existing {subject} signature disagrees with verified bytes")
         run_openssl(
@@ -419,12 +438,9 @@ def reconcile_published_signature(
         published.revalidate()
         release_io.fsync_directory(path.parent)
         if os.name == "nt":
-            try:
-                release_io.require_public_windows_acl(
-                    path, f"published {subject} signature"
-                )
-            except release_io.ReleaseSetError as error:
-                fail(str(error))
+            require_signature_windows_acl(
+                path, f"published {subject} signature", staged=staged
+            )
 
 
 def retire_signing_control(control: Path, pending_signature: Path) -> None:
@@ -435,6 +451,7 @@ def retire_signing_control(control: Path, pending_signature: Path) -> None:
 
 def sign_receipt(args: argparse.Namespace) -> None:
     subject = getattr(args, "subject", "release receipt")
+    staged = bool(getattr(args, "staged_output", False))
     maximum_input_bytes = getattr(
         args, "maximum_input_bytes", MAX_RECEIPT_BYTES
     )
@@ -621,6 +638,7 @@ def sign_receipt(args: argparse.Namespace) -> None:
                         openssl,
                         receipt,
                         public_key,
+                        staged=staged,
                     )
                     revalidate_precommit()
                 else:
@@ -628,7 +646,13 @@ def sign_receipt(args: argparse.Namespace) -> None:
                         release_io.publish_regular_file_noreplace(
                             signature_path,
                             signature_bytes,
-                            mode=0o644,
+                            # Staged capsule signatures enter the release-set
+                            # stage private on Windows: mode 0o644 would apply
+                            # the public Everyone-read SDDL here and fail the
+                            # seal admission. Publication flips the whole
+                            # stage public later. Published signatures keep
+                            # 0o644 on every host.
+                            mode=0o600 if staged and os.name == "nt" else 0o644,
                             before_commit=revalidate_precommit,
                         )
                     except release_io.PublicationCollision as publication_error:
@@ -639,6 +663,7 @@ def sign_receipt(args: argparse.Namespace) -> None:
                                 openssl,
                                 receipt,
                                 public_key,
+                                staged=staged,
                             )
                         except SigningError as reconciliation_error:
                             fail(
@@ -654,6 +679,7 @@ def sign_receipt(args: argparse.Namespace) -> None:
                     openssl,
                     receipt,
                     public_key,
+                    staged=staged,
                 )
                 if manifest is not None:
                     manifest.revalidate()

@@ -30,6 +30,9 @@ use std::os::unix::io::AsRawFd;
 
 use crate::{HalError, Result};
 
+#[path = "serial_tx_observation.rs"]
+pub(crate) mod tx_observation;
+
 /// Standard baud rates supported by Bitmain ASICs.
 pub const BAUD_115200: u32 = 115_200;
 pub const BAUD_1562500: u32 = 1_562_500;
@@ -48,8 +51,9 @@ pub const BAUD_6250000: u32 = 6_250_000;
 
 /// BOTHER cflag value — tells the kernel to use c_ispeed/c_ospeed fields
 /// for the actual baud rate instead of the Bfoo enum constants.
-/// Value: 0o010017 (octal) = 0x1007.
-const BOTHER: u32 = 0o010017;
+/// Linux UAPI asm-generic/termbits.h: BOTHER = 0010000 (0x1000).
+/// CBAUD below is the full selector mask, not the custom-rate selector.
+const BOTHER: u32 = 0o010000;
 
 /// Mask for the baud rate bits in c_cflag (CBAUD).
 const CBAUD: u32 = 0o010017;
@@ -331,7 +335,7 @@ impl SerialChain {
         // SAFETY: `fd` is the live tty fd owned by `self`; `&mut t2` is a valid
         // output buffer with the kernel termios2 layout.
         let ret = unsafe { libc::ioctl(fd, ioctl_request(TCGETS2), &mut t2 as *mut Termios2) };
-        ret == 0 && (t2.c_cflag & BOTHER) == BOTHER
+        ret == 0 && (t2.c_cflag & CBAUD) == BOTHER
     }
 
     /// Check if a baud rate is natively supported by the standard termios API.
@@ -666,6 +670,53 @@ impl SerialChain {
         Ok(())
     }
 
+    /// Temporarily set nonblocking I/O for an exclusively borrowed owner
+    /// conversation. The caller must restore the returned flags on every exit.
+    pub(crate) fn begin_bounded_io(&mut self) -> Result<i32> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: file owns this live descriptor; F_GETFL takes no pointer.
+        let flags = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0 {
+            return Err(HalError::Io(std::io::Error::last_os_error()));
+        }
+        self.restore_io_flags(flags | libc::O_NONBLOCK)?;
+        Ok(flags)
+    }
+
+    pub(crate) fn restore_io_flags(&mut self, flags: i32) -> Result<()> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: live owned descriptor; F_SETFL consumes integer flags only.
+        if unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_SETFL, flags) } < 0 {
+            return Err(HalError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    /// One nonblocking write. Only called inside begin_bounded_io/restore.
+    pub(crate) fn try_write_bounded(&mut self, bytes: &[u8]) -> Result<usize> {
+        match self.file.write(bytes) {
+            Ok(n) => Ok(n),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(0)
+            }
+            Err(e) => Err(HalError::Io(e)),
+        }
+    }
+
+    pub(crate) fn bounded_tx_empty(&self) -> Result<bool> {
+        let mut pending: libc::c_int = 0;
+        // SAFETY: the fd is live and ioctl writes one c_int into pending.
+        if unsafe { libc::ioctl(self.raw_fd(), libc::TIOCOUTQ, &mut pending) } < 0 {
+            return Err(HalError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(pending == 0)
+    }
+
     /// Read available bytes from serial port (non-blocking with VTIME timeout).
     pub fn read_bytes(&mut self, buf: &mut [u8]) -> Result<usize> {
         match self.file.read(buf) {
@@ -738,6 +789,15 @@ impl SerialChain {
         use nix::sys::termios::*;
         tcflush(&self.file, FlushArg::TCIOFLUSH)
             .map_err(|e| HalError::Platform(format!("tcflush {} failed: {}", self.path, e)))?;
+        Ok(())
+    }
+
+    /// Discard stale input while preserving every queued command byte.
+    /// A fresh register/address query must never discard earlier init writes.
+    pub fn flush_rx(&mut self) -> Result<()> {
+        use nix::sys::termios::*;
+        tcflush(&self.file, FlushArg::TCIFLUSH)
+            .map_err(|e| HalError::Platform(format!("RX tcflush {} failed: {}", self.path, e)))?;
         Ok(())
     }
 
@@ -870,19 +930,22 @@ const IER_BOSMINER_PARITY: u32 = 0x05;
 /// but bit-different. Set when `DCENT_AM2_IER_BOSMINER_PARITY=1`.
 const LCR_BOSMINER_PARITY: u32 = 0x13;
 
-/// Read `DCENT_AM2_IER_BOSMINER_PARITY` — when set, DevmemUart writes
-/// `IER = 0x05` + `LCR = 0x13` (matching bosminer's kernel of_serial state
-/// captured live on `a lab unit`). Default OFF preserves `a lab unit`'s baseline
-/// (IER=0x00 polled).
+/// Native am2-s19j uses captured IER=0x05 and LCR=0x13 defaults from the
+/// shipped XIL recipe. A compiled lab may override using the original parser.
 fn am2_ier_bosminer_parity_enabled() -> bool {
-    std::env::var("DCENT_AM2_IER_BOSMINER_PARITY")
+    dcentrald_common::lab_env::var("DCENT_AM2_IER_BOSMINER_PARITY")
         .map(|v| {
             matches!(
                 v.as_str(),
                 "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or_else(|error| {
+            matches!(error, std::env::VarError::NotPresent)
+                && dcentrald_common::runtime_hardware_recipe::am2_default(
+                    dcentrald_common::runtime_hardware_recipe::Am2HardwareFlag::UartIerParity,
+                )
+        })
 }
 
 /// IER baseline for polled-I/O DevmemUart on AM2 Zynq: all interrupts
@@ -944,6 +1007,7 @@ const DCENT_PSU_HW_VARIANT_FILE: &str = "/etc/dcentos/psu_hardware_variant";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Am2McrOut2Mode {
     Baseline,
+    NativeRecipe,
     EnvOverride,
     Xil25Fingerprint,
 }
@@ -1012,24 +1076,29 @@ fn read_first_trimmed(paths: &[&str]) -> Option<String> {
     })
 }
 
-/// Decide between MCR = 0x03 (DTR+RTS only) and MCR = 0x0B
-/// (DTR+RTS+OUT2).
-///
-/// `DCENT_AM2_MCR_OUT2=1` remains the explicit lab/operator override.
-/// In production, `a lab unit`-class XIL units can now self-select OUT2 from the
-/// canonical board fingerprint (`/etc/dcentos/platform = zynq-bm3-am2` and
-/// `/etc/dcentos/board_target` ending in `xil`). The  `a lab unit`
-/// package-identity bridge also honors
-/// `DCENT_AM2_XIL25_FINGERPRINT_OVERRIDE=1`, but only when the package
-/// board_target is exactly `am2-s19j`. Non-`a lab unit` AM2 units keep the R4
-/// baseline unless the operator sets the explicit MCR env override.
+/// Select the captured native AM2 transport default. Lab builds retain the
+/// historical explicit override and marker-based desk/bench selection.
 fn am2_mcr_out2_mode(path: &str) -> Am2McrOut2Mode {
-    let env_value = match std::env::var(AM2_MCR_OUT2_ENV) {
+    let env_value = match dcentrald_common::lab_env::var(AM2_MCR_OUT2_ENV) {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
         Err(std::env::VarError::NotUnicode(_)) => return Am2McrOut2Mode::Baseline,
     };
-    let fingerprint_override = match std::env::var(XIL_25_FINGERPRINT_OVERRIDE_ENV) {
+    if let Some(value) = env_value.as_deref() {
+        return am2_mcr_out2_mode_for_inputs(path, Some(value), None, None, None);
+    }
+    if is_zynq_am2_pl_uart_path(path)
+        && dcentrald_common::runtime_hardware_recipe::am2_default(
+            dcentrald_common::runtime_hardware_recipe::Am2HardwareFlag::UartMcrOut2,
+        )
+    {
+        return Am2McrOut2Mode::NativeRecipe;
+    }
+    if !dcentrald_common::lab_env::compiled() {
+        return Am2McrOut2Mode::Baseline;
+    }
+    let fingerprint_override = match dcentrald_common::lab_env::var(XIL_25_FINGERPRINT_OVERRIDE_ENV)
+    {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
         Err(std::env::VarError::NotUnicode(_)) => return Am2McrOut2Mode::Baseline,
@@ -1137,7 +1206,9 @@ static UART_MMIO_MAP_ZYNQ: &[UartMmioEntry] = &[
     },
 ];
 
-/// Cvitek CV1835 UART MMIO map (DesignWare 16550A, fractional baud support).
+/// Rejected historical CV1835 UART proposal, retained only for mismatch tests.
+/// Stock-DTB evidence contradicts these addresses and clocks; it is never
+/// compiled into a runtime table. See docs/CV1835_STATUS.md.
 ///
 /// Source: DCENT_OS_DEVELOPMENT_KIT/SOURCE_HAL/devmem_uart.h and
 /// DOCS/multi_platform_master.md "Cvitek CV1835 Control Board" section.
@@ -1152,6 +1223,7 @@ static UART_MMIO_MAP_ZYNQ: &[UartMmioEntry] = &[
 /// corrected in lockstep.)
 // `static` (not `const`) — see UART_MMIO_MAP_ZYNQ: required for the ptr::eq
 // table-identity check in `UartPlatform::of_table` to be sound.
+#[cfg(test)]
 static UART_MMIO_MAP_CV1835: &[UartMmioEntry] = &[
     UartMmioEntry {
         path: "/dev/ttyS0",
@@ -1280,6 +1352,7 @@ static ACTIVE_UART_TABLE: std::sync::OnceLock<&'static [UartMmioEntry]> =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UartPlatform {
     Zynq,
+    #[cfg(test)]
     Cv1835,
     Am335x,
 }
@@ -1288,10 +1361,12 @@ impl UartPlatform {
     /// The platform a given static table belongs to. Compared by pointer
     /// identity (all three tables are `'static` singletons).
     fn of_table(table: &'static [UartMmioEntry]) -> Option<UartPlatform> {
+        #[cfg(test)]
+        if std::ptr::eq(table.as_ptr(), UART_MMIO_MAP_CV1835.as_ptr()) {
+            return Some(UartPlatform::Cv1835);
+        }
         if std::ptr::eq(table.as_ptr(), UART_MMIO_MAP_ZYNQ.as_ptr()) {
             Some(UartPlatform::Zynq)
-        } else if std::ptr::eq(table.as_ptr(), UART_MMIO_MAP_CV1835.as_ptr()) {
-            Some(UartPlatform::Cv1835)
         } else if std::ptr::eq(table.as_ptr(), UART_MMIO_MAP_AM335X.as_ptr()) {
             Some(UartPlatform::Am335x)
         } else {
@@ -1329,22 +1404,10 @@ fn declare_uart_platform(platform: UartPlatform) -> Result<()> {
     Ok(())
 }
 
-/// Explicitly select the CV1835 UART MMIO table.
-///
-/// Idempotent on repeat calls with the same table (OnceLock returns Err on
-/// second `set` attempt; we ignore that as long as the active table matches).
-/// Retained for evidence-only CV1835 work; no admitted production constructor
-/// calls it.
-#[allow(dead_code)]
-pub(crate) fn select_uart_table_cv1835() -> Result<()> {
-    select_uart_table(UART_MMIO_MAP_CV1835)
-}
-
 /// Explicitly select the Zynq UART MMIO table.
 ///
 /// Most callers don't need to call this — Zynq is the default. Provided for
-/// symmetry with `select_uart_table_cv1835` and so `platform::zynq` can
-/// assert the choice explicitly during cold boot.
+/// `platform::zynq` to assert the choice explicitly during cold boot.
 #[allow(dead_code)]
 pub(crate) fn select_uart_table_zynq() -> Result<()> {
     select_uart_table(UART_MMIO_MAP_ZYNQ)
@@ -1389,13 +1452,6 @@ pub fn declare_uart_platform_am335x() -> Result<()> {
 #[allow(dead_code)]
 pub fn declare_uart_platform_zynq() -> Result<()> {
     declare_uart_platform(UartPlatform::Zynq)
-}
-
-/// CE-008: declare this process is running on a CV1835 control board,
-/// independently of selecting the UART table.
-#[allow(dead_code)]
-pub fn declare_uart_platform_cv1835() -> Result<()> {
-    declare_uart_platform(UartPlatform::Cv1835)
 }
 
 fn select_uart_table(table: &'static [UartMmioEntry]) -> Result<()> {
@@ -1673,7 +1729,9 @@ pub(crate) fn pl_uart_diag_registers(path: &str) -> Option<(u32, u32, u32)> {
 pub(crate) fn pl_uart_assert_mcr_out2(path: &str) -> Result<Option<(u32, u32)>> {
     match am2_mcr_out2_mode(path) {
         Am2McrOut2Mode::Baseline => return Ok(None),
-        Am2McrOut2Mode::EnvOverride | Am2McrOut2Mode::Xil25Fingerprint => {}
+        Am2McrOut2Mode::NativeRecipe
+        | Am2McrOut2Mode::EnvOverride
+        | Am2McrOut2Mode::Xil25Fingerprint => {}
     }
     assert_active_table_matches_platform()?;
     let entry = lookup_uart_entry(path).ok_or_else(|| {
@@ -1944,6 +2002,14 @@ impl DevmemUart {
         // and .
         let mcr_mode = am2_mcr_out2_mode(path);
         let mcr_value = match mcr_mode {
+            Am2McrOut2Mode::NativeRecipe => {
+                tracing::info!(
+                    path,
+                    mcr = "0x0B",
+                    "DevmemUart: MCR=DTR+RTS+OUT2 from captured AM2 recipe"
+                );
+                MCR_DTR_RTS_OUT2
+            }
             Am2McrOut2Mode::EnvOverride => {
                 tracing::info!(
                     path,
@@ -2157,6 +2223,23 @@ impl DevmemUart {
         Ok(())
     }
 
+    /// One nonblocking TX step for the existing owner. A full holding
+    /// register causes no write; the conversation owns its absolute deadline.
+    pub(crate) fn try_write_bounded(&self, bytes: &[u8]) -> Result<usize> {
+        let Some(&byte) = bytes.first() else {
+            return Ok(0);
+        };
+        if self.read_reg(UART_LSR) & LSR_THRE == 0 {
+            return Ok(0);
+        }
+        self.write_reg(UART_RBR_THR, u32::from(byte));
+        Ok(1)
+    }
+
+    pub(crate) fn bounded_tx_empty(&self) -> bool {
+        self.read_reg(UART_LSR) & LSR_TX_IDLE == LSR_TX_IDLE
+    }
+
     /// Read available bytes from the UART (polled RX, non-blocking).
     ///
     /// Returns the number of bytes read. Returns 0 immediately if no data.
@@ -2188,6 +2271,23 @@ impl DevmemUart {
             }
         }
         n
+    }
+
+    /// Discard a bounded stale RX window without touching TX or UART control.
+    pub fn flush_rx(&self) -> Result<()> {
+        for _ in 0..256 {
+            if self.read_reg(UART_LSR) & LSR_DR == 0 {
+                return Ok(());
+            }
+            let _ = self.read_reg(UART_RBR_THR);
+        }
+        if self.read_reg(UART_LSR) & LSR_DR != 0 {
+            return Err(HalError::Platform(format!(
+                "RX remains active after bounded flush on {}",
+                self.path
+            )));
+        }
+        Ok(())
     }
 
     /// Flush: drain RX FIFO and wait for TX to complete.
@@ -2276,6 +2376,56 @@ impl Drop for DevmemUart {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_native_uart_defaults_ignore_unsigned_environment_in_release() {
+        use dcentrald_common::runtime_hardware_recipe::{
+            self, HardwareRecipeProfile, RuntimeHardwareRecipe,
+        };
+        const CHILD: &str = "DCENT_UART_RECIPE_TEST_CHILD";
+        let cases = [
+            ("absent", None, true),
+            ("enabled", Some("1"), true),
+            ("false", Some("0"), false),
+            ("untrimmed", Some(" 1 "), false),
+        ];
+        if let Ok(case) = std::env::var(CHILD) {
+            let recipe = RuntimeHardwareRecipe::resolve(
+                dcentrald_common::BoardDesc::lookup("am2-s19j").unwrap(),
+                "Zynq am2",
+                "s19j-hybrid",
+                HardwareRecipeProfile::BoardDefault,
+            )
+            .unwrap();
+            runtime_hardware_recipe::install(recipe).unwrap();
+            let expected = !dcentrald_common::lab_env::compiled()
+                || cases.iter().find(|row| row.0 == case).unwrap().2;
+            assert_eq!(am2_ier_bosminer_parity_enabled(), expected);
+            assert_eq!(
+                am2_mcr_out2_mode("/dev/ttyS1") != Am2McrOut2Mode::Baseline,
+                expected
+            );
+            if case == "absent" {
+                assert_eq!(
+                    am2_mcr_out2_mode("/dev/ttyS1"),
+                    Am2McrOut2Mode::NativeRecipe
+                );
+                assert_eq!(am2_mcr_out2_mode("/dev/ttyPS0"), Am2McrOut2Mode::Baseline);
+            }
+            return;
+        }
+        for (name, value, _) in cases {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "serial::tests::captured_native_uart_defaults_ignore_unsigned_environment_in_release"]).env(CHILD, name);
+            for env in ["DCENT_AM2_MCR_OUT2", "DCENT_AM2_IER_BOSMINER_PARITY"] {
+                child.env_remove(env);
+                if let Some(value) = value {
+                    child.env(env, value);
+                }
+            }
+            assert!(child.status().unwrap().success(), "{name}");
+        }
+    }
 
     /// Pure helper used only by tests — looks up a path against a specific
     /// table without touching the global `ACTIVE_UART_TABLE` OnceLock. This
@@ -2408,7 +2558,7 @@ mod tests {
     }
 
     #[test]
-    fn cv1835_table_has_5_uart_entries_at_correct_bases() {
+    fn retired_cv1835_proposal_has_no_runtime_selector() {
         // The dev-kit's devmem_uart.h documents 5 UART blocks at 4 KB stride
         // starting at 0x0500_C000. This sanity-check guards against accidental
         // address-table edits that would silently route ASIC chains to wrong
@@ -2863,3 +3013,11 @@ mod tests {
         }
     }
 }
+
+// Local PTY regression; no target hardware or default feature required.
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+#[path = "serial_custom_baud_abi_tests.rs"]
+mod custom_baud_abi_tests;
+
+#[path = "serial_baud_transition.rs"]
+pub(crate) mod baud_transition;

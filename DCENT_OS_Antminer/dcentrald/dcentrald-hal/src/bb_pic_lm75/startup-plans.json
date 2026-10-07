@@ -1,0 +1,729 @@
+{
+  "bridges": [
+    {
+      "sensor": 72,
+      "events": [
+        {
+          "kind": "send",
+          "pc": "0x4b10d8",
+          "frame": "55aa063c4802008c",
+          "address": 32,
+          "index": 6,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b117c",
+          "value": 60,
+          "index": 19,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b117c",
+          "value": 0,
+          "index": 20,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b117c",
+          "value": 0,
+          "index": 21,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b117c",
+          "value": 0,
+          "index": 22,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b117c",
+          "value": 0,
+          "index": 23,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b117c",
+          "value": 0,
+          "index": 24,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b117c",
+          "value": 0,
+          "index": 25,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        }
+      ],
+      "source_query_plan": [
+        {
+          "write": [
+            85,
+            170,
+            6,
+            60,
+            72,
+            2,
+            0,
+            140
+          ]
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        }
+      ],
+      "separate_following_transition_ms": 0
+    },
+    {
+      "sensor": 73,
+      "events": [
+        {
+          "kind": "send",
+          "pc": "0x4b265c",
+          "frame": "55aa063c4902008d",
+          "address": 32,
+          "index": 7,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b26fc",
+          "value": 60,
+          "index": 26,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b26fc",
+          "value": 0,
+          "index": 27,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b26fc",
+          "value": 0,
+          "index": 28,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b26fc",
+          "value": 0,
+          "index": 29,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b26fc",
+          "value": 0,
+          "index": 30,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b26fc",
+          "value": 0,
+          "index": 31,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b26fc",
+          "value": 0,
+          "index": 32,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        }
+      ],
+      "source_query_plan": [
+        {
+          "write": [
+            85,
+            170,
+            6,
+            60,
+            73,
+            2,
+            0,
+            141
+          ]
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        }
+      ],
+      "separate_following_transition_ms": 0
+    },
+    {
+      "sensor": 74,
+      "events": [
+        {
+          "kind": "send",
+          "pc": "0x4b3bdc",
+          "frame": "55aa063c4a02008e",
+          "address": 32,
+          "index": 8,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b3c70",
+          "value": 60,
+          "index": 33,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b3c70",
+          "value": 0,
+          "index": 34,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b3c70",
+          "value": 0,
+          "index": 35,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b3c70",
+          "value": 0,
+          "index": 36,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b3c70",
+          "value": 0,
+          "index": 37,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b3c70",
+          "value": 0,
+          "index": 38,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b3c70",
+          "value": 0,
+          "index": 39,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        }
+      ],
+      "source_query_plan": [
+        {
+          "write": [
+            85,
+            170,
+            6,
+            60,
+            74,
+            2,
+            0,
+            142
+          ]
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        }
+      ],
+      "separate_following_transition_ms": 0
+    },
+    {
+      "sensor": 75,
+      "events": [
+        {
+          "kind": "send",
+          "pc": "0x4b4da4",
+          "frame": "55aa063c4b02008f",
+          "address": 32,
+          "index": 9,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b4e34",
+          "value": 60,
+          "index": 40,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b4e34",
+          "value": 0,
+          "index": 41,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b4e34",
+          "value": 0,
+          "index": 42,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b4e34",
+          "value": 0,
+          "index": 43,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b4e34",
+          "value": 0,
+          "index": 44,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b4e34",
+          "value": 0,
+          "index": 45,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "read",
+          "pc": "0x4b4e34",
+          "value": 0,
+          "index": 46,
+          "result_tag": 7
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            20000000
+          ]
+        },
+        {
+          "kind": "nanosleep",
+          "requested": [
+            0,
+            50000000
+          ]
+        }
+      ],
+      "source_query_plan": [
+        {
+          "write": [
+            85,
+            170,
+            6,
+            60,
+            75,
+            2,
+            0,
+            143
+          ]
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        },
+        {
+          "read": 1
+        },
+        {
+          "sleep_ms": 20
+        }
+      ],
+      "separate_following_transition_ms": 50
+    }
+  ],
+  "profile_case": {
+    "0x76": 0,
+    "0x7c": 1,
+    "0x77": 1
+  },
+  "scope": "Actual original query and sleep requests, queue result values modeled. Separate fourth-query 50ms transition stays caller-owned."
+}

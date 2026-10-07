@@ -284,7 +284,7 @@ caller_packaged_close_precedes_ubi()
     _dcent_input_payload_hash=$(caller_line "$_dcent_input_caller" 'if ! verify_sha256 "$PACKAGE_KERNEL"')
     _dcent_input_package_close=$(grep -n '^    verify_and_close_sysupgrade_input || exit 1$' \
         "$_dcent_input_caller" | sed -n '1s/:.*//p')
-    _dcent_input_first_ubi=$(caller_line "$_dcent_input_caller" 'if ! dcent_ubi_attach_mtd "$INACTIVE_MTD" 1 2>/dev/null; then')
+    _dcent_input_first_ubi=$(caller_line "$_dcent_input_caller" 'if ! dcent_ubi_attach_mtd "$INACTIVE_MTD" 1')
     case "$_dcent_input_payload_hash" in ''|*[!0-9]*) return 1 ;; esac
     case "$_dcent_input_package_close" in ''|*[!0-9]*) return 1 ;; esac
     case "$_dcent_input_first_ubi" in ''|*[!0-9]*) return 1 ;; esac
@@ -309,7 +309,7 @@ caller_raw_checkpoint_precedes_ubi()
     _dcent_input_guard=$(caller_line "$_dcent_input_caller" 'if [ "$PACKAGE_INPUT_IS_TAR" -eq 0 ]; then')
     _dcent_input_checkpoint=$(caller_line "$_dcent_input_caller" 'verify_sysupgrade_input_unchanged || exit 1')
     _dcent_input_absence=$(caller_line "$_dcent_input_caller" 'if ! dcent_ubi_attachment_require_absent /sys/class/ubi 1 "$INACTIVE_MTD"; then')
-    _dcent_input_first_ubi=$(caller_line "$_dcent_input_caller" 'if ! dcent_ubi_attach_mtd "$INACTIVE_MTD" 1 2>/dev/null; then')
+    _dcent_input_first_ubi=$(caller_line "$_dcent_input_caller" 'if ! dcent_ubi_attach_mtd "$INACTIVE_MTD" 1')
     case "$_dcent_input_guard" in ''|*[!0-9]*) return 1 ;; esac
     case "$_dcent_input_checkpoint" in ''|*[!0-9]*) return 1 ;; esac
     case "$_dcent_input_absence" in ''|*[!0-9]*) return 1 ;; esac

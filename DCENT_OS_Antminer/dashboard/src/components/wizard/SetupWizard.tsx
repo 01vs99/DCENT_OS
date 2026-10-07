@@ -119,7 +119,10 @@ const DEFAULT_DONATION_PASSWORD = 'x';
 const DEFAULT_DONATION_FALLBACK_POOL_URL = 'stratum+tcp://stratum.braiins.com:3333';
 const DEFAULT_DONATION_FALLBACK_WORKER = 'DungeonMaster';
 const DEFAULT_DONATION_CYCLE_S = 3600;
-const DEFAULT_DONATION_PERCENT = 2;
+// C6 (operator 2026-09-01): the wizard mirrors the firmware's 0% default —
+// donation is opt-in. Enabling via the toggle presets the smallest honest
+// opt-in (1%), never a hidden take.
+const DEFAULT_DONATION_PERCENT = 0;
 
 const DEFAULT_STATE: WizardState = {
   currentStep: 0,
@@ -135,7 +138,7 @@ const DEFAULT_STATE: WizardState = {
   calibration: DEFAULT_CALIBRATION_STEP_VALUE,
   homeComfort: DEFAULT_HOME_COMFORT_STEP_VALUE,
   pool: { url: '', worker: '', password: 'x' },
-  donation: { enabled: true, percent: 2 },
+  donation: { enabled: false, percent: 0 },
   password: '',
   confirmPassword: '',
   safetyConfirmed: false,
@@ -151,7 +154,7 @@ function clampDonationPercent(value: unknown): number {
 
 function normalizeDonationStepValue(value: Partial<DonationStepValue> | undefined): DonationStepValue {
   return {
-    enabled: value?.enabled ?? true,
+    enabled: value?.enabled ?? false,
     percent: clampDonationPercent(value?.percent),
   };
 }

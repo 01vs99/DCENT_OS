@@ -474,8 +474,13 @@ fn dspic_bosminer_faithful_value_enabled(value: Option<&str>) -> bool {
 /// `dspic_get_version_transaction_steps` to skip the parser flush and
 /// by `bosminer_warmup` to scale the sync-prelude length down to 7.
 pub fn dspic_bosminer_faithful_enabled() -> bool {
-    let value = std::env::var("DCENT_AM2_DSPIC_BOSMINER_FAITHFUL").ok();
-    dspic_bosminer_faithful_value_enabled(value.as_deref())
+    match dcentrald_common::lab_env::var("DCENT_AM2_DSPIC_BOSMINER_FAITHFUL") {
+        Ok(value) => dspic_bosminer_faithful_value_enabled(Some(&value)),
+        Err(std::env::VarError::NotPresent) => dcentrald_common::runtime_hardware_recipe::am2_default(
+            dcentrald_common::runtime_hardware_recipe::Am2HardwareFlag::BosminerDsPicPacing,
+        ),
+        Err(std::env::VarError::NotUnicode(_)) => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -610,7 +615,7 @@ fn classify_enable_ack(ack: &[u8], expected_fw: Option<u8>) -> EnableVoltageAckK
 }
 
 fn dspic_require_real_enable_ack_enabled() -> bool {
-    std::env::var("DCENT_AM2_REQUIRE_REAL_ENABLE_ACK")
+    dcentrald_common::lab_env::var("DCENT_AM2_REQUIRE_REAL_ENABLE_ACK")
         .map(|v| {
             matches!(
                 v.as_str(),
@@ -643,7 +648,7 @@ fn dspic_require_real_enable_ack_enabled() -> bool {
 /// outcome when opted in; it pins the vendor bar against a future regression to
 /// `[0x15, 0x00]`.
 fn dspic_require_enable_flag_on_enabled() -> bool {
-    std::env::var("DCENT_AM2_REQUIRE_ENABLE_FLAG_ON")
+    dcentrald_common::lab_env::var("DCENT_AM2_REQUIRE_ENABLE_FLAG_ON")
         .map(|v| {
             matches!(
                 v.as_str(),
@@ -914,7 +919,7 @@ fn force_fw89_encoding_value_enabled(value: Option<&str>) -> bool {
 }
 
 fn force_fw89_encoding_enabled_from_env() -> bool {
-    let value = std::env::var(DSPIC_FORCE_FW89_ENCODING_ENV).ok();
+    let value = dcentrald_common::lab_env::var(DSPIC_FORCE_FW89_ENCODING_ENV).ok();
     force_fw89_encoding_value_enabled(value.as_deref())
 }
 
@@ -1170,7 +1175,7 @@ fn ensure_dspic_runtime_protocol_is_proven(
 
 /// Read the process environment for the lab-only fw=0x86 voltage override.
 pub fn dspic_fw86_trust_degraded_override_enabled() -> bool {
-    std::env::var(DSPIC_FW86_TRUST_DEGRADED_ENV)
+    dcentrald_common::lab_env::var(DSPIC_FW86_TRUST_DEGRADED_ENV)
         .map(|value| value == "1")
         .unwrap_or(false)
 }
@@ -1247,7 +1252,7 @@ pub fn clamp_dspic_voltage_to_hard_cap(voltage_mv: u16, lab_overvolt: bool) -> (
 
 /// Read the process environment for the lab-only over-volt override.
 pub fn dspic_lab_overvolt_override_enabled() -> bool {
-    std::env::var(DSPIC_ALLOW_LAB_OVERVOLT_ENV)
+    dcentrald_common::lab_env::var(DSPIC_ALLOW_LAB_OVERVOLT_ENV)
         .map(|value| value == "1")
         .unwrap_or(false)
 }

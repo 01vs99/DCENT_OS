@@ -21,11 +21,11 @@ POLICY = Path(__file__).with_name("s19k_hermetic_dependencies.json")
 PROJECT = SCRIPT.parent.parent
 REPO_ROOT = PROJECT.parent.parent
 SELECTION_SCHEMA = "dcentos.s19k-hermetic-dependency-selection/v1"
-POLICY_SHA256 = "e2404535f875adca47fd149a02d9bdb57848bf9da22a4e1f1247b185013b988a"
+POLICY_SHA256 = "f7101ab4eff6fe2eb59a4080f0d3aef96d9e6ef525e0071c861298c4d4378fa1"
 BUILDROOT_COMMIT = "7c8edc1b402efcd7bba2dabfe0b3be877adaed7a"
 BUILDROOT_ARCHIVE_SHA256 = "b9dc4163c397c67ad7cbe71499cfba7363413b021e8c49cca96892adb90acd19"
 BUILDROOT_ARCHIVE_BYTES = 35_901_440
-TOOLCHAIN_SHA256 = "40dce3d35e95a3a92cba27acbb21f30f86a720d320bc2a2e8a48fea423bc16f7"
+TOOLCHAIN_SHA256 = "20181f828e1075f1a493947ff91e82dd578ce9f8638fbdfc39e24b62857d8f8d"
 MANDATORY_CLASSES = [
     "amlogic-input",
     "buildroot-download",
@@ -105,7 +105,7 @@ class HermeticMaterializerPolicyTests(unittest.TestCase):
             self.assertEqual(digest(raw), lock["sha256"], section)
         self.assertEqual(
             self.policy["cargo"]["lock"]["sha256"],
-            "701a79a2be1687b2c80b1080892d72a2518e52fa8c899460cbf17342dbf039fa",
+            "1b0f9ccade4f175dee81c38851607f1378734faef98b7d518e6551624b764663",
         )
         self.assertEqual(
             self.policy["dashboard"]["lock"]["sha256"],

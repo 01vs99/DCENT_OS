@@ -170,12 +170,23 @@ pub fn admit_protocol_over_transport(
             | AsicProtocolIdentity::Bm1396,
             _,
         ) => false,
-        // BM139x AM2 hybrid / serial / uart_trans family
+        // BM139x AM2 native / hybrid / serial / uart_trans family. The S17
+        // native lifecycle owns StockFpga with its work/nonce FIFOs; the R07 S19
+        // Pro lifecycle (am2-s19pro) additionally runs BM1398 over its
+        // retained-owner FPGA UIO work FIFO, so that exact tuple admits.
         (
-            AsicProtocolIdentity::Bm1397 | AsicProtocolIdentity::Bm1398,
+            AsicProtocolIdentity::Bm1397,
             ChainTransportKind::ZynqHybrid
-            | ChainTransportKind::Serial
-            | ChainTransportKind::UartTrans,
+                | ChainTransportKind::Serial
+                | ChainTransportKind::UartTrans
+                | ChainTransportKind::StockFpga,
+        ) => true,
+        (
+            AsicProtocolIdentity::Bm1398,
+            ChainTransportKind::ZynqHybrid
+                | ChainTransportKind::Serial
+                | ChainTransportKind::UartTrans
+                | ChainTransportKind::FpgaUio,
         ) => true,
         // BM1362 — hybrid (XIL) + serial (BB) + uart_trans (CV evidence rows)
         (
@@ -217,7 +228,7 @@ pub fn admit_work_engine_over_transport(
         (ChainTransportKind::None, _) => false,
         (_, WorkEngineKind::ManagementOnly) => false,
         (ChainTransportKind::FpgaUio, WorkEngineKind::FpgaWorkFifo) => true,
-        (ChainTransportKind::StockFpga, WorkEngineKind::StockDma) => true,
+        (ChainTransportKind::StockFpga, WorkEngineKind::StockDma | WorkEngineKind::FpgaWorkFifo) => true,
         (
             ChainTransportKind::Serial | ChainTransportKind::UartTrans,
             WorkEngineKind::SerialWork,

@@ -1,0 +1,6381 @@
+{
+ "_provenance": {
+  "doc": "VNish 1.3.5 preset DB delta vs 1.2.6/1.2.7 baseline (desk extraction, strings-only)",
+  "label": "[VNISH-proprietary]",
+  "capture_date": "2026-09-13/15 (acquisition); extracted 2026-10-05",
+  "source_corpora": [
+   " (vnish components)",
+   " (47 model tarballs)",
+   " (1.2.6/1.2.7 baseline hwscan binaries)"
+  ],
+  "baseline_reference_docs": [
+   "",
+   "*.md"
+  ],
+  "method": "tar/uImage/FIT unpack -> cpio(newc) -> usr/bin/hwscan -> printable-string extraction; preset arrays split at rodata stride gaps (>24B); model attribution by adjacent-name string + row-content matching vs 1.2.7 master; no disassembly, no code copying",
+  "hwscan_sha256_1_3_5_universal": "951208595a494722... (prefix; identical binary in all 47 tarballs)",
+  "caveats": [
+   "ORACLE-CLASS ONLY per C2-F2: vendor capture, never a shipped DCENT_OS default",
+   "preset rows are power-target pairs (watt ~ TH/MH); frequency/voltage derived at runtime by VNish autotuner - NOT stored per preset",
+   "S21-family hydro model/mode attribution across sibling sets (S21 Hydro/S21e/S21+/S21 Pro) is ambiguous where sets share identical rows; label_confidence marks this",
+   "thermal/fan numeric constants (fan_min=10, PID target 65C, danger 90C etc.) are compiled Rust struct fields, not strings: 1.3.5 KEY SURFACE verified unchanged, VALUES not re-extracted desk-only; prior 1.2.7 mining values remain reference",
+   "watt/TH values are vendor planning tables, not measurements of any single unit"
+  ]
+ },
+ "oracle_class_banner": "ORACLE-CLASS FIXTURE (C2-F2): measured-anchor := DCENT_OS-measured only. This vendor table is an emulation-twin expected-value oracle and sanity bound; it MUST NOT become a shipped preset default.",
+ "delta_headline": {
+  "rows_1_2_7_master": 764,
+  "rows_1_3_5_universal": 752,
+  "rows_identical": 631,
+  "rows_removed": 133,
+  "rows_added": 121,
+  "model_clusters_changed": [
+   "L7/L9 scrypt set2 extended: 19 -> 28 rows (2050W~11900MH entry, 6552W~31000MH ceiling)",
+   "Antminer U2L9H: NEW model, 41-row scrypt table (3927W~18700MH .. 6552W~31000MH)",
+   "Antminer S21e Hydro performance set RESCALED: same TH steps 412..482TH now at ~28-30% lower watts (e.g. 412TH: 10139W -> 7230W; 482TH: 14428W -> 9930W)",
+   "Antminer S19 XP Hydro: consolidated to one 28-row curve from 1950W~113TH + new 2-row high-perf pair (6100W~275TH, 6450W~284TH)",
+   "Antminer S21 Hydro: new FR-1.1(250416) curve 2000W~148TH..5800W~359TH replacing prior 2500W~148..6300W~383 performance set",
+   "Antminer T19 Pro Hydro set returns (absent from 1.2.7 master; present 1.2.6 S21Pro build per catalog 2.15)",
+   "Antminer S19Pro+ Hydro low-power set trimmed 4 rows (23 -> 19)",
+   "Antminer T19 Hydro +1 row; U3S19XP+H restructured +16/-9; S19e XP Hydro +12/-8"
+  ],
+  "unchanged_models": [
+   "S19 (126)",
+   "S19 (88)",
+   "S19 Hydro",
+   "S19a Pro",
+   "S19j Pro-A",
+   "S19j Pro+",
+   "S19k Pro",
+   "S19 Pro Hydro (120)",
+   "S19 Pro Hydro",
+   "S19 XP+ Hydro",
+   "S21 XP HYDRO",
+   "U3S21EXPH"
+  ]
+ },
+ "key_surface_delta_1_2_7_to_1_3_5": {
+  "thermal_fan_keys_unchanged": [
+   "danger_chip_temp",
+   "hot_chip_temp",
+   "danger_board_temp",
+   "normal_start_temp",
+   "min_start_temp",
+   "fan_min_count",
+   "fan_duty(min/max)",
+   "target_temp",
+   "cooling(modes auto/manual/immersion)",
+   "performance",
+   "immersion",
+   "chip_temp_offset"
+  ],
+  "new_keys_1_3_5": [
+   "new_tuner",
+   "lower_percent",
+   "state_time",
+   "init_presets",
+   "reset_cores_*",
+   "chip_sensor_timeout",
+   "board_sensor_timeout",
+   "max_freq/min_freq/max_volt (per-model tuning bounds)",
+   "stock_info",
+   "bypass_mode",
+   "cooling_type",
+   "use-tls",
+   "pools",
+   "fan-target-chip-temp",
+   "tempoff"
+  ],
+  "interpretation": "1.3.5 adds a 'new_tuner' state machine (lower_percent/state_time/init_presets/reset_cores) and per-sensor timeouts; cooling-mode schema (auto PID target_temp / manual / immersion) and fan_min key surface carry over from 1.2.7. Numeric constant values are compiled, not string-visible (see caveats)."
+ },
+ "signature_scheme": {
+  "label": "[VNISH-proprietary], behavioral facts from runme.sh + package layout only",
+  "facts": [
+   "per-artifact .sig files (512-byte = RSA-4096 class) alongside devicetree.dtb, vmlinux.bin, uramdisk.image.gz, fw.md5, runme.sh, sign-public.pem",
+   "sign-public.pem.sig signed by /etc/keys/master-public.pem (two-tier key chain: master signs release key)",
+   "verification: openssl dgst -sha256 -verify; fw.md5 carries MD5s of artifacts; target platform/install_type checked against /etc/fw-info.json",
+   "u3s19xph ships as overlay-only update (overlay.tar.gz + scripts/bootos.sh) patching stock Bitmain install in place (GPIO 412/427/429/431/433 chain reset, stock cgminer/bmminer removal)"
+  ]
+ },
+ "tarball_manifest_47": [
+  {
+   "model_dir": "l7",
+   "tar": "vnishru-l7-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:09:08",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "l9",
+   "tar": "vnishru-l9-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:09:24",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s19",
+   "tar": "vnishru-s19-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:09:39",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s19-126",
+   "tar": "vnishru-s19-126-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:09:39",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s19-88",
+   "tar": "vnishru-s19-88-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:09:39",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s19-hydro",
+   "tar": "vnishru-s19-hydro-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:10:36",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s19a",
+   "tar": "vnishru-s19a-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:09:54",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s19apro",
+   "tar": "vnishru-s19apro-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:10:22",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s19e-xp-hydro",
+   "tar": "vnishru-s19e-xp-hydro-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:10:50",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s19i",
+   "tar": "vnishru-s19i-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:11:04",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s19j",
+   "tar": "vnishru-s19j-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:12:09",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s19j-plus",
+   "tar": "vnishru-s19j-plus-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:12:23",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s19j-xp",
+   "tar": "vnishru-s19j-xp-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:16:17",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s19jpro",
+   "tar": "vnishru-s19jpro-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:13:18",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s19jpro-a",
+   "tar": "vnishru-s19jpro-a-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:14:15",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s19jpro-plus",
+   "tar": "vnishru-s19jpro-plus-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:14:57",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s19kpro",
+   "tar": "vnishru-s19kpro-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:16:59",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s19plus",
+   "tar": "vnishru-s19plus-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:17:41",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s19pro",
+   "tar": "vnishru-s19pro-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:17:55",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s19pro-a",
+   "tar": "vnishru-s19pro-a-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:18:09",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s19pro-hydro",
+   "tar": "vnishru-s19pro-hydro-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:18:23",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s19pro-hydro-120",
+   "tar": "vnishru-s19pro-hydro-120-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:18:38",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s19pro-plus-hydro",
+   "tar": "vnishru-s19pro-plus-hydro-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:18:51",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s19xp",
+   "tar": "vnishru-s19xp-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:19:27",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s19xp-hydro",
+   "tar": "vnishru-s19xp-hydro-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:20:09",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s19xp-plus",
+   "tar": "vnishru-s19xp-plus-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:20:23",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s19xp-plus-hydro",
+   "tar": "vnishru-s19xp-plus-hydro-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:20:37",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s21",
+   "tar": "vnishru-s21-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:20:52",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s21-hydro",
+   "tar": "vnishru-s21-hydro-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:21:48",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s21-imm",
+   "tar": "vnishru-s21-imm-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:22:02",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s21e-hydro",
+   "tar": "vnishru-s21e-hydro-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:21:20",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s21e-xp-hydro",
+   "tar": "vnishru-s21e-xp-hydro-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:21:34",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s21plus",
+   "tar": "vnishru-s21plus-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:22:16",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s21plus-hydro",
+   "tar": "vnishru-s21plus-hydro-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:22:45",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s21plus-plus",
+   "tar": "vnishru-s21plus-plus-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:23:21",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s21pro",
+   "tar": "vnishru-s21pro-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:23:35",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s21pro-plus",
+   "tar": "vnishru-s21pro-plus-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:23:49",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s21xp",
+   "tar": "vnishru-s21xp-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:24:03",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "s21xp-hydro",
+   "tar": "vnishru-s21xp-hydro-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:24:18",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "s21xp-imm",
+   "tar": "vnishru-s21xp-imm-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:24:32",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "t19",
+   "tar": "vnishru-t19-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:24:46",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "t19-hydro",
+   "tar": "vnishru-t19-hydro-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:25:00",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "t19pro-hydro",
+   "tar": "vnishru-t19pro-hydro-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:25:15",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  },
+  {
+   "model_dir": "t21",
+   "tar": "vnishru-t21-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:25:29",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "u2l9h",
+   "tar": "vnishru-u2l9h-aml-nand-v1.3.5.tar.gz",
+   "platform": "aml",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 13:57:23",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "uimage"
+  },
+  {
+   "model_dir": "u3s19xph",
+   "tar": "vnishru-u3s19xph-cv-nand-v1.3.5.tar.gz",
+   "platform": "cv",
+   "fw_version": "1.3.5",
+   "build_time": null,
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "overlay-update"
+  },
+  {
+   "model_dir": "u3s21exph",
+   "tar": "vnishru-u3s21exph-xil-nand-v1.3.5.tar.gz",
+   "platform": "xil",
+   "fw_version": "1.3.5",
+   "build_time": "2026-07-30 09:26:39",
+   "hwscan_sha256_prefix": "951208595a494722",
+   "hwscan_identical_to_universal": true,
+   "layout": "fit"
+  }
+ ],
+ "model_clusters": [
+  {
+   "model": "unnamed-127[0]",
+   "label_confidence": "high",
+   "v127_rows": 35,
+   "v135_rows_union": 35,
+   "rows_identical": 23,
+   "rows_added_in_1_3_5": [
+    [
+     2050,
+     11900,
+     "MH"
+    ],
+    [
+     2100,
+     12400,
+     "MH"
+    ],
+    [
+     2200,
+     13000,
+     "MH"
+    ],
+    [
+     2310,
+     13500,
+     "MH"
+    ],
+    [
+     2450,
+     14000,
+     "MH"
+    ],
+    [
+     2550,
+     14600,
+     "MH"
+    ],
+    [
+     2680,
+     15100,
+     "MH"
+    ],
+    [
+     2850,
+     15600,
+     "MH"
+    ],
+    [
+     3150,
+     16200,
+     "MH"
+    ],
+    [
+     3400,
+     16700,
+     "MH"
+    ],
+    [
+     3550,
+     17300,
+     "MH"
+    ],
+    [
+     3850,
+     17800,
+     "MH"
+    ]
+   ],
+   "rows_removed_from_1_2_7": [
+    [
+     2545,
+     11900,
+     "MH"
+    ],
+    [
+     2658,
+     12400,
+     "MH"
+    ],
+    [
+     2772,
+     13000,
+     "MH"
+    ],
+    [
+     2884,
+     13500,
+     "MH"
+    ],
+    [
+     2998,
+     14000,
+     "MH"
+    ],
+    [
+     3111,
+     14600,
+     "MH"
+    ],
+    [
+     3224,
+     15100,
+     "MH"
+    ],
+    [
+     3337,
+     15600,
+     "MH"
+    ],
+    [
+     3450,
+     16200,
+     "MH"
+    ],
+    [
+     3563,
+     16700,
+     "MH"
+    ],
+    [
+     3677,
+     17300,
+     "MH"
+    ],
+    [
+     3873,
+     17800,
+     "MH"
+    ]
+   ],
+   "v135_arrays": [
+    {
+     "index": 0,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "Tue May 14 14:13:00 CST 2024",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       1855,
+       4800,
+       "MH"
+      ],
+      [
+       2020,
+       5350,
+       "MH"
+      ],
+      [
+       2180,
+       5850,
+       "MH"
+      ],
+      [
+       2340,
+       6400,
+       "MH"
+      ],
+      [
+       2550,
+       6900,
+       "MH"
+      ],
+      [
+       2730,
+       7450,
+       "MH"
+      ],
+      [
+       2900,
+       7980,
+       "MH"
+      ],
+      [
+       3050,
+       8500,
+       "MH"
+      ],
+      [
+       3255,
+       9020,
+       "MH"
+      ],
+      [
+       3320,
+       9250,
+       "MH"
+      ],
+      [
+       3440,
+       9500,
+       "MH"
+      ],
+      [
+       3930,
+       10000,
+       "MH"
+      ],
+      [
+       4350,
+       10500,
+       "MH"
+      ],
+      [
+       4900,
+       11000,
+       "MH"
+      ],
+      [
+       5500,
+       11500,
+       "MH"
+      ],
+      [
+       6000,
+       12000,
+       "MH"
+      ]
+     ]
+    },
+    {
+     "index": 1,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "Mon Feb 10 03:29:29 CST 2025",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       2050,
+       11900,
+       "MH"
+      ],
+      [
+       2100,
+       12400,
+       "MH"
+      ],
+      [
+       2200,
+       13000,
+       "MH"
+      ],
+      [
+       2310,
+       13500,
+       "MH"
+      ],
+      [
+       2450,
+       14000,
+       "MH"
+      ],
+      [
+       2550,
+       14600,
+       "MH"
+      ],
+      [
+       2680,
+       15100,
+       "MH"
+      ],
+      [
+       2850,
+       15600,
+       "MH"
+      ],
+      [
+       3150,
+       16200,
+       "MH"
+      ],
+      [
+       3400,
+       16700,
+       "MH"
+      ],
+      [
+       3550,
+       17300,
+       "MH"
+      ],
+      [
+       3850,
+       17800,
+       "MH"
+      ],
+      [
+       4076,
+       18300,
+       "MH"
+      ],
+      [
+       4287,
+       18900,
+       "MH"
+      ],
+      [
+       4505,
+       19400,
+       "MH"
+      ],
+      [
+       4730,
+       20000,
+       "MH"
+      ],
+      [
+       4963,
+       20500,
+       "MH"
+      ],
+      [
+       5204,
+       21000,
+       "MH"
+      ],
+      [
+       5453,
+       21600,
+       "MH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 0
+  },
+  {
+   "model": "Antminer S19 (126)",
+   "label_confidence": "high",
+   "v127_rows": 14,
+   "v135_rows_union": 14,
+   "rows_identical": 14,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [],
+   "v135_arrays": [
+    {
+     "index": 11,
+     "ctx": {
+      "name": "Antminer S19 (126)",
+      "stock_fw_tag": null,
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       1630,
+       67,
+       "TH"
+      ],
+      [
+       1780,
+       71,
+       "TH"
+      ],
+      [
+       1920,
+       76,
+       "TH"
+      ],
+      [
+       2103,
+       81,
+       "TH"
+      ],
+      [
+       2270,
+       86,
+       "TH"
+      ],
+      [
+       2475,
+       91,
+       "TH"
+      ],
+      [
+       2710,
+       96,
+       "TH"
+      ],
+      [
+       2900,
+       101,
+       "TH"
+      ],
+      [
+       3095,
+       105,
+       "TH"
+      ],
+      [
+       3310,
+       110,
+       "TH"
+      ],
+      [
+       3600,
+       115,
+       "TH"
+      ],
+      [
+       3900,
+       120,
+       "TH"
+      ],
+      [
+       4300,
+       125,
+       "TH"
+      ],
+      [
+       4700,
+       130,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 1
+  },
+  {
+   "model": "Antminer S19 (88)",
+   "label_confidence": "high",
+   "v127_rows": 15,
+   "v135_rows_union": 15,
+   "rows_identical": 15,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [],
+   "v135_arrays": [
+    {
+     "index": 10,
+     "ctx": {
+      "name": "Antminer S19 (88)",
+      "stock_fw_tag": null,
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       1500,
+       64,
+       "TH"
+      ],
+      [
+       1700,
+       67,
+       "TH"
+      ],
+      [
+       1900,
+       70,
+       "TH"
+      ],
+      [
+       2100,
+       73,
+       "TH"
+      ],
+      [
+       2300,
+       76,
+       "TH"
+      ],
+      [
+       2500,
+       80,
+       "TH"
+      ],
+      [
+       2700,
+       84,
+       "TH"
+      ],
+      [
+       2950,
+       86,
+       "TH"
+      ],
+      [
+       3100,
+       89,
+       "TH"
+      ],
+      [
+       3200,
+       93,
+       "TH"
+      ],
+      [
+       3300,
+       96,
+       "TH"
+      ],
+      [
+       3400,
+       100,
+       "TH"
+      ],
+      [
+       3550,
+       103,
+       "TH"
+      ],
+      [
+       3800,
+       106,
+       "TH"
+      ],
+      [
+       4000,
+       110,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 2
+  },
+  {
+   "model": "Antminer S19 Hydro",
+   "label_confidence": "high",
+   "v127_rows": 55,
+   "v135_rows_union": 55,
+   "rows_identical": 55,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [],
+   "v135_arrays": [
+    {
+     "index": 3,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "Tue Dec 27 07:07:16 CST 2022",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       1100,
+       53,
+       "TH"
+      ],
+      [
+       1300,
+       58,
+       "TH"
+      ],
+      [
+       1500,
+       63,
+       "TH"
+      ],
+      [
+       1700,
+       68,
+       "TH"
+      ],
+      [
+       1900,
+       73,
+       "TH"
+      ],
+      [
+       2100,
+       78,
+       "TH"
+      ],
+      [
+       2350,
+       85,
+       "TH"
+      ],
+      [
+       2620,
+       91,
+       "TH"
+      ],
+      [
+       2800,
+       95,
+       "TH"
+      ],
+      [
+       2950,
+       99,
+       "TH"
+      ],
+      [
+       3200,
+       102,
+       "TH"
+      ],
+      [
+       3350,
+       105,
+       "TH"
+      ],
+      [
+       3750,
+       110,
+       "TH"
+      ],
+      [
+       4000,
+       115,
+       "TH"
+      ],
+      [
+       4260,
+       120,
+       "TH"
+      ],
+      [
+       4690,
+       124,
+       "TH"
+      ]
+     ]
+    },
+    {
+     "index": 6,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "Tue Dec 6 18:30:00 CST 2022",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       1300,
+       68,
+       "TH"
+      ],
+      [
+       1500,
+       71,
+       "TH"
+      ],
+      [
+       1700,
+       74,
+       "TH"
+      ],
+      [
+       1900,
+       77,
+       "TH"
+      ],
+      [
+       2100,
+       80,
+       "TH"
+      ],
+      [
+       2300,
+       83,
+       "TH"
+      ],
+      [
+       2500,
+       86,
+       "TH"
+      ],
+      [
+       2710,
+       90,
+       "TH"
+      ],
+      [
+       2850,
+       93,
+       "TH"
+      ],
+      [
+       3000,
+       96,
+       "TH"
+      ],
+      [
+       3150,
+       100,
+       "TH"
+      ],
+      [
+       3320,
+       103,
+       "TH"
+      ],
+      [
+       3460,
+       106,
+       "TH"
+      ],
+      [
+       3640,
+       110,
+       "TH"
+      ]
+     ]
+    },
+    {
+     "index": 15,
+     "ctx": {
+      "name": "Antminer S19 Hydro",
+      "stock_fw_tag": "Sat Dec 17 09:35:00 CST 2022",
+      "mode_marker": "immersion"
+     },
+     "rows": [
+      [
+       2700,
+       89,
+       "TH"
+      ],
+      [
+       2850,
+       94,
+       "TH"
+      ],
+      [
+       3000,
+       99,
+       "TH"
+      ],
+      [
+       3120,
+       104,
+       "TH"
+      ],
+      [
+       3260,
+       110,
+       "TH"
+      ],
+      [
+       3370,
+       115,
+       "TH"
+      ],
+      [
+       3540,
+       120,
+       "TH"
+      ],
+      [
+       3750,
+       125,
+       "TH"
+      ],
+      [
+       3830,
+       131,
+       "TH"
+      ],
+      [
+       4000,
+       136,
+       "TH"
+      ],
+      [
+       4110,
+       142,
+       "TH"
+      ],
+      [
+       4260,
+       146,
+       "TH"
+      ],
+      [
+       4440,
+       152,
+       "TH"
+      ],
+      [
+       4560,
+       157,
+       "TH"
+      ],
+      [
+       4710,
+       162,
+       "TH"
+      ],
+      [
+       5200,
+       167,
+       "TH"
+      ],
+      [
+       5550,
+       172,
+       "TH"
+      ],
+      [
+       5800,
+       177,
+       "TH"
+      ],
+      [
+       6400,
+       183,
+       "TH"
+      ],
+      [
+       6900,
+       187,
+       "TH"
+      ],
+      [
+       7400,
+       192,
+       "TH"
+      ],
+      [
+       7900,
+       198,
+       "TH"
+      ],
+      [
+       8500,
+       206,
+       "TH"
+      ],
+      [
+       9000,
+       211,
+       "TH"
+      ],
+      [
+       9500,
+       218,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 3
+  },
+  {
+   "model": "Antminer S19a Pro",
+   "label_confidence": "high",
+   "v127_rows": 14,
+   "v135_rows_union": 14,
+   "rows_identical": 14,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [],
+   "v135_arrays": [
+    {
+     "index": 12,
+     "ctx": {
+      "name": "Antminer S19a Pro",
+      "stock_fw_tag": "Tue Dec 6 18:31:00 CST 2022",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       2800,
+       100,
+       "TH"
+      ],
+      [
+       2990,
+       105,
+       "TH"
+      ],
+      [
+       3200,
+       110,
+       "TH"
+      ],
+      [
+       3360,
+       115,
+       "TH"
+      ],
+      [
+       3560,
+       120,
+       "TH"
+      ],
+      [
+       3775,
+       125,
+       "TH"
+      ],
+      [
+       4000,
+       130,
+       "TH"
+      ],
+      [
+       4230,
+       134,
+       "TH"
+      ],
+      [
+       4520,
+       138,
+       "TH"
+      ],
+      [
+       4750,
+       143,
+       "TH"
+      ],
+      [
+       5000,
+       148,
+       "TH"
+      ],
+      [
+       5280,
+       153,
+       "TH"
+      ],
+      [
+       5520,
+       158,
+       "TH"
+      ],
+      [
+       5770,
+       162,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 4
+  },
+  {
+   "model": "Antminer S19e XP Hydro",
+   "label_confidence": "low",
+   "v127_rows": 66,
+   "v135_rows_union": 70,
+   "rows_identical": 58,
+   "rows_added_in_1_3_5": [
+    [
+     1100,
+     72,
+     "TH"
+    ],
+    [
+     1300,
+     77,
+     "TH"
+    ],
+    [
+     1500,
+     82,
+     "TH"
+    ],
+    [
+     1700,
+     87,
+     "TH"
+    ],
+    [
+     5100,
+     132,
+     "TH"
+    ],
+    [
+     5450,
+     136,
+     "TH"
+    ],
+    [
+     5800,
+     140,
+     "TH"
+    ],
+    [
+     6140,
+     278,
+     "TH"
+    ],
+    [
+     6200,
+     144,
+     "TH"
+    ],
+    [
+     6350,
+     282,
+     "TH"
+    ],
+    [
+     6600,
+     148,
+     "TH"
+    ],
+    [
+     7000,
+     158,
+     "TH"
+    ]
+   ],
+   "rows_removed_from_1_2_7": [
+    [
+     5100,
+     158,
+     "TH"
+    ],
+    [
+     5450,
+     132,
+     "TH"
+    ],
+    [
+     5800,
+     136,
+     "TH"
+    ],
+    [
+     6100,
+     275,
+     "TH"
+    ],
+    [
+     6200,
+     140,
+     "TH"
+    ],
+    [
+     6450,
+     284,
+     "TH"
+    ],
+    [
+     6600,
+     144,
+     "TH"
+    ],
+    [
+     7000,
+     148,
+     "TH"
+    ]
+   ],
+   "v135_arrays": [
+    {
+     "index": 5,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "Tue Apr 27 23:04:00 CST 2021",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       2700,
+       82,
+       "TH"
+      ],
+      [
+       2850,
+       85,
+       "TH"
+      ],
+      [
+       2900,
+       89,
+       "TH"
+      ],
+      [
+       3050,
+       92,
+       "TH"
+      ],
+      [
+       3200,
+       96,
+       "TH"
+      ],
+      [
+       3350,
+       99,
+       "TH"
+      ],
+      [
+       3500,
+       104,
+       "TH"
+      ],
+      [
+       3700,
+       107,
+       "TH"
+      ],
+      [
+       4000,
+       112,
+       "TH"
+      ],
+      [
+       4300,
+       115,
+       "TH"
+      ]
+     ]
+    },
+    {
+     "index": 7,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "Mon Dec 26 01:26:42 CST 2022",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       3050,
+       82,
+       "TH"
+      ],
+      [
+       3250,
+       86,
+       "TH"
+      ],
+      [
+       3450,
+       90,
+       "TH"
+      ],
+      [
+       3650,
+       94,
+       "TH"
+      ],
+      [
+       3900,
+       98,
+       "TH"
+      ],
+      [
+       4100,
+       103,
+       "TH"
+      ],
+      [
+       4400,
+       107,
+       "TH"
+      ],
+      [
+       4700,
+       111,
+       "TH"
+      ],
+      [
+       4900,
+       114,
+       "TH"
+      ]
+     ]
+    },
+    {
+     "index": 9,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "Sat Feb 8 02:01:37 CST 2025",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       1100,
+       72,
+       "TH"
+      ],
+      [
+       1300,
+       77,
+       "TH"
+      ],
+      [
+       1500,
+       82,
+       "TH"
+      ],
+      [
+       1700,
+       87,
+       "TH"
+      ],
+      [
+       1900,
+       92,
+       "TH"
+      ],
+      [
+       2100,
+       97,
+       "TH"
+      ],
+      [
+       2300,
+       104,
+       "TH"
+      ],
+      [
+       2480,
+       111,
+       "TH"
+      ],
+      [
+       2660,
+       119,
+       "TH"
+      ],
+      [
+       2880,
+       127,
+       "TH"
+      ],
+      [
+       3000,
+       134,
+       "TH"
+      ],
+      [
+       3280,
+       142,
+       "TH"
+      ],
+      [
+       3550,
+       149,
+       "TH"
+      ],
+      [
+       3780,
+       156,
+       "TH"
+      ],
+      [
+       4000,
+       164,
+       "TH"
+      ],
+      [
+       4350,
+       171,
+       "TH"
+      ],
+      [
+       4700,
+       177,
+       "TH"
+      ],
+      [
+       5050,
+       185,
+       "TH"
+      ],
+      [
+       5350,
+       192,
+       "TH"
+      ],
+      [
+       5700,
+       200,
+       "TH"
+      ]
+     ]
+    },
+    {
+     "index": 16,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "Mon Dec 26 01:32:27 CST 2022",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       2340,
+       74,
+       "TH"
+      ],
+      [
+       2520,
+       78,
+       "TH"
+      ],
+      [
+       2674,
+       82,
+       "TH"
+      ],
+      [
+       2800,
+       86,
+       "TH"
+      ],
+      [
+       3043,
+       90,
+       "TH"
+      ],
+      [
+       3200,
+       94,
+       "TH"
+      ],
+      [
+       3375,
+       99,
+       "TH"
+      ],
+      [
+       3609,
+       103,
+       "TH"
+      ],
+      [
+       3855,
+       107,
+       "TH"
+      ],
+      [
+       4050,
+       111,
+       "TH"
+      ],
+      [
+       4550,
+       119,
+       "TH"
+      ],
+      [
+       4800,
+       154,
+       "TH"
+      ],
+      [
+       5100,
+       132,
+       "TH"
+      ],
+      [
+       5450,
+       136,
+       "TH"
+      ],
+      [
+       5800,
+       140,
+       "TH"
+      ],
+      [
+       6200,
+       144,
+       "TH"
+      ],
+      [
+       6600,
+       148,
+       "TH"
+      ],
+      [
+       7000,
+       158,
+       "TH"
+      ]
+     ]
+    },
+    {
+     "index": 20,
+     "ctx": {
+      "name": "Antminer S19 XP Hydro",
+      "stock_fw_tag": "Tue Sep 24 06:20:54 CST 2024",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       4200,
+       200,
+       "TH"
+      ],
+      [
+       4400,
+       208,
+       "TH"
+      ],
+      [
+       4550,
+       216,
+       "TH"
+      ],
+      [
+       4600,
+       225,
+       "TH"
+      ],
+      [
+       4850,
+       233,
+       "TH"
+      ],
+      [
+       5050,
+       241,
+       "TH"
+      ],
+      [
+       5200,
+       249,
+       "TH"
+      ],
+      [
+       5345,
+       257,
+       "TH"
+      ],
+      [
+       5780,
+       266,
+       "TH"
+      ],
+      [
+       6140,
+       278,
+       "TH"
+      ],
+      [
+       6350,
+       282,
+       "TH"
+      ],
+      [
+       6730,
+       293,
+       "TH"
+      ],
+      [
+       7000,
+       302,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 5
+  },
+  {
+   "model": "Antminer S19j Pro-A",
+   "label_confidence": "high",
+   "v127_rows": 25,
+   "v135_rows_union": 25,
+   "rows_identical": 25,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [],
+   "v135_arrays": [
+    {
+     "index": 13,
+     "ctx": {
+      "name": "Antminer S19j Pro",
+      "stock_fw_tag": "Fri Feb 14 02:22:53 CST 2025",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       1740,
+       65,
+       "TH"
+      ],
+      [
+       1800,
+       70,
+       "TH"
+      ],
+      [
+       1850,
+       76,
+       "TH"
+      ],
+      [
+       2000,
+       80,
+       "TH"
+      ],
+      [
+       2150,
+       83,
+       "TH"
+      ],
+      [
+       2300,
+       87,
+       "TH"
+      ],
+      [
+       2500,
+       92,
+       "TH"
+      ],
+      [
+       2700,
+       96,
+       "TH"
+      ],
+      [
+       2970,
+       100,
+       "TH"
+      ],
+      [
+       3080,
+       104,
+       "TH"
+      ],
+      [
+       3320,
+       110,
+       "TH"
+      ],
+      [
+       3580,
+       115,
+       "TH"
+      ],
+      [
+       3670,
+       120,
+       "TH"
+      ],
+      [
+       3850,
+       125,
+       "TH"
+      ],
+      [
+       4110,
+       130,
+       "TH"
+      ],
+      [
+       4620,
+       135,
+       "TH"
+      ],
+      [
+       4880,
+       140,
+       "TH"
+      ],
+      [
+       5040,
+       141,
+       "TH"
+      ],
+      [
+       5240,
+       145,
+       "TH"
+      ],
+      [
+       5400,
+       151,
+       "TH"
+      ],
+      [
+       5760,
+       160,
+       "TH"
+      ],
+      [
+       6084,
+       170,
+       "TH"
+      ],
+      [
+       6444,
+       180,
+       "TH"
+      ],
+      [
+       6804,
+       189,
+       "TH"
+      ],
+      [
+       7164,
+       199,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 6
+  },
+  {
+   "model": "Antminer S19j Pro+",
+   "label_confidence": "high",
+   "v127_rows": 21,
+   "v135_rows_union": 21,
+   "rows_identical": 21,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [],
+   "v135_arrays": [
+    {
+     "index": 21,
+     "ctx": {
+      "name": "Antminer S19j Pro+",
+      "stock_fw_tag": "Wed Jun 28 12:09:53 CST 2023",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       1450,
+       65,
+       "TH"
+      ],
+      [
+       1600,
+       70,
+       "TH"
+      ],
+      [
+       1750,
+       75,
+       "TH"
+      ],
+      [
+       1900,
+       80,
+       "TH"
+      ],
+      [
+       2050,
+       85,
+       "TH"
+      ],
+      [
+       2200,
+       87,
+       "TH"
+      ],
+      [
+       2350,
+       89,
+       "TH"
+      ],
+      [
+       2500,
+       94,
+       "TH"
+      ],
+      [
+       2650,
+       103,
+       "TH"
+      ],
+      [
+       2800,
+       108,
+       "TH"
+      ],
+      [
+       2950,
+       112,
+       "TH"
+      ],
+      [
+       3200,
+       116,
+       "TH"
+      ],
+      [
+       3500,
+       122,
+       "TH"
+      ],
+      [
+       3800,
+       126,
+       "TH"
+      ],
+      [
+       4100,
+       131,
+       "TH"
+      ],
+      [
+       4400,
+       135,
+       "TH"
+      ],
+      [
+       4700,
+       140,
+       "TH"
+      ],
+      [
+       5000,
+       145,
+       "TH"
+      ],
+      [
+       5300,
+       149,
+       "TH"
+      ],
+      [
+       5600,
+       154,
+       "TH"
+      ],
+      [
+       5900,
+       159,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 7
+  },
+  {
+   "model": "Antminer S19k Pro",
+   "label_confidence": "high",
+   "v127_rows": 34,
+   "v135_rows_union": 34,
+   "rows_identical": 34,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [],
+   "v135_arrays": [
+    {
+     "index": 14,
+     "ctx": {
+      "name": "Antminer S19k Pro",
+      "stock_fw_tag": "Tue Apr 9 06:08:20 CST 2024",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       2050,
+       80,
+       "TH"
+      ],
+      [
+       2180,
+       85,
+       "TH"
+      ],
+      [
+       2310,
+       90,
+       "TH"
+      ],
+      [
+       2470,
+       95,
+       "TH"
+      ],
+      [
+       2600,
+       100,
+       "TH"
+      ],
+      [
+       2730,
+       105,
+       "TH"
+      ],
+      [
+       2860,
+       111,
+       "TH"
+      ],
+      [
+       2990,
+       116,
+       "TH"
+      ],
+      [
+       3120,
+       121,
+       "TH"
+      ],
+      [
+       3270,
+       126,
+       "TH"
+      ],
+      [
+       3400,
+       131,
+       "TH"
+      ],
+      [
+       3530,
+       136,
+       "TH"
+      ],
+      [
+       3660,
+       142,
+       "TH"
+      ],
+      [
+       3790,
+       147,
+       "TH"
+      ],
+      [
+       3920,
+       152,
+       "TH"
+      ],
+      [
+       4080,
+       157,
+       "TH"
+      ],
+      [
+       4210,
+       162,
+       "TH"
+      ],
+      [
+       4340,
+       167,
+       "TH"
+      ],
+      [
+       4470,
+       173,
+       "TH"
+      ],
+      [
+       4600,
+       178,
+       "TH"
+      ],
+      [
+       4730,
+       183,
+       "TH"
+      ],
+      [
+       4860,
+       188,
+       "TH"
+      ],
+      [
+       2850,
+       78,
+       "TH"
+      ],
+      [
+       3050,
+       85,
+       "TH"
+      ],
+      [
+       3250,
+       91,
+       "TH"
+      ],
+      [
+       3325,
+       95,
+       "TH"
+      ],
+      [
+       3465,
+       99,
+       "TH"
+      ],
+      [
+       3655,
+       105,
+       "TH"
+      ],
+      [
+       3880,
+       110,
+       "TH"
+      ],
+      [
+       4050,
+       115,
+       "TH"
+      ],
+      [
+       4250,
+       120,
+       "TH"
+      ],
+      [
+       4500,
+       125,
+       "TH"
+      ],
+      [
+       4750,
+       130,
+       "TH"
+      ],
+      [
+       5000,
+       135,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 8
+  },
+  {
+   "model": "Antminer S19 Pro Hydro (120)",
+   "label_confidence": "high",
+   "v127_rows": 16,
+   "v135_rows_union": 16,
+   "rows_identical": 16,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [],
+   "v135_arrays": [
+    {
+     "index": 24,
+     "ctx": {
+      "name": "Antminer S19 Pro Hydro (120)",
+      "stock_fw_tag": null,
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       2552,
+       88,
+       "TH"
+      ],
+      [
+       2784,
+       96,
+       "TH"
+      ],
+      [
+       2987,
+       103,
+       "TH"
+      ],
+      [
+       3219,
+       111,
+       "TH"
+      ],
+      [
+       3422,
+       118,
+       "TH"
+      ],
+      [
+       3734,
+       126,
+       "TH"
+      ],
+      [
+       4028,
+       133,
+       "TH"
+      ],
+      [
+       4364,
+       141,
+       "TH"
+      ],
+      [
+       4682,
+       148,
+       "TH"
+      ],
+      [
+       5044,
+       156,
+       "TH"
+      ],
+      [
+       5386,
+       163,
+       "TH"
+      ],
+      [
+       5774,
+       171,
+       "TH"
+      ],
+      [
+       6143,
+       178,
+       "TH"
+      ],
+      [
+       6560,
+       186,
+       "TH"
+      ],
+      [
+       6957,
+       193,
+       "TH"
+      ],
+      [
+       7405,
+       201,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 9
+  },
+  {
+   "model": "Antminer S19 Pro Hydro",
+   "label_confidence": "high",
+   "v127_rows": 48,
+   "v135_rows_union": 48,
+   "rows_identical": 48,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [],
+   "v135_arrays": [
+    {
+     "index": 8,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "Mon Dec 26 12:42:38 CST 2022",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       1680,
+       57,
+       "TH"
+      ],
+      [
+       1830,
+       62,
+       "TH"
+      ],
+      [
+       2010,
+       67,
+       "TH"
+      ],
+      [
+       2160,
+       73,
+       "TH"
+      ],
+      [
+       2310,
+       78,
+       "TH"
+      ],
+      [
+       2490,
+       83,
+       "TH"
+      ],
+      [
+       2640,
+       89,
+       "TH"
+      ],
+      [
+       2790,
+       94,
+       "TH"
+      ],
+      [
+       2970,
+       99,
+       "TH"
+      ],
+      [
+       3120,
+       105,
+       "TH"
+      ],
+      [
+       3270,
+       110,
+       "TH"
+      ],
+      [
+       3450,
+       115,
+       "TH"
+      ],
+      [
+       3600,
+       121,
+       "TH"
+      ],
+      [
+       3750,
+       126,
+       "TH"
+      ],
+      [
+       3930,
+       131,
+       "TH"
+      ],
+      [
+       4080,
+       136,
+       "TH"
+      ],
+      [
+       4230,
+       142,
+       "TH"
+      ],
+      [
+       4410,
+       147,
+       "TH"
+      ],
+      [
+       4560,
+       152,
+       "TH"
+      ],
+      [
+       4710,
+       158,
+       "TH"
+      ],
+      [
+       4890,
+       163,
+       "TH"
+      ],
+      [
+       5040,
+       168,
+       "TH"
+      ],
+      [
+       5190,
+       174,
+       "TH"
+      ],
+      [
+       5370,
+       179,
+       "TH"
+      ],
+      [
+       5520,
+       184,
+       "TH"
+      ]
+     ]
+    },
+    {
+     "index": 22,
+     "ctx": {
+      "name": "Antminer S19 Pro Hydro",
+      "stock_fw_tag": "Fri Feb 2 17:34:00 CST 2024",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       3495,
+       132,
+       "TH"
+      ],
+      [
+       3635,
+       136,
+       "TH"
+      ],
+      [
+       3865,
+       143,
+       "TH"
+      ],
+      [
+       4200,
+       149,
+       "TH"
+      ],
+      [
+       4250,
+       154,
+       "TH"
+      ],
+      [
+       4400,
+       160,
+       "TH"
+      ],
+      [
+       4650,
+       166,
+       "TH"
+      ],
+      [
+       4855,
+       171,
+       "TH"
+      ],
+      [
+       5150,
+       177,
+       "TH"
+      ],
+      [
+       5415,
+       183,
+       "TH"
+      ],
+      [
+       5560,
+       188,
+       "TH"
+      ],
+      [
+       5725,
+       193,
+       "TH"
+      ],
+      [
+       6000,
+       199,
+       "TH"
+      ],
+      [
+       6400,
+       205,
+       "TH"
+      ],
+      [
+       6700,
+       210,
+       "TH"
+      ],
+      [
+       6850,
+       215,
+       "TH"
+      ],
+      [
+       7000,
+       220,
+       "TH"
+      ],
+      [
+       7150,
+       225,
+       "TH"
+      ],
+      [
+       7250,
+       230,
+       "TH"
+      ],
+      [
+       7400,
+       235,
+       "TH"
+      ],
+      [
+       7500,
+       240,
+       "TH"
+      ],
+      [
+       7600,
+       245,
+       "TH"
+      ],
+      [
+       7700,
+       250,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 10
+  },
+  {
+   "model": "Antminer S19Pro+ Hydro",
+   "label_confidence": "high",
+   "v127_rows": 23,
+   "v135_rows_union": 19,
+   "rows_identical": 19,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [
+    [
+     1100,
+     72,
+     "TH"
+    ],
+    [
+     1300,
+     77,
+     "TH"
+    ],
+    [
+     1500,
+     82,
+     "TH"
+    ],
+    [
+     1700,
+     87,
+     "TH"
+    ]
+   ],
+   "v135_arrays": [
+    {
+     "index": 26,
+     "ctx": {
+      "name": "Antminer S19 Pro+ Hydro",
+      "stock_fw_tag": "Wed Mar 8 15:30:00 CST 2023",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       2965,
+       126,
+       "TH"
+      ],
+      [
+       2980,
+       132,
+       "TH"
+      ],
+      [
+       3350,
+       137,
+       "TH"
+      ],
+      [
+       3560,
+       143,
+       "TH"
+      ],
+      [
+       3750,
+       147,
+       "TH"
+      ],
+      [
+       3890,
+       153,
+       "TH"
+      ],
+      [
+       4085,
+       158,
+       "TH"
+      ],
+      [
+       4320,
+       164,
+       "TH"
+      ],
+      [
+       4500,
+       170,
+       "TH"
+      ],
+      [
+       4650,
+       175,
+       "TH"
+      ],
+      [
+       4980,
+       181,
+       "TH"
+      ],
+      [
+       5160,
+       186,
+       "TH"
+      ],
+      [
+       5580,
+       197,
+       "TH"
+      ],
+      [
+       5870,
+       203,
+       "TH"
+      ],
+      [
+       6190,
+       208,
+       "TH"
+      ],
+      [
+       6500,
+       213,
+       "TH"
+      ],
+      [
+       6700,
+       220,
+       "TH"
+      ],
+      [
+       6850,
+       225,
+       "TH"
+      ],
+      [
+       7050,
+       230,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 11
+  },
+  {
+   "model": "Antminer S19 XP Hydro",
+   "label_confidence": "high",
+   "v127_rows": 30,
+   "v135_rows_union": 28,
+   "rows_identical": 28,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [
+    [
+     6140,
+     278,
+     "TH"
+    ],
+    [
+     6350,
+     282,
+     "TH"
+    ]
+   ],
+   "v135_arrays": [
+    {
+     "index": 19,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "FR-1.4(250726-S19-XP+)",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       1950,
+       113,
+       "TH"
+      ],
+      [
+       2050,
+       119,
+       "TH"
+      ],
+      [
+       2160,
+       125,
+       "TH"
+      ],
+      [
+       2290,
+       131,
+       "TH"
+      ],
+      [
+       2350,
+       137,
+       "TH"
+      ],
+      [
+       2500,
+       144,
+       "TH"
+      ],
+      [
+       2600,
+       150,
+       "TH"
+      ],
+      [
+       2730,
+       156,
+       "TH"
+      ],
+      [
+       2830,
+       162,
+       "TH"
+      ],
+      [
+       2940,
+       169,
+       "TH"
+      ],
+      [
+       3040,
+       175,
+       "TH"
+      ],
+      [
+       3250,
+       181,
+       "TH"
+      ],
+      [
+       3400,
+       187,
+       "TH"
+      ],
+      [
+       3520,
+       193,
+       "TH"
+      ],
+      [
+       3700,
+       200,
+       "TH"
+      ],
+      [
+       3950,
+       206,
+       "TH"
+      ],
+      [
+       4100,
+       212,
+       "TH"
+      ],
+      [
+       4270,
+       218,
+       "TH"
+      ],
+      [
+       4520,
+       224,
+       "TH"
+      ],
+      [
+       4780,
+       231,
+       "TH"
+      ],
+      [
+       5000,
+       237,
+       "TH"
+      ],
+      [
+       5200,
+       243,
+       "TH"
+      ],
+      [
+       5400,
+       249,
+       "TH"
+      ],
+      [
+       5650,
+       255,
+       "TH"
+      ],
+      [
+       5800,
+       262,
+       "TH"
+      ],
+      [
+       5950,
+       268,
+       "TH"
+      ],
+      [
+       6100,
+       274,
+       "TH"
+      ],
+      [
+       6300,
+       280,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 12
+  },
+  {
+   "model": "Antminer S19 XP+ Hydro",
+   "label_confidence": "high",
+   "v127_rows": 21,
+   "v135_rows_union": 21,
+   "rows_identical": 21,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [],
+   "v135_arrays": [
+    {
+     "index": 25,
+     "ctx": {
+      "name": "Antminer S19 XP+ Hydro",
+      "stock_fw_tag": "FR-1.13(250605-S19 XP+ Hyd.)",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       3629,
+       191,
+       "TH"
+      ],
+      [
+       3838,
+       202,
+       "TH"
+      ],
+      [
+       4028,
+       212,
+       "TH"
+      ],
+      [
+       4218,
+       222,
+       "TH"
+      ],
+      [
+       4427,
+       233,
+       "TH"
+      ],
+      [
+       4617,
+       243,
+       "TH"
+      ],
+      [
+       4807,
+       253,
+       "TH"
+      ],
+      [
+       5016,
+       264,
+       "TH"
+      ],
+      [
+       5206,
+       274,
+       "TH"
+      ],
+      [
+       5396,
+       284,
+       "TH"
+      ],
+      [
+       5605,
+       295,
+       "TH"
+      ],
+      [
+       5922,
+       305,
+       "TH"
+      ],
+      [
+       6251,
+       315,
+       "TH"
+      ],
+      [
+       6611,
+       326,
+       "TH"
+      ],
+      [
+       6964,
+       336,
+       "TH"
+      ],
+      [
+       7329,
+       346,
+       "TH"
+      ],
+      [
+       7729,
+       357,
+       "TH"
+      ],
+      [
+       8120,
+       367,
+       "TH"
+      ],
+      [
+       8525,
+       377,
+       "TH"
+      ],
+      [
+       8966,
+       388,
+       "TH"
+      ],
+      [
+       9848,
+       408,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 13
+  },
+  {
+   "model": "Antminer T19 Hydro",
+   "label_confidence": "high",
+   "v127_rows": 28,
+   "v135_rows_union": 29,
+   "rows_identical": 28,
+   "rows_added_in_1_3_5": [
+    [
+     5137,
+     124,
+     "TH"
+    ]
+   ],
+   "rows_removed_from_1_2_7": [],
+   "v135_arrays": [
+    {
+     "index": 4,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "Mon Mar 20 12:13:00 CST 2023",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       2400,
+       70,
+       "TH"
+      ],
+      [
+       2800,
+       77,
+       "TH"
+      ],
+      [
+       3486,
+       85,
+       "TH"
+      ],
+      [
+       3800,
+       90,
+       "TH"
+      ],
+      [
+       4073,
+       98,
+       "TH"
+      ],
+      [
+       4468,
+       105,
+       "TH"
+      ],
+      [
+       4669,
+       112,
+       "TH"
+      ],
+      [
+       4973,
+       120,
+       "TH"
+      ],
+      [
+       5137,
+       124,
+       "TH"
+      ]
+     ]
+    },
+    {
+     "index": 17,
+     "ctx": {
+      "name": "Antminer T19 Hydro",
+      "stock_fw_tag": "Mon Dec 26 01:17:26 CST 2022",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       3560,
+       95,
+       "TH"
+      ],
+      [
+       3750,
+       100,
+       "TH"
+      ],
+      [
+       3970,
+       106,
+       "TH"
+      ],
+      [
+       4160,
+       111,
+       "TH"
+      ],
+      [
+       4350,
+       116,
+       "TH"
+      ],
+      [
+       4530,
+       121,
+       "TH"
+      ],
+      [
+       4720,
+       126,
+       "TH"
+      ],
+      [
+       4910,
+       131,
+       "TH"
+      ],
+      [
+       5130,
+       137,
+       "TH"
+      ],
+      [
+       5320,
+       142,
+       "TH"
+      ],
+      [
+       5510,
+       147,
+       "TH"
+      ],
+      [
+       5700,
+       152,
+       "TH"
+      ],
+      [
+       5880,
+       157,
+       "TH"
+      ],
+      [
+       6110,
+       163,
+       "TH"
+      ],
+      [
+       6300,
+       168,
+       "TH"
+      ],
+      [
+       6480,
+       173,
+       "TH"
+      ],
+      [
+       6670,
+       178,
+       "TH"
+      ],
+      [
+       6860,
+       183,
+       "TH"
+      ],
+      [
+       7050,
+       188,
+       "TH"
+      ],
+      [
+       7270,
+       194,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 14
+  },
+  {
+   "model": "Antminer U3S19XP+H",
+   "label_confidence": "low",
+   "v127_rows": 31,
+   "v135_rows_union": 38,
+   "rows_identical": 22,
+   "rows_added_in_1_3_5": [
+    [
+     1700,
+     103,
+     "TH"
+    ],
+    [
+     1750,
+     109,
+     "TH"
+    ],
+    [
+     1850,
+     113,
+     "TH"
+    ],
+    [
+     1950,
+     119,
+     "TH"
+    ],
+    [
+     2050,
+     125,
+     "TH"
+    ],
+    [
+     2150,
+     131,
+     "TH"
+    ],
+    [
+     2250,
+     137,
+     "TH"
+    ],
+    [
+     2450,
+     144,
+     "TH"
+    ],
+    [
+     2500,
+     150,
+     "TH"
+    ],
+    [
+     2600,
+     156,
+     "TH"
+    ],
+    [
+     2750,
+     162,
+     "TH"
+    ],
+    [
+     2850,
+     169,
+     "TH"
+    ],
+    [
+     2950,
+     175,
+     "TH"
+    ],
+    [
+     3100,
+     181,
+     "TH"
+    ],
+    [
+     3250,
+     187,
+     "TH"
+    ],
+    [
+     3550,
+     200,
+     "TH"
+    ]
+   ],
+   "rows_removed_from_1_2_7": [
+    [
+     1750,
+     103,
+     "TH"
+    ],
+    [
+     1850,
+     109,
+     "TH"
+    ],
+    [
+     1960,
+     113,
+     "TH"
+    ],
+    [
+     2060,
+     119,
+     "TH"
+    ],
+    [
+     2180,
+     125,
+     "TH"
+    ],
+    [
+     2390,
+     137,
+     "TH"
+    ],
+    [
+     3150,
+     181,
+     "TH"
+    ],
+    [
+     3270,
+     187,
+     "TH"
+    ],
+    [
+     3480,
+     200,
+     "TH"
+    ]
+   ],
+   "v135_arrays": [
+    {
+     "index": 18,
+     "ctx": {
+      "name": "Antminer U3S19XP+H",
+      "stock_fw_tag": "Tue Jan 14 12:49:56 CST 2025",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       4161,
+       219,
+       "TH"
+      ],
+      [
+       4351,
+       229,
+       "TH"
+      ],
+      [
+       4560,
+       240,
+       "TH"
+      ],
+      [
+       4750,
+       250,
+       "TH"
+      ],
+      [
+       4940,
+       260,
+       "TH"
+      ],
+      [
+       5149,
+       271,
+       "TH"
+      ],
+      [
+       5339,
+       281,
+       "TH"
+      ],
+      [
+       5650,
+       291,
+       "TH"
+      ],
+      [
+       5993,
+       302,
+       "TH"
+      ],
+      [
+       6327,
+       312,
+       "TH"
+      ],
+      [
+       6674,
+       322,
+       "TH"
+      ],
+      [
+       7054,
+       333,
+       "TH"
+      ],
+      [
+       7425,
+       343,
+       "TH"
+      ]
+     ]
+    },
+    {
+     "index": 27,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "Thu Feb 6 17:18:00 CST 2025",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       1650,
+       97,
+       "TH"
+      ],
+      [
+       1700,
+       103,
+       "TH"
+      ],
+      [
+       1750,
+       109,
+       "TH"
+      ],
+      [
+       1850,
+       113,
+       "TH"
+      ],
+      [
+       1950,
+       119,
+       "TH"
+      ],
+      [
+       2050,
+       125,
+       "TH"
+      ],
+      [
+       2150,
+       131,
+       "TH"
+      ],
+      [
+       2250,
+       137,
+       "TH"
+      ],
+      [
+       2450,
+       144,
+       "TH"
+      ],
+      [
+       2500,
+       150,
+       "TH"
+      ],
+      [
+       2600,
+       156,
+       "TH"
+      ],
+      [
+       2750,
+       162,
+       "TH"
+      ],
+      [
+       2850,
+       169,
+       "TH"
+      ],
+      [
+       2950,
+       175,
+       "TH"
+      ],
+      [
+       3100,
+       181,
+       "TH"
+      ],
+      [
+       3250,
+       187,
+       "TH"
+      ],
+      [
+       3370,
+       193,
+       "TH"
+      ],
+      [
+       3550,
+       200,
+       "TH"
+      ],
+      [
+       3750,
+       206,
+       "TH"
+      ],
+      [
+       3870,
+       212,
+       "TH"
+      ],
+      [
+       4100,
+       218,
+       "TH"
+      ],
+      [
+       4320,
+       224,
+       "TH"
+      ],
+      [
+       4480,
+       231,
+       "TH"
+      ],
+      [
+       4630,
+       237,
+       "TH"
+      ],
+      [
+       4750,
+       243,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 15
+  },
+  {
+   "model": "Antminer S21 Hydro",
+   "label_confidence": "low",
+   "v127_rows": 50,
+   "v135_rows_union": 48,
+   "rows_identical": 33,
+   "rows_added_in_1_3_5": [
+    [
+     2000,
+     148,
+     "TH"
+    ],
+    [
+     2150,
+     160,
+     "TH"
+    ],
+    [
+     2350,
+     173,
+     "TH"
+    ],
+    [
+     2480,
+     185,
+     "TH"
+    ],
+    [
+     2800,
+     197,
+     "TH"
+    ],
+    [
+     3095,
+     210,
+     "TH"
+    ],
+    [
+     3165,
+     222,
+     "TH"
+    ],
+    [
+     3390,
+     235,
+     "TH"
+    ],
+    [
+     3575,
+     247,
+     "TH"
+    ],
+    [
+     3970,
+     259,
+     "TH"
+    ],
+    [
+     4150,
+     272,
+     "TH"
+    ],
+    [
+     4300,
+     284,
+     "TH"
+    ],
+    [
+     4450,
+     297,
+     "TH"
+    ],
+    [
+     4750,
+     309,
+     "TH"
+    ],
+    [
+     5100,
+     321,
+     "TH"
+    ]
+   ],
+   "rows_removed_from_1_2_7": [
+    [
+     2500,
+     148,
+     "TH"
+    ],
+    [
+     2700,
+     160,
+     "TH"
+    ],
+    [
+     2900,
+     173,
+     "TH"
+    ],
+    [
+     3120,
+     185,
+     "TH"
+    ],
+    [
+     3300,
+     197,
+     "TH"
+    ],
+    [
+     3450,
+     210,
+     "TH"
+    ],
+    [
+     3620,
+     222,
+     "TH"
+    ],
+    [
+     3850,
+     235,
+     "TH"
+    ],
+    [
+     4000,
+     247,
+     "TH"
+    ],
+    [
+     4160,
+     259,
+     "TH"
+    ],
+    [
+     4370,
+     272,
+     "TH"
+    ],
+    [
+     4580,
+     284,
+     "TH"
+    ],
+    [
+     4780,
+     297,
+     "TH"
+    ],
+    [
+     4980,
+     309,
+     "TH"
+    ],
+    [
+     5360,
+     321,
+     "TH"
+    ],
+    [
+     6050,
+     371,
+     "TH"
+    ],
+    [
+     6300,
+     383,
+     "TH"
+    ]
+   ],
+   "v135_arrays": [
+    {
+     "index": 29,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "Tue Aug 6 11:55:00 CST 2024",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       1630,
+       92,
+       "TH"
+      ],
+      [
+       1800,
+       101,
+       "TH"
+      ],
+      [
+       1960,
+       109,
+       "TH"
+      ],
+      [
+       2120,
+       118,
+       "TH"
+      ],
+      [
+       2280,
+       127,
+       "TH"
+      ],
+      [
+       2440,
+       136,
+       "TH"
+      ],
+      [
+       2610,
+       145,
+       "TH"
+      ],
+      [
+       2770,
+       154,
+       "TH"
+      ],
+      [
+       2930,
+       163,
+       "TH"
+      ],
+      [
+       3090,
+       172,
+       "TH"
+      ],
+      [
+       3420,
+       190,
+       "TH"
+      ],
+      [
+       3580,
+       199,
+       "TH"
+      ],
+      [
+       3740,
+       208,
+       "TH"
+      ],
+      [
+       3880,
+       217,
+       "TH"
+      ],
+      [
+       4050,
+       226,
+       "TH"
+      ],
+      [
+       4210,
+       235,
+       "TH"
+      ],
+      [
+       4370,
+       244,
+       "TH"
+      ],
+      [
+       4530,
+       253,
+       "TH"
+      ],
+      [
+       4690,
+       262,
+       "TH"
+      ],
+      [
+       4860,
+       271,
+       "TH"
+      ],
+      [
+       5020,
+       280,
+       "TH"
+      ],
+      [
+       5180,
+       289,
+       "TH"
+      ],
+      [
+       5340,
+       298,
+       "TH"
+      ],
+      [
+       5500,
+       307,
+       "TH"
+      ],
+      [
+       5670,
+       315,
+       "TH"
+      ],
+      [
+       5830,
+       324,
+       "TH"
+      ],
+      [
+       5990,
+       333,
+       "TH"
+      ],
+      [
+       6150,
+       342,
+       "TH"
+      ],
+      [
+       6310,
+       351,
+       "TH"
+      ],
+      [
+       6480,
+       360,
+       "TH"
+      ]
+     ]
+    },
+    {
+     "index": 32,
+     "ctx": {
+      "name": "Antminer S21 Hydro",
+      "stock_fw_tag": "FR-1.1(250416-S21 Hyd.)",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       2000,
+       148,
+       "TH"
+      ],
+      [
+       2150,
+       160,
+       "TH"
+      ],
+      [
+       2350,
+       173,
+       "TH"
+      ],
+      [
+       2480,
+       185,
+       "TH"
+      ],
+      [
+       2800,
+       197,
+       "TH"
+      ],
+      [
+       3095,
+       210,
+       "TH"
+      ],
+      [
+       3165,
+       222,
+       "TH"
+      ],
+      [
+       3390,
+       235,
+       "TH"
+      ],
+      [
+       3575,
+       247,
+       "TH"
+      ],
+      [
+       3970,
+       259,
+       "TH"
+      ],
+      [
+       4150,
+       272,
+       "TH"
+      ],
+      [
+       4300,
+       284,
+       "TH"
+      ],
+      [
+       4450,
+       297,
+       "TH"
+      ],
+      [
+       4750,
+       309,
+       "TH"
+      ],
+      [
+       5100,
+       321,
+       "TH"
+      ],
+      [
+       5450,
+       334,
+       "TH"
+      ],
+      [
+       5600,
+       346,
+       "TH"
+      ],
+      [
+       5800,
+       359,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 16
+  },
+  {
+   "model": "Antminer S21e Hydro",
+   "label_confidence": "low",
+   "v127_rows": 80,
+   "v135_rows_union": 24,
+   "rows_identical": 24,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [
+    [
+     2722,
+     165,
+     "TH"
+    ],
+    [
+     2805,
+     170,
+     "TH"
+    ],
+    [
+     2887,
+     175,
+     "TH"
+    ],
+    [
+     2970,
+     180,
+     "TH"
+    ],
+    [
+     3052,
+     185,
+     "TH"
+    ],
+    [
+     3135,
+     190,
+     "TH"
+    ],
+    [
+     3217,
+     195,
+     "TH"
+    ],
+    [
+     3298,
+     194,
+     "TH"
+    ],
+    [
+     3300,
+     200,
+     "TH"
+    ],
+    [
+     3399,
+     206,
+     "TH"
+    ],
+    [
+     3417,
+     201,
+     "TH"
+    ],
+    [
+     3481,
+     211,
+     "TH"
+    ],
+    [
+     3553,
+     209,
+     "TH"
+    ],
+    [
+     3564,
+     216,
+     "TH"
+    ],
+    [
+     3646,
+     221,
+     "TH"
+    ],
+    [
+     3689,
+     217,
+     "TH"
+    ],
+    [
+     3729,
+     226,
+     "TH"
+    ],
+    [
+     3811,
+     231,
+     "TH"
+    ],
+    [
+     3825,
+     225,
+     "TH"
+    ],
+    [
+     3894,
+     236,
+     "TH"
+    ],
+    [
+     3961,
+     233,
+     "TH"
+    ],
+    [
+     3976,
+     241,
+     "TH"
+    ],
+    [
+     4059,
+     246,
+     "TH"
+    ],
+    [
+     4080,
+     240,
+     "TH"
+    ],
+    [
+     4141,
+     251,
+     "TH"
+    ],
+    [
+     4216,
+     248,
+     "TH"
+    ],
+    [
+     4352,
+     256,
+     "TH"
+    ],
+    [
+     4488,
+     264,
+     "TH"
+    ],
+    [
+     4624,
+     272,
+     "TH"
+    ],
+    [
+     4743,
+     279,
+     "TH"
+    ],
+    [
+     4986,
+     287,
+     "TH"
+    ],
+    [
+     5238,
+     295,
+     "TH"
+    ],
+    [
+     5498,
+     303,
+     "TH"
+    ],
+    [
+     5767,
+     311,
+     "TH"
+    ],
+    [
+     6027,
+     318,
+     "TH"
+    ],
+    [
+     6314,
+     326,
+     "TH"
+    ],
+    [
+     6612,
+     334,
+     "TH"
+    ],
+    [
+     6919,
+     342,
+     "TH"
+    ],
+    [
+     7237,
+     350,
+     "TH"
+    ],
+    [
+     7544,
+     357,
+     "TH"
+    ],
+    [
+     7883,
+     365,
+     "TH"
+    ],
+    [
+     8233,
+     373,
+     "TH"
+    ],
+    [
+     8594,
+     381,
+     "TH"
+    ],
+    [
+     8968,
+     389,
+     "TH"
+    ],
+    [
+     9330,
+     396,
+     "TH"
+    ],
+    [
+     9728,
+     404,
+     "TH"
+    ],
+    [
+     10139,
+     412,
+     "TH"
+    ],
+    [
+     10563,
+     420,
+     "TH"
+    ],
+    [
+     11001,
+     428,
+     "TH"
+    ],
+    [
+     11427,
+     435,
+     "TH"
+    ],
+    [
+     11893,
+     443,
+     "TH"
+    ],
+    [
+     12374,
+     451,
+     "TH"
+    ],
+    [
+     12871,
+     459,
+     "TH"
+    ],
+    [
+     13384,
+     467,
+     "TH"
+    ],
+    [
+     13883,
+     474,
+     "TH"
+    ],
+    [
+     14428,
+     482,
+     "TH"
+    ]
+   ],
+   "v135_arrays": [
+    {
+     "index": 31,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "FR-1.15(250422-S21+)",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       2450,
+       165,
+       "TH"
+      ],
+      [
+       2550,
+       170,
+       "TH"
+      ],
+      [
+       2640,
+       175,
+       "TH"
+      ],
+      [
+       2735,
+       180,
+       "TH"
+      ],
+      [
+       2780,
+       185,
+       "TH"
+      ],
+      [
+       2830,
+       190,
+       "TH"
+      ],
+      [
+       2910,
+       195,
+       "TH"
+      ],
+      [
+       3050,
+       200,
+       "TH"
+      ],
+      [
+       3100,
+       206,
+       "TH"
+      ],
+      [
+       3230,
+       211,
+       "TH"
+      ],
+      [
+       3290,
+       216,
+       "TH"
+      ],
+      [
+       3400,
+       221,
+       "TH"
+      ],
+      [
+       3490,
+       226,
+       "TH"
+      ],
+      [
+       3650,
+       231,
+       "TH"
+      ],
+      [
+       3750,
+       236,
+       "TH"
+      ],
+      [
+       3850,
+       241,
+       "TH"
+      ],
+      [
+       3950,
+       246,
+       "TH"
+      ],
+      [
+       4100,
+       251,
+       "TH"
+      ],
+      [
+       4224,
+       256,
+       "TH"
+      ],
+      [
+       4306,
+       261,
+       "TH"
+      ],
+      [
+       4389,
+       266,
+       "TH"
+      ],
+      [
+       4471,
+       271,
+       "TH"
+      ],
+      [
+       4554,
+       276,
+       "TH"
+      ],
+      [
+       4636,
+       281,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 17
+  },
+  {
+   "model": "Antminer S21+ Hydro",
+   "label_confidence": "low",
+   "v127_rows": 102,
+   "v135_rows_union": 75,
+   "rows_identical": 75,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [
+    [
+     2060,
+     154,
+     "TH"
+    ],
+    [
+     2180,
+     162,
+     "TH"
+    ],
+    [
+     2290,
+     171,
+     "TH"
+    ],
+    [
+     2400,
+     179,
+     "TH"
+    ],
+    [
+     2520,
+     187,
+     "TH"
+    ],
+    [
+     2630,
+     196,
+     "TH"
+    ],
+    [
+     2640,
+     176,
+     "TH"
+    ],
+    [
+     2710,
+     182,
+     "TH"
+    ],
+    [
+     2750,
+     204,
+     "TH"
+    ],
+    [
+     2800,
+     188,
+     "TH"
+    ],
+    [
+     2860,
+     212,
+     "TH"
+    ],
+    [
+     2890,
+     194,
+     "TH"
+    ],
+    [
+     2970,
+     221,
+     "TH"
+    ],
+    [
+     2980,
+     200,
+     "TH"
+    ],
+    [
+     3070,
+     206,
+     "TH"
+    ],
+    [
+     3090,
+     229,
+     "TH"
+    ],
+    [
+     3160,
+     212,
+     "TH"
+    ],
+    [
+     3190,
+     237,
+     "TH"
+    ],
+    [
+     3250,
+     218,
+     "TH"
+    ],
+    [
+     3300,
+     246,
+     "TH"
+    ],
+    [
+     3340,
+     224,
+     "TH"
+    ],
+    [
+     3420,
+     254,
+     "TH"
+    ],
+    [
+     3430,
+     230,
+     "TH"
+    ],
+    [
+     3520,
+     236,
+     "TH"
+    ],
+    [
+     3530,
+     263,
+     "TH"
+    ],
+    [
+     3610,
+     242,
+     "TH"
+    ],
+    [
+     3700,
+     248,
+     "TH"
+    ]
+   ],
+   "v135_arrays": [
+    {
+     "index": 28,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "FR-1.14(250530-S21-XP)",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       1800,
+       154,
+       "TH"
+      ],
+      [
+       1900,
+       162,
+       "TH"
+      ],
+      [
+       1985,
+       171,
+       "TH"
+      ],
+      [
+       2150,
+       179,
+       "TH"
+      ],
+      [
+       2265,
+       187,
+       "TH"
+      ],
+      [
+       2350,
+       196,
+       "TH"
+      ],
+      [
+       2500,
+       204,
+       "TH"
+      ],
+      [
+       2650,
+       212,
+       "TH"
+      ],
+      [
+       2800,
+       221,
+       "TH"
+      ],
+      [
+       2930,
+       229,
+       "TH"
+      ],
+      [
+       3000,
+       237,
+       "TH"
+      ],
+      [
+       3130,
+       246,
+       "TH"
+      ],
+      [
+       3300,
+       254,
+       "TH"
+      ],
+      [
+       3500,
+       263,
+       "TH"
+      ],
+      [
+       3640,
+       271,
+       "TH"
+      ],
+      [
+       3760,
+       279,
+       "TH"
+      ],
+      [
+       3870,
+       288,
+       "TH"
+      ],
+      [
+       3980,
+       296,
+       "TH"
+      ],
+      [
+       4100,
+       304,
+       "TH"
+      ],
+      [
+       4210,
+       313,
+       "TH"
+      ],
+      [
+       4330,
+       321,
+       "TH"
+      ],
+      [
+       4440,
+       329,
+       "TH"
+      ],
+      [
+       4540,
+       338,
+       "TH"
+      ],
+      [
+       4670,
+       346,
+       "TH"
+      ],
+      [
+       4770,
+       354,
+       "TH"
+      ],
+      [
+       4880,
+       363,
+       "TH"
+      ],
+      [
+       5000,
+       371,
+       "TH"
+      ],
+      [
+       5110,
+       379,
+       "TH"
+      ]
+     ]
+    },
+    {
+     "index": 30,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "FR-1.46(250701-S21-Pro)",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       2440,
+       170,
+       "TH"
+      ],
+      [
+       2500,
+       176,
+       "TH"
+      ],
+      [
+       2630,
+       182,
+       "TH"
+      ],
+      [
+       2680,
+       188,
+       "TH"
+      ],
+      [
+       2770,
+       194,
+       "TH"
+      ],
+      [
+       2830,
+       200,
+       "TH"
+      ],
+      [
+       2910,
+       206,
+       "TH"
+      ],
+      [
+       3040,
+       212,
+       "TH"
+      ],
+      [
+       3130,
+       218,
+       "TH"
+      ],
+      [
+       3245,
+       224,
+       "TH"
+      ],
+      [
+       3320,
+       230,
+       "TH"
+      ],
+      [
+       3400,
+       236,
+       "TH"
+      ],
+      [
+       3550,
+       242,
+       "TH"
+      ],
+      [
+       3650,
+       248,
+       "TH"
+      ],
+      [
+       3790,
+       254,
+       "TH"
+      ],
+      [
+       3880,
+       260,
+       "TH"
+      ],
+      [
+       3970,
+       266,
+       "TH"
+      ],
+      [
+       4060,
+       271,
+       "TH"
+      ],
+      [
+       4150,
+       277,
+       "TH"
+      ],
+      [
+       4240,
+       283,
+       "TH"
+      ],
+      [
+       4330,
+       289,
+       "TH"
+      ],
+      [
+       4420,
+       295,
+       "TH"
+      ],
+      [
+       4510,
+       301,
+       "TH"
+      ],
+      [
+       4600,
+       307,
+       "TH"
+      ],
+      [
+       4690,
+       313,
+       "TH"
+      ]
+     ]
+    },
+    {
+     "index": 37,
+     "ctx": {
+      "name": "Antminer S21+ Hydro",
+      "stock_fw_tag": "Mon Jan 6 15:07:13 CST 2025",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       3975,
+       265,
+       "TH"
+      ],
+      [
+       4110,
+       274,
+       "TH"
+      ],
+      [
+       4230,
+       282,
+       "TH"
+      ],
+      [
+       4365,
+       291,
+       "TH"
+      ],
+      [
+       4500,
+       300,
+       "TH"
+      ],
+      [
+       4620,
+       308,
+       "TH"
+      ],
+      [
+       4755,
+       317,
+       "TH"
+      ],
+      [
+       4890,
+       326,
+       "TH"
+      ],
+      [
+       5025,
+       335,
+       "TH"
+      ],
+      [
+       5145,
+       343,
+       "TH"
+      ],
+      [
+       5280,
+       352,
+       "TH"
+      ],
+      [
+       5415,
+       361,
+       "TH"
+      ],
+      [
+       5535,
+       369,
+       "TH"
+      ],
+      [
+       5670,
+       378,
+       "TH"
+      ],
+      [
+       5805,
+       387,
+       "TH"
+      ],
+      [
+       5940,
+       396,
+       "TH"
+      ],
+      [
+       6150,
+       404,
+       "TH"
+      ],
+      [
+       6382,
+       413,
+       "TH"
+      ],
+      [
+       6619,
+       422,
+       "TH"
+      ],
+      [
+       6845,
+       430,
+       "TH"
+      ],
+      [
+       7093,
+       439,
+       "TH"
+      ],
+      [
+       7347,
+       448,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 18
+  },
+  {
+   "model": "Antminer S21 XP HYDRO",
+   "label_confidence": "high",
+   "v127_rows": 13,
+   "v135_rows_union": 13,
+   "rows_identical": 13,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [],
+   "v135_arrays": [
+    {
+     "index": 36,
+     "ctx": {
+      "name": "Antminer S21 Pro+",
+      "stock_fw_tag": "FR-1.48(260403-S21-Pro+)Antminer S21 XP Hydro",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       4620,
+       385,
+       "TH"
+      ],
+      [
+       4800,
+       400,
+       "TH"
+      ],
+      [
+       4980,
+       415,
+       "TH"
+      ],
+      [
+       5148,
+       429,
+       "TH"
+      ],
+      [
+       5328,
+       444,
+       "TH"
+      ],
+      [
+       5508,
+       459,
+       "TH"
+      ],
+      [
+       5676,
+       473,
+       "TH"
+      ],
+      [
+       5943,
+       488,
+       "TH"
+      ],
+      [
+       6218,
+       503,
+       "TH"
+      ],
+      [
+       6539,
+       517,
+       "TH"
+      ],
+      [
+       6877,
+       532,
+       "TH"
+      ],
+      [
+       7227,
+       547,
+       "TH"
+      ],
+      [
+       7588,
+       562,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 19
+  },
+  {
+   "model": "Antminer S21 XP Imm",
+   "label_confidence": "high",
+   "v127_rows": 31,
+   "v135_rows_union": 25,
+   "rows_identical": 25,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [
+    [
+     4900,
+     249,
+     "TH"
+    ],
+    [
+     5030,
+     255,
+     "TH"
+    ],
+    [
+     5170,
+     262,
+     "TH"
+    ],
+    [
+     5300,
+     268,
+     "TH"
+    ],
+    [
+     5430,
+     274,
+     "TH"
+    ],
+    [
+     5610,
+     280,
+     "TH"
+    ]
+   ],
+   "v135_arrays": [
+    {
+     "index": 33,
+     "ctx": {
+      "name": "Antminer S21 XP Imm",
+      "stock_fw_tag": "FR-1.0(250625-S21XP-Imm)",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       2943,
+       218,
+       "TH"
+      ],
+      [
+       3064,
+       227,
+       "TH"
+      ],
+      [
+       3172,
+       235,
+       "TH"
+      ],
+      [
+       3294,
+       244,
+       "TH"
+      ],
+      [
+       3402,
+       252,
+       "TH"
+      ],
+      [
+       3510,
+       260,
+       "TH"
+      ],
+      [
+       3631,
+       269,
+       "TH"
+      ],
+      [
+       3739,
+       277,
+       "TH"
+      ],
+      [
+       3847,
+       285,
+       "TH"
+      ],
+      [
+       3969,
+       294,
+       "TH"
+      ],
+      [
+       4077,
+       302,
+       "TH"
+      ],
+      [
+       4247,
+       310,
+       "TH"
+      ],
+      [
+       4436,
+       319,
+       "TH"
+      ],
+      [
+       4616,
+       327,
+       "TH"
+      ],
+      [
+       4800,
+       335,
+       "TH"
+      ],
+      [
+       5002,
+       344,
+       "TH"
+      ],
+      [
+       5196,
+       352,
+       "TH"
+      ],
+      [
+       5393,
+       360,
+       "TH"
+      ],
+      [
+       5611,
+       369,
+       "TH"
+      ],
+      [
+       5819,
+       377,
+       "TH"
+      ],
+      [
+       6047,
+       386,
+       "TH"
+      ],
+      [
+       6265,
+       394,
+       "TH"
+      ],
+      [
+       6488,
+       402,
+       "TH"
+      ],
+      [
+       6733,
+       411,
+       "TH"
+      ],
+      [
+       6967,
+       419,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 20
+  },
+  {
+   "model": "Antminer U3S21EXPH",
+   "label_confidence": "high",
+   "v127_rows": 12,
+   "v135_rows_union": 12,
+   "rows_identical": 12,
+   "rows_added_in_1_3_5": [],
+   "rows_removed_from_1_2_7": [],
+   "v135_arrays": [
+    {
+     "index": 34,
+     "ctx": {
+      "name": "Antminer U3S21EXPH",
+      "stock_fw_tag": "FR-1.26(250523-U3S21EXPH)",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       3991,
+       307,
+       "TH"
+      ],
+      [
+       4186,
+       322,
+       "TH"
+      ],
+      [
+       4368,
+       336,
+       "TH"
+      ],
+      [
+       4563,
+       351,
+       "TH"
+      ],
+      [
+       4758,
+       366,
+       "TH"
+      ],
+      [
+       4940,
+       380,
+       "TH"
+      ],
+      [
+       5135,
+       395,
+       "TH"
+      ],
+      [
+       5330,
+       410,
+       "TH"
+      ],
+      [
+       5512,
+       424,
+       "TH"
+      ],
+      [
+       5707,
+       439,
+       "TH"
+      ],
+      [
+       6031,
+       454,
+       "TH"
+      ],
+      [
+       6368,
+       469,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": 21
+  },
+  {
+   "model": "Antminer U2L9H (NEW model, scrypt hydro)",
+   "label_confidence": "high",
+   "v127_rows": 0,
+   "v135_rows_union": 41,
+   "rows_identical": 0,
+   "rows_added_in_1_3_5": [
+    [
+     3927,
+     18700,
+     "MH"
+    ],
+    [
+     3990,
+     19000,
+     "MH"
+    ],
+    [
+     4053,
+     19300,
+     "MH"
+    ],
+    [
+     4116,
+     19600,
+     "MH"
+    ],
+    [
+     4179,
+     19900,
+     "MH"
+    ],
+    [
+     4263,
+     20300,
+     "MH"
+    ],
+    [
+     4326,
+     20600,
+     "MH"
+    ],
+    [
+     4389,
+     20900,
+     "MH"
+    ],
+    [
+     4452,
+     21200,
+     "MH"
+    ],
+    [
+     4515,
+     21500,
+     "MH"
+    ],
+    [
+     4578,
+     21800,
+     "MH"
+    ],
+    [
+     4641,
+     22100,
+     "MH"
+    ],
+    [
+     4704,
+     22400,
+     "MH"
+    ],
+    [
+     4788,
+     22800,
+     "MH"
+    ],
+    [
+     4851,
+     23100,
+     "MH"
+    ],
+    [
+     4914,
+     23400,
+     "MH"
+    ],
+    [
+     4977,
+     23700,
+     "MH"
+    ],
+    [
+     5040,
+     24000,
+     "MH"
+    ],
+    [
+     5103,
+     24300,
+     "MH"
+    ],
+    [
+     5166,
+     24600,
+     "MH"
+    ],
+    [
+     5229,
+     24900,
+     "MH"
+    ],
+    [
+     5313,
+     25300,
+     "MH"
+    ],
+    [
+     5376,
+     25600,
+     "MH"
+    ],
+    [
+     5439,
+     25900,
+     "MH"
+    ],
+    [
+     5502,
+     26200,
+     "MH"
+    ],
+    [
+     5565,
+     26500,
+     "MH"
+    ],
+    [
+     5628,
+     26800,
+     "MH"
+    ],
+    [
+     5691,
+     27100,
+     "MH"
+    ],
+    [
+     5754,
+     27400,
+     "MH"
+    ],
+    [
+     5817,
+     27700,
+     "MH"
+    ],
+    [
+     5901,
+     28100,
+     "MH"
+    ],
+    [
+     5964,
+     28400,
+     "MH"
+    ],
+    [
+     6027,
+     28700,
+     "MH"
+    ],
+    [
+     6090,
+     29000,
+     "MH"
+    ],
+    [
+     6153,
+     29300,
+     "MH"
+    ],
+    [
+     6216,
+     29600,
+     "MH"
+    ],
+    [
+     6279,
+     29900,
+     "MH"
+    ],
+    [
+     6342,
+     30200,
+     "MH"
+    ],
+    [
+     6426,
+     30600,
+     "MH"
+    ],
+    [
+     6489,
+     30900,
+     "MH"
+    ],
+    [
+     6552,
+     31000,
+     "MH"
+    ]
+   ],
+   "rows_removed_from_1_2_7": [],
+   "v135_arrays": [
+    {
+     "index": 2,
+     "ctx": {
+      "name": null,
+      "stock_fw_tag": "FR-1.29(251029-U2L9H)",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       3927,
+       18700,
+       "MH"
+      ],
+      [
+       3990,
+       19000,
+       "MH"
+      ],
+      [
+       4053,
+       19300,
+       "MH"
+      ],
+      [
+       4116,
+       19600,
+       "MH"
+      ],
+      [
+       4179,
+       19900,
+       "MH"
+      ],
+      [
+       4263,
+       20300,
+       "MH"
+      ],
+      [
+       4326,
+       20600,
+       "MH"
+      ],
+      [
+       4389,
+       20900,
+       "MH"
+      ],
+      [
+       4452,
+       21200,
+       "MH"
+      ],
+      [
+       4515,
+       21500,
+       "MH"
+      ],
+      [
+       4578,
+       21800,
+       "MH"
+      ],
+      [
+       4641,
+       22100,
+       "MH"
+      ],
+      [
+       4704,
+       22400,
+       "MH"
+      ],
+      [
+       4788,
+       22800,
+       "MH"
+      ],
+      [
+       4851,
+       23100,
+       "MH"
+      ],
+      [
+       4914,
+       23400,
+       "MH"
+      ],
+      [
+       4977,
+       23700,
+       "MH"
+      ],
+      [
+       5040,
+       24000,
+       "MH"
+      ],
+      [
+       5103,
+       24300,
+       "MH"
+      ],
+      [
+       5166,
+       24600,
+       "MH"
+      ],
+      [
+       5229,
+       24900,
+       "MH"
+      ],
+      [
+       5313,
+       25300,
+       "MH"
+      ],
+      [
+       5376,
+       25600,
+       "MH"
+      ],
+      [
+       5439,
+       25900,
+       "MH"
+      ],
+      [
+       5502,
+       26200,
+       "MH"
+      ],
+      [
+       5565,
+       26500,
+       "MH"
+      ],
+      [
+       5628,
+       26800,
+       "MH"
+      ],
+      [
+       5691,
+       27100,
+       "MH"
+      ],
+      [
+       5754,
+       27400,
+       "MH"
+      ],
+      [
+       5817,
+       27700,
+       "MH"
+      ],
+      [
+       5901,
+       28100,
+       "MH"
+      ],
+      [
+       5964,
+       28400,
+       "MH"
+      ],
+      [
+       6027,
+       28700,
+       "MH"
+      ],
+      [
+       6090,
+       29000,
+       "MH"
+      ],
+      [
+       6153,
+       29300,
+       "MH"
+      ],
+      [
+       6216,
+       29600,
+       "MH"
+      ],
+      [
+       6279,
+       29900,
+       "MH"
+      ],
+      [
+       6342,
+       30200,
+       "MH"
+      ],
+      [
+       6426,
+       30600,
+       "MH"
+      ],
+      [
+       6489,
+       30900,
+       "MH"
+      ],
+      [
+       6552,
+       31000,
+       "MH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": null
+  },
+  {
+   "model": "Antminer S19 XP Hydro (high-performance pair, NEW)",
+   "label_confidence": "high",
+   "v127_rows": 0,
+   "v135_rows_union": 2,
+   "rows_identical": 0,
+   "rows_added_in_1_3_5": [
+    [
+     6100,
+     275,
+     "TH"
+    ],
+    [
+     6450,
+     284,
+     "TH"
+    ]
+   ],
+   "rows_removed_from_1_2_7": [],
+   "v135_arrays": [
+    {
+     "index": 23,
+     "ctx": {
+      "name": "Antminer S19e XP Hydro",
+      "stock_fw_tag": "Wed Apr 17 13:59:00 CST 2024",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       6100,
+       275,
+       "TH"
+      ],
+      [
+       6450,
+       284,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": null
+  },
+  {
+   "model": "Antminer S21e Hydro (performance set, rescaled)",
+   "label_confidence": "high",
+   "v127_rows": 0,
+   "v135_rows_union": 30,
+   "rows_identical": 0,
+   "rows_added_in_1_3_5": [
+    [
+     4352,
+     245,
+     "TH"
+    ],
+    [
+     4404,
+     262,
+     "TH"
+    ],
+    [
+     4437,
+     264,
+     "TH"
+    ],
+    [
+     4586,
+     272,
+     "TH"
+    ],
+    [
+     4700,
+     277,
+     "TH"
+    ],
+    [
+     4832,
+     288,
+     "TH"
+    ],
+    [
+     4953,
+     295,
+     "TH"
+    ],
+    [
+     5040,
+     311,
+     "TH"
+    ],
+    [
+     5350,
+     318,
+     "TH"
+    ],
+    [
+     5400,
+     320,
+     "TH"
+    ],
+    [
+     5467,
+     328,
+     "TH"
+    ],
+    [
+     5568,
+     334,
+     "TH"
+    ],
+    [
+     5723,
+     336,
+     "TH"
+    ],
+    [
+     5997,
+     354,
+     "TH"
+    ],
+    [
+     6009,
+     361,
+     "TH"
+    ],
+    [
+     6086,
+     368,
+     "TH"
+    ],
+    [
+     6158,
+     375,
+     "TH"
+    ],
+    [
+     6332,
+     385,
+     "TH"
+    ],
+    [
+     6630,
+     396,
+     "TH"
+    ],
+    [
+     6930,
+     404,
+     "TH"
+    ],
+    [
+     7230,
+     412,
+     "TH"
+    ],
+    [
+     7530,
+     420,
+     "TH"
+    ],
+    [
+     7830,
+     428,
+     "TH"
+    ],
+    [
+     8130,
+     435,
+     "TH"
+    ],
+    [
+     8430,
+     443,
+     "TH"
+    ],
+    [
+     8730,
+     451,
+     "TH"
+    ],
+    [
+     9030,
+     459,
+     "TH"
+    ],
+    [
+     9330,
+     467,
+     "TH"
+    ],
+    [
+     9630,
+     474,
+     "TH"
+    ],
+    [
+     9930,
+     482,
+     "TH"
+    ]
+   ],
+   "rows_removed_from_1_2_7": [],
+   "v135_arrays": [
+    {
+     "index": 35,
+     "ctx": {
+      "name": "Antminer S21e Hydro",
+      "stock_fw_tag": "Tue Mar 11 18:18:30 CST 2025",
+      "mode_marker": null
+     },
+     "rows": [
+      [
+       4352,
+       245,
+       "TH"
+      ],
+      [
+       4404,
+       262,
+       "TH"
+      ],
+      [
+       4437,
+       264,
+       "TH"
+      ],
+      [
+       4586,
+       272,
+       "TH"
+      ],
+      [
+       4700,
+       277,
+       "TH"
+      ],
+      [
+       4832,
+       288,
+       "TH"
+      ],
+      [
+       4953,
+       295,
+       "TH"
+      ],
+      [
+       5040,
+       311,
+       "TH"
+      ],
+      [
+       5350,
+       318,
+       "TH"
+      ],
+      [
+       5400,
+       320,
+       "TH"
+      ],
+      [
+       5467,
+       328,
+       "TH"
+      ],
+      [
+       5568,
+       334,
+       "TH"
+      ],
+      [
+       5723,
+       336,
+       "TH"
+      ],
+      [
+       5997,
+       354,
+       "TH"
+      ],
+      [
+       6009,
+       361,
+       "TH"
+      ],
+      [
+       6086,
+       368,
+       "TH"
+      ],
+      [
+       6158,
+       375,
+       "TH"
+      ],
+      [
+       6332,
+       385,
+       "TH"
+      ],
+      [
+       6630,
+       396,
+       "TH"
+      ],
+      [
+       6930,
+       404,
+       "TH"
+      ],
+      [
+       7230,
+       412,
+       "TH"
+      ],
+      [
+       7530,
+       420,
+       "TH"
+      ],
+      [
+       7830,
+       428,
+       "TH"
+      ],
+      [
+       8130,
+       435,
+       "TH"
+      ],
+      [
+       8430,
+       443,
+       "TH"
+      ],
+      [
+       8730,
+       451,
+       "TH"
+      ],
+      [
+       9030,
+       459,
+       "TH"
+      ],
+      [
+       9330,
+       467,
+       "TH"
+      ],
+      [
+       9630,
+       474,
+       "TH"
+      ],
+      [
+       9930,
+       482,
+       "TH"
+      ]
+     ]
+    }
+   ],
+   "v127_array_index": null
+  }
+ ]
+}

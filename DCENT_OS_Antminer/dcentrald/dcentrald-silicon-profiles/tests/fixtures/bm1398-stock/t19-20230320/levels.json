@@ -1,0 +1,34 @@
+{
+	"miner": "T19",
+	"levels": [{
+		"frequency": 625,
+		"voltage": 1400
+	}, {
+		"frequency": 625,
+		"voltage": 1420
+	}, {
+		"frequency": 600,
+		"voltage": 1400
+	}, {
+		"frequency": 600,
+		"voltage": 1420
+	}, {
+		"frequency": 575,
+		"voltage": 1400
+	}, {
+		"frequency": 575,
+		"voltage": 1420
+	}, {
+		"frequency": 550,
+		"voltage": 1420
+	}, {
+		"frequency": 625,
+		"voltage": 1440
+	}, {
+		"frequency": 600,
+		"voltage": 1440
+	}, {
+		"frequency": 575,
+		"voltage": 1440
+	}]
+}

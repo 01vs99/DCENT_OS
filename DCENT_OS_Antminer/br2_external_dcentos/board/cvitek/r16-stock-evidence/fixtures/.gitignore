@@ -1,0 +1,8 @@
+# Exact held inputs embedded by the test-only CV stock ABI checks.
+# Override repository-wide generated-binary ignores for these six fixtures.
+!configfs.ko
+!cv183x_base.ko
+!cv183x_pwm.ko
+!cv183x_wdt.ko
+!cvidaemon.bin
+!uart_trans.ko

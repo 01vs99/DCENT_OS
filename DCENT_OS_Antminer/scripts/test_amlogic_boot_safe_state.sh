@@ -54,16 +54,13 @@ for script in "$S37" "$ALIAS" "$S82" "$LATCH"; do
     fi
 done
 
-require_literal "$S37" 'GPIO437 is PWR_EN and is active HIGH: 1=ON, 0=OFF' \
-    'S37 documents the verified active-high polarity'
-require_literal "$S37" 'set_gpio_direction_checked "$PWR_GPIO" low out' \
-    'S37 uses glitch-free direction=low for the first power-gate mutation'
-require_literal "$S37" 'set_gpio_value_checked "$PWR_GPIO" 0' \
-    'S37 requires checked GPIO437-low value readback on S21-class'
-require_literal "$S37" 'set_gpio_value_checked "$PWR_GPIO" 1' \
-    'S37 SafeOff=1 on am3-s19k (sysfs 0 engages the rail)'
-require_literal "$S37" 'am3-s19k|am3-s19kpro|am3-aml-s19kpro)' \
-    'S37 board_target-scopes S19k GPIO437 SafeOff'
+# Policy drift is checked against the single JSON source. Executable S37/S99
+# positive/refusal behavior is exercised by test_s21_boot_polarity.py.
+if python3 "$PROJECT_DIR/scripts/generate_amlogic_gpio437.py" --check; then
+    pass 'GPIO437 generated Rust and both installed shell helpers match the authority'
+else
+    fail 'GPIO437 policy generation drift'
+fi
 require_literal "$S37" 'GPIO437 refuse: missing or unsealed board_target=' \
     'S37 fail-closes GPIO437 when board_target is missing or unsealed'
 require_literal "$S37" 'write_and_check "$ACTIVE_LOW_PATH" 0' \
@@ -94,17 +91,15 @@ require_literal "$S37" 'verify_hashboards_reset_low || return 1' \
     'S37 live-revalidates all reset-low legs with the receipt'
 require_literal "$S37" 'continuing to GPIO437 SafeOff' \
     'S37 emergency path still cuts the rail after a reset-leg failure'
-require_literal "$S37" 'WANT_SAFE_OFF=1' \
-    'S37 runtime handoff accepts GPIO437=1 SafeOff on am3-s19k'
 require_literal "$S37" 'write_receipt runtime-handoff' \
     'S37 records an explicit boot-to-runtime handoff state'
-require_literal "$S37" 'verify_boot_safe_receipt || return 1' \
-    'terminal-safe receipts cannot be promoted back into runtime handoff'
+require_literal "$S37" 'verify_start_safe_receipt || return 1' \
+    'runtime handoff revalidates the checked boot or terminal start baseline'
 
-if grep -Eq 'active LOW.*437|437.*active LOW|FAN_BOOT_DUTY_NS=100000' "$S37"; then
-    fail 'S37 retains inverted GPIO437 polarity or 100-percent boot PWM'
+if grep -Eq 'FAN_BOOT_DUTY_NS=100000' "$S37"; then
+    fail 'S37 retains 100-percent boot PWM'
 else
-    pass 'S37 contains neither inverted polarity nor 100-percent boot PWM'
+    pass 'S37 contains no 100-percent boot PWM'
 fi
 
 if grep -Fq '/etc/init.d/S37board_setup start' "$ALIAS"; then

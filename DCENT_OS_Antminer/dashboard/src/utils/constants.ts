@@ -131,9 +131,11 @@ export const POOL_TEMPLATES: PoolTemplate[] = [
   { name: 'SoloCK', url: 'stratum+tcp://solo.ckpool.org:3333', category: 'solo', highlighted: true, description: 'The original solo mining proxy (est. 2014) — no account, 2% fee only if you find a block' },
   { name: 'Public Pool', url: 'stratum+tcp://public-pool.io:21496', category: 'solo', highlighted: true, description: 'Zero-fee open-source solo pool — self-hostable, popular with BitAxe miners' },
   { name: 'Braiins Solo', url: 'stratum+tcp://solo.stratum.braiins.com:3333', category: 'solo', description: 'Solo mining from the Braiins team — 0.5% fee, no registration, wallet as username' },
+  { name: 'BTC PoW Lab Hybrid Solo', url: 'stratum+tcp://stratum.btcpowlab-pool.com:3333', category: 'solo', description: 'Hybrid Solo in Germany: 85% to the block finder, 10% to other eligible miners based on recent accepted work, 5% operator fee; no account, Bitcoin address as username, vardiff down to 1' },
   { name: 'AtlasPool', url: 'stratum+tcp://solo.atlaspool.io:3333', category: 'solo', description: 'Global solo pool with 100+ points of presence — 1.5% fee, anycast routing' },
   { name: 'SoloMining.xyz', url: 'stratum+tcp://btc.solomining.xyz:1313', category: 'solo', description: 'Solo pool with real-time worker dashboard — 1% fee, direct-to-wallet payouts' },
   { name: 'Kano', url: 'stratum+tcp://stratum.kano.is:3333', category: 'solo', description: 'Long-running small pool (est. 2014) — personal payout, low minimum threshold' },
+  { name: 'SoloLuck', url: 'stratum+tcp://stratum.sololuck.io:4334', category: 'solo', description: 'Global 0% fee solo pool — nodes in Asia and North America, no account, no KYC' },
 ];
 
 // Heater noise icons

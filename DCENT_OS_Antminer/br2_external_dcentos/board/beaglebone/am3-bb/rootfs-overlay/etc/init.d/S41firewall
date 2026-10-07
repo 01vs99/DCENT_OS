@@ -10,7 +10,7 @@
 # packet drop is cheap and protects against any sideload regression.
 #
 # Threat model reference: docs/THREAT_MODEL.md (BB-1).
-# Memory rule:             .
+# Memory rule:             daemons 22322 command injection rule.
 #
 # Init order rationale:
 #   S40network    — eth0 link / DHCP comes up here

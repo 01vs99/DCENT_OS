@@ -4,7 +4,7 @@
 # Phase 4B (EE Finding 5 #6 + Finding 1) — this is the default config baked
 # into `/etc/dcentrald.toml` on every Buildroot-built am2-s19jpro image. It
 # is derived from `dcentrald_s19jpro_xil.toml` (the milestone-proven config
-# that produced the 2026-05-15 first-accepted-shares run on `a lab unit`) but
+# that produced the 2026-05-15 first-accepted-shares run on a lab unit) but
 # sanitized for first-boot safety on ANY am2 unit:
 #
 #   * mining.enabled = false   — operator configures pool first via dashboard
@@ -12,8 +12,8 @@
 #   * pool.url / pool.worker   — empty; operator fills in
 #   * watchdog.enabled = true  — hardware watchdog ON by default (S82dcentrald
 #                                already kicks it; unattended panic must reset)
-#   * donation.enabled = true  — 2% donation default ( production
-#                                policy; XIL bring-up config has this off)
+#   * donation.enabled = false — 0% mandatory-fee posture (C6, 2026-09-01);
+#                                opt-in donation is 1-5% in Settings
 #   * api.cgminer_port = 4028  — clean image owns :4028; XIL bring-up uses 4027
 #                                to avoid BraiinsOS BOSer collision on an
 #                                overlay-deploy
@@ -24,7 +24,7 @@
 #                                       by `DcentraldConfig::validate()` on
 #                                       am2 platforms (Phase 4C, commit 747947e4)
 #   * thermal.fan_max_pwm = 30        — home-quiet ceiling
-#
+#                                       (fan max 30pwm rule)
 #   * thermal.dangerous_temp_c = 80   — fail-closed threshold for Am2ThermalSupervisor
 #   * thermal.hot_temp_c = 70         — fan-step / hash-throttle threshold
 #   * hash_on_disconnect.enabled = false — home/unattended safety
@@ -41,22 +41,22 @@
 #     [power.psu_override].enabled = true, model = "APW3", voltage_v = 12.8.
 #     The hybrid path skips the APW I²C probe, asserts PWR_CONTROL, and runs
 #     the dsPIC + BM1362 init unchanged. See:
-#       *
-#       *
-#       *
+#       * psu override honored by am2 hybrid path rule
+#       * loki mod is a psu config not a variant rule
+#       * internal engineering notes
 #
 # NEVER-VIOLATE rules baked in:
-#   * MiscCtrl triple-write with 5 ms spacing
-#   * Deferred voltage gate on 5 stable heartbeat ticks
-#   * Board-temp I2C NACK → XADC die-temp fallback
-#   * PIC RESET NEVER sent on S19j Pro
-#   * AXI IIC unbind/SOFTR NEVER on am2
-#   * PSU I2C bit-bang PROBE disabled on am2;
+#   * MiscCtrl triple-write with 5 ms spacing (miscctrl never fire and forget rule)
+#   * Deferred voltage gate on 5 stable heartbeat ticks (deferred voltage stability gate rule)
+#   * Board-temp I2C NACK → XADC die-temp fallback (board temp i2c rules rule)
+#   * PIC RESET NEVER sent on S19j Pro (pic no reset s19j rule)
+#   * AXI IIC unbind/SOFTR NEVER on am2 (i2c recovery s19 danger rule)
+#   * PSU I2C bit-bang PROBE disabled on am2 (psu probe disabled rule);
 #     framed heartbeat/watchdog writes on bus 0 @ 0x10 are legal.
-#   * Fan ceiling PWM 30 for home mining ( /
-#     )
+#   * Fan ceiling PWM 30 for home mining (fan max 30pwm rule /
+#     fan never blast rule)
 #   * EEPROM 0x50..0x57 HAL write-denylist registered at am2 platform init
-#     (.74 hb2 incident 2026-04-29)
+#     (eeprom addresses protected rule, lab-unit hb2 incident 2026-04-29)
 
 [general]
 hostname = "dcentos-s19jpro"
@@ -93,7 +93,7 @@ am2_no_nonce_timeout_s = 90
 suggest_difficulty = 256
 
 # Cold-boot init path (NOT passthrough — passthrough on am2 post-bosminer
-# produces zero RX; proven on .139 Phase 13/14).
+# produces zero RX; proven on a lab unit Phase 13/14).
 passthrough = false
 
 # ASIC-side version rolling stays DISABLED on the hybrid FPGA dispatch path.
@@ -131,7 +131,7 @@ circuit_amperage_a = 20
 #
 # If the unit was Loki-modded and the operator pulls the Loki board, they
 # rewire the chassis PWR_CONTROL (gpio907) → APW3 REMOTE_ON per
-#  and set:
+# internal engineering notes and set:
 #     enabled   = true
 #     model     = "APW3"
 #     voltage_v = 12.8     # APW3 OUTPUT rail (NOT the ~13.7 V chip rail)
@@ -164,10 +164,10 @@ pid_interval_s = 2.0
 hysteresis_c = 3
 
 [thermal.supervisor]
-# Dormant unless the operator or a validated platform-default gate enables it.
+# Conservative thermal supervision is enabled by default.
 # am2 chassis are four-fan systems; one working tach is never enough once the
 # supervisor is active.
-enabled = false
+enabled = true
 min_fans = 3
 
 [api]
@@ -176,15 +176,16 @@ min_fans = 3
 cgminer_port = 4028
 http_port = 8080
 websocket = true
-cgminer_bind_lan = false
+cgminer_bind_lan = true
+cgminer_lan_writes = false
 metrics_require_auth = true
 
 [donation]
-# production donation policy: transparent 2% default, fully
-# disableable by the operator. Empty pool_url/worker keeps it inert until
-# the daemon's donation defaults are populated at runtime.
-enabled = true
-percent = 2.0
+# DCENT_OS ships with ZERO mandatory fee. Optional transparent donation:
+# set enabled = true and percent 1-5 (time-sliced, always visible, one tap
+# off). Fund development: https://d-central.tech/fund/
+enabled = false
+percent = 0.0
 pool_url = "stratum+tcp://pool.d-central.tech:3333"
 worker = "DungeonMaster"
 password = "x"
@@ -203,7 +204,7 @@ kick_interval_s = 5
 
 [hash_on_disconnect]
 # Home/unattended safety: never continue hashing stale work during a
-# pool/control failure. Default OFF for am2 home units (BB `a lab unit` carryover
+# pool/control failure. Default OFF for am2 home units (lab-unit carryover
 # rule).
 enabled = false
 

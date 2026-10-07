@@ -173,7 +173,7 @@ pub fn hal_error_retryable(error: &HalError) -> bool {
 /// Whether the operator has opted the framed transport into ePIC bounded
 /// retry (`DCENT_DSPIC_EPIC_RETRY=1`). Default OFF.
 pub fn epic_retry_enabled() -> bool {
-    epic_retry_value_enabled(std::env::var(EPIC_RETRY_ENV).ok().as_deref())
+    epic_retry_value_enabled(dcentrald_common::lab_env::var(EPIC_RETRY_ENV).ok().as_deref())
 }
 
 /// Pure policy resolver for [`epic_retry_enabled`] (host-testable without

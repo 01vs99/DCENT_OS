@@ -194,7 +194,7 @@ raise SystemExit(subprocess.run(args, env=environment).returncode)
     assert created.returncode == 0, created.stderr
     release = (
         volume
-        / "dcentos/dcentrald/target/armv7-unknown-linux-musleabihf/release"
+        / "DCENT_OS_Antminer/dcentrald/target/armv7-unknown-linux-musleabihf/release"
     )
     for name in ("dcentrald", "dcentos-init", "dcentos-discovery"):
         (release / name).write_bytes(b"stale")
@@ -253,7 +253,7 @@ raise SystemExit(subprocess.run(args, env=environment).returncode)
     marker = outside / "marker"
     marker.write_bytes(b"preserve")
     try:
-        (bad_volume / "dcentos").symlink_to(outside, target_is_directory=True)
+        (bad_volume / "projects").symlink_to(outside, target_is_directory=True)
     except OSError:
         pass
     else:

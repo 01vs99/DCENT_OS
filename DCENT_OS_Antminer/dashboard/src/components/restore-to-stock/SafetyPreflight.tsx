@@ -101,9 +101,8 @@ export function SafetyPreflight({ preflight, highAcknowledged, setHighAcknowledg
           locked
         >
           <div style={{ fontSize: '0.78rem', color: 'var(--text)', marginTop: 8 }}>
-            These findings can't be overridden from the UI. Per
-            <code> feedback_secure_boot_set_blocklist</code>,
-            <code> feedback_hashcore_universal_root_hash_blocklist</code>, and the
+            These findings can't be overridden from the UI. Because of the secure-boot
+            blocklist, the hashcore root-hash blocklist, and the
             daemons:22322 listener IOC, the backend refuses confirm:true at the wire — the
             slider on the next step won't even submit.
           </div>

@@ -10,7 +10,7 @@
 // targets J/TH instead of TH/s. Competitor firmwares (BraiinsOS, VNish)
 // default to hashrate. We don't.
 //
-// Donation default = 2% (operator-locked). NOT touched by this prompt.
+// Donation default = 0% opt-in (C6, 2026-09-01). NOT touched by this prompt.
 //
 // Storage: persists the user's choice in localStorage so the prompt
 // fires exactly once. Hacker mode is never prompted (it already opts

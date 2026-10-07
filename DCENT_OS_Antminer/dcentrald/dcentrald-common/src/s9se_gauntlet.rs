@@ -25,8 +25,8 @@ use crate::s9se_eeprom::{
     refuse_s9se_eeprom_write, EEPROM_CRC_LEN,
 };
 use crate::s9se_enum::{
-    admit_s9se_geometry, plan_s9se_address_program, refuse_am1_s9_chip_count,
-    refuse_s9k_interval_on_s9se,
+    admit_s9se_geometry, admit_s9se_production_interval, plan_s9se_address_program,
+    refuse_am1_s9_chip_count,
 };
 use crate::s9se_fpga::{
     admit_hardware_version_low16, admit_s9se_fpga_mem_is_256mib_path, admit_three_populated_chains,
@@ -61,9 +61,9 @@ use crate::s9se_pic::{
 };
 use crate::s9se_pic::{pack_enable_dc_dc, pack_reset, refuse_s9se_pic_io};
 use crate::s9se_pll::{
-    freq_climb_mhz, freq_high_pll_1393_row, freq_pll_1393_row, operational_pll_plan,
-    pack_frequency_with_addr, pll_output_mhz, refuse_s9k_asic_times_four_on_s9se,
-    refuse_s9se_frequency_program, FREQ_PLL_1393, PLL_FALLBACK_DIVIDER, PLL_FALLBACK_WORD,
+    admit_s9se_chip_address, freq_climb_mhz, freq_high_pll_1393_row, freq_pll_1393_row,
+    operational_pll_plan, pack_frequency_with_addr, pll_output_mhz, refuse_s9se_frequency_program,
+    FREQ_PLL_1393, PLL_FALLBACK_DIVIDER, PLL_FALLBACK_WORD,
 };
 use crate::s9se_regs::{clock_delay_byte, pack_clock_delay_control};
 use crate::s9se_regs::{
@@ -97,11 +97,7 @@ pub const S9SE_BOARD_TARGET: &str = "am1-s9se";
 
 pub const S9SE_CHIP_ID: u16 = 0x1393;
 pub const S9SE_CHAINS: u8 = 3;
-/// #2 live + last-chip addr `0x78` at stride 2. S9k `init_address_info`
-/// uses interval 4 — do not copy that onto S9 SE.
-pub const S9SE_CHIPS_PER_CHAIN: u8 = 60;
-pub const S9SE_ADDR_INTERVAL: u8 = 2;
-pub const S9SE_LAST_CHIP_ADDR: u8 = 0x78;
+pub use crate::s9se_enum::{S9SE_ADDR_INTERVAL, S9SE_CHIPS_PER_CHAIN, S9SE_LAST_CHIP_ADDR};
 pub const S9SE_CORES_PER_CHIP: u16 = 208;
 pub const S9SE_OPEN_CORE_BANK: u16 = 52;
 pub const S9SE_OPEN_CORE_BANKS: u16 = 4;
@@ -178,12 +174,6 @@ pub fn admit_s9se_last_chip_addr(addr: u8) -> Result<(), S9SeGauntletError> {
     if addr != S9SE_LAST_CHIP_ADDR {
         return Err(S9SeGauntletError::LastChipAddrMismatch { observed: addr });
     }
-    // Captured last is 60*2 = 0x78. Start-at-zero last is 0x76. Pin the
-    // capture; do not require (n-1)*interval == captured last.
-    let _ = (
-        u16::from(S9SE_CHIPS_PER_CHAIN - 1) * u16::from(S9SE_ADDR_INTERVAL),
-        u16::from(S9SE_CHIPS_PER_CHAIN) * u16::from(S9SE_ADDR_INTERVAL),
-    );
     Ok(())
 }
 
@@ -197,7 +187,11 @@ pub fn admit_s9se_issue2_crc5_capture() -> Result<(), S9SeGauntletError> {
     if frame[0] != HDR_READ_SINGLE || frame[1] != VIL_LEN_SHORT {
         return Err(S9SeGauntletError::Crc5Mismatch);
     }
-    admit_s9se_last_chip_addr(frame[2])?;
+    // Preserve the historical short-frame CRC capture at address 0x78. It
+    // does not identify the last populated ASIC in the production address plan.
+    if frame[2] != crate::s9se_enum::S9SE_LAST_CHIP_ADDR_CAPTURED {
+        return Err(S9SeGauntletError::Crc5Mismatch);
+    }
     if s9se_crc5_bits(&frame[..3], CRC5_SHORT_BITS) != frame[3] {
         return Err(S9SeGauntletError::Crc5Mismatch);
     }
@@ -254,7 +248,8 @@ pub fn refuse_s9se_as_am1_s15(target: &str) -> Result<(), S9SeGauntletError> {
     Ok(())
 }
 
-/// BoardDesc row must stay management-only. Mining/install stay refused.
+/// BoardDesc row must stay its own fail-closed C43 row. Mining/install stay
+/// non-public and the generic protocol admit stays refused.
 pub fn admit_s9se_board_desc_fail_closed(d: &BoardDesc) -> Result<(), S9SeGauntletError> {
     if d.board_target != S9SE_BOARD_TARGET {
         return Err(S9SeGauntletError::WrongBoardTarget {
@@ -273,15 +268,23 @@ pub fn admit_s9se_board_desc_fail_closed(d: &BoardDesc) -> Result<(), S9SeGauntl
     if d.mining_default_enabled {
         return Err(S9SeGauntletError::MiningDefaultOn);
     }
-    if d.public_beta_install || d.enablement.install_authorization != InstallAuthorization::Denied {
+    // C43-native refresh (2026-09): the row owns the exact stock-FPGA BM1393
+    // composition (its independently pinned C43 fabric), so the old
+    // transport-None / management-only park is stale. Fail-closed now means:
+    // the exact C43 lane, install authorization still Denied (only the
+    // removable-media facet is LabOnly), and the generic protocol admit must
+    // still refuse the fabric.
+    if d.public_beta_install()
+        || d.enablement.install_authorization != InstallAuthorization::Denied
+    {
         return Err(S9SeGauntletError::InstallNotDenied);
     }
-    if d.chain_transport != ChainTransportKind::None {
+    if d.chain_transport != ChainTransportKind::StockFpga {
         return Err(S9SeGauntletError::ActiveTransport {
             observed: format!("{:?}", d.chain_transport),
         });
     }
-    if d.work_engine != WorkEngineKind::ManagementOnly {
+    if d.work_engine != WorkEngineKind::FpgaWorkFifo {
         return Err(S9SeGauntletError::WorkEngineNotManagementOnly);
     }
     if asic_protocol::admit_protocol_over_transport(d.asic_protocol, ChainTransportKind::StockFpga)
@@ -345,7 +348,7 @@ pub fn admit_s9se_pll_formula_family_none() -> Result<(), S9SeGauntletError> {
     Ok(())
 }
 
-/// : 60 × stride 2 address program. Not a live enum.
+/// Production address plan: 60 populated addresses at stride four. Not a live enum.
 pub fn admit_s9se_enum_program_desk_only() -> Result<(), S9SeGauntletError> {
     admit_s9se_geometry(
         S9SE_CHIPS_PER_CHAIN,
@@ -353,14 +356,17 @@ pub fn admit_s9se_enum_program_desk_only() -> Result<(), S9SeGauntletError> {
         S9SE_LAST_CHIP_ADDR,
     )
     .map_err(|_| S9SeGauntletError::GeometryMismatch)?;
-    if refuse_s9k_interval_on_s9se(4).is_ok() {
+    if admit_s9se_production_interval(4).is_err() {
         return Err(S9SeGauntletError::GeometryMismatch);
     }
     if refuse_am1_s9_chip_count(63).is_ok() {
         return Err(S9SeGauntletError::GeometryMismatch);
     }
     let plan = plan_s9se_address_program().map_err(|_| S9SeGauntletError::GeometryMismatch)?;
-    if plan.set_address.len() != 60 || plan.set_address[59][2] != 0x78 {
+    if plan.set_address.len() != 60
+        || plan.set_address[0][2] != 0
+        || plan.set_address[59][2] != 0xec
+    {
         return Err(S9SeGauntletError::GeometryMismatch);
     }
     Ok(())
@@ -529,7 +535,8 @@ pub fn admit_s9se_temp_path_io_refused() -> Result<(), S9SeGauntletError> {
     Ok(())
 }
 
-///  desk: BOOT.bin header identity; fabric ABI not in the image.
+/// Header-only identity cannot attest the loaded fabric. The actual donor
+/// PL partition is now decoded by s9se_boot::fpga_configuration_partition.
 pub fn admit_s9se_boot_identity_no_fabric_abi() -> Result<(), S9SeGauntletError> {
     let mut header = vec![0u8; BOOT_BIN_SIZE];
     header[0x20..0x24].copy_from_slice(&0xAA99_5566u32.to_le_bytes());
@@ -544,7 +551,7 @@ pub fn admit_s9se_boot_identity_no_fabric_abi() -> Result<(), S9SeGauntletError>
 ///  desk: timeout formula, working bauddiv 1, default ticket 0x3F.
 pub fn admit_s9se_timeout_baud_ticket_desk_only() -> Result<(), S9SeGauntletError> {
     let t = stock_timeout_s9se(400).map_err(|_| S9SeGauntletError::GeometryMismatch)?;
-    if t != 163 {
+    if t != 327 {
         return Err(S9SeGauntletError::GeometryMismatch);
     }
     if timeout_control_word(t, 1) & 0x8000_0000 == 0 {
@@ -765,8 +772,8 @@ pub fn admit_s9se_wave9_desk_leftover() -> Result<(), S9SeGauntletError> {
     if freq[3] != 0x08 || freq[0] != 0x41 {
         return Err(S9SeGauntletError::GeometryMismatch);
     }
-    refuse_s9k_asic_times_four_on_s9se(1, 2).map_err(|_| S9SeGauntletError::GeometryMismatch)?;
-    if refuse_s9k_asic_times_four_on_s9se(1, 4).is_ok() {
+    admit_s9se_chip_address(1, 4).map_err(|_| S9SeGauntletError::GeometryMismatch)?;
+    if admit_s9se_chip_address(1, 2).is_ok() {
         return Err(S9SeGauntletError::GeometryMismatch);
     }
     if JOB_LENGTH.axi_word != 71 || PRE_HEADER_HASH0.axi_word != 80 {
@@ -871,7 +878,7 @@ mod tests {
     #[test]
     fn wave0_issue2_crc5_and_geometry() {
         admit_s9se_issue2_crc5_capture().unwrap();
-        admit_s9se_last_chip_addr(0x78).unwrap();
+        admit_s9se_last_chip_addr(0xec).unwrap();
         assert!(admit_s9se_last_chip_addr(0x7A).is_err());
         admit_s9se_open_core_geometry().unwrap();
         assert_eq!(S9SE_CORES_PER_CHIP, 208);
@@ -974,7 +981,7 @@ mod tests {
     }
 
     #[test]
-    fn wave2_enum_program_is_60_stride_2_not_s9k() {
+    fn wave2_enum_program_is_60_stride_four_from_both_production_models() {
         admit_s9se_enum_program_desk_only().unwrap();
     }
 

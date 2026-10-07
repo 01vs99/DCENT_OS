@@ -257,7 +257,8 @@ extract_toml_value() { # $1=file  $2=section (no brackets)  $3=key
         in_sect && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") {
             sub(/^[^=]*=[[:space:]]*/, "", $0)
             sub(/[[:space:]]*#.*$/, "", $0)
-            gsub(/[[:space:]]/, "", $0)
+            # Preserve spaces inside quoted values: they are part of the value.
+            sub(/[[:space:]]*$/, "", $0)
             print $0
             exit
         }
@@ -283,6 +284,26 @@ assert_idle_first_config() {
         exit 1
     }
     require_toml_value "$config_file" mining enabled false
+    # The generic override still supports retained handoff configurations.
+    # Check an explicitly declared origin without inventing a cold recipe.
+    config_boot_origin=$(extract_toml_value "$config_file" mining am2_boot_origin)
+    case "$config_boot_origin" in
+        ''|'"inherited_handoff"'|"'inherited_handoff'") ;;
+        '"native_cold"'|"'native_cold'")
+            config_passthrough=$(extract_toml_value "$config_file" mining passthrough)
+            case "$config_passthrough" in
+                ''|false) ;; # The daemon defaults an absent passthrough to false.
+                *)
+                    echo "ERROR: XIL config [mining] am2_boot_origin=native_cold conflicts with passthrough='$config_passthrough'" >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+        *)
+            echo "ERROR: unrecognized XIL config [mining] am2_boot_origin='$config_boot_origin'" >&2
+            exit 1
+            ;;
+    esac
     require_toml_value "$config_file" pool url '""'
     require_toml_value "$config_file" pool worker '""'
     require_toml_value "$config_file" power.psu_override enabled true

@@ -1,27 +1,6 @@
-//!  B2 (2026-05-22): integration test — `DCENT_AM2_STRICT_SKU_REFUSE`
-//! must default OFF.
-//!
-//! Per the /22 rollout pattern, the first deploy of this binary
-//! lands the gate in TELEMETRY-ONLY mode so the operator can confirm
-//! `a lab unit` (and `a lab unit` after the dsPIC layer is solved) class clean as
-//! BHB42601 with zero false-positive refusal. Only AFTER that
-//! confirmation does a follow-up  commit promote the env default
-//! to ON.
-//!
-//! These tests pin that contract — if the default flips silently, this
-//! test breaks and the operator gets a chance to review.
-//!
-//! These tests mutate process-global env vars (`DCENT_AM2_STRICT_SKU_REFUSE`,
-//! `DCENT_AM2_ACCEPT_DEGRADED_HARDWARE`). Cargo runs the tests in one binary
-//! across MULTIPLE THREADS by default, so without serialization they race on
-//! the shared var (e.g. `strict_recognizes_explicit_1` sets "1" while
-//! `strict_default_is_off` concurrently removes it → intermittent failure).
-//! bug-hunt 2026-05-28: the original "we orchestrate ordering manually" comment
-//! described an intent that was never implemented — there was no lock, so the
-//! suite was flaky-RED. `ENV_LOCK` now actually serializes every test that
-//! touches these vars (the workspace does not depend on the `serial_test`
-//! crate, so a hand-rolled `static Mutex` is the no-new-dep fix). Poisoning is
-//! ignored (a panicking test should not cascade-fail the rest).
+//! Exact SKU refusal is enabled by default in every build.
+//! Environment overrides exist only with the explicit compiled lab capability.
+//! The shared mutex serializes test-owned process environment changes.
 
 use std::sync::Mutex;
 
@@ -40,12 +19,12 @@ fn env_guard() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
-fn strict_default_is_off() {
+fn strict_default_is_on() {
     let _env = env_guard();
     std::env::remove_var("DCENT_AM2_STRICT_SKU_REFUSE");
     assert!(
-        !strict_sku_refuse_enabled(),
-        "strict_sku_refuse_enabled must default to false (Wave-23 first-deploy rollout)"
+        strict_sku_refuse_enabled(),
+        "exact SKU refusal must remain the default in every build"
     );
 }
 
@@ -66,16 +45,24 @@ fn strict_recognizes_true_case_insensitive() {
 }
 
 #[test]
-fn strict_rejects_other_values() {
+fn only_compiled_lab_can_disable_strict_refusal() {
     let _env = env_guard();
-    // Belt-and-suspenders: prevent accidental "set DCENT_AM2_STRICT_SKU_REFUSE=foo"
-    // from silently enabling the strict path.
+    // A release binary must ignore every environment attempt to disable the gate.
     std::env::set_var("DCENT_AM2_STRICT_SKU_REFUSE", "yes");
-    assert!(!strict_sku_refuse_enabled());
+    assert_eq!(
+        strict_sku_refuse_enabled(),
+        !dcentrald_common::lab_env::compiled()
+    );
     std::env::set_var("DCENT_AM2_STRICT_SKU_REFUSE", "0");
-    assert!(!strict_sku_refuse_enabled());
+    assert_eq!(
+        strict_sku_refuse_enabled(),
+        !dcentrald_common::lab_env::compiled()
+    );
     std::env::set_var("DCENT_AM2_STRICT_SKU_REFUSE", "");
-    assert!(!strict_sku_refuse_enabled());
+    assert_eq!(
+        strict_sku_refuse_enabled(),
+        !dcentrald_common::lab_env::compiled()
+    );
     std::env::remove_var("DCENT_AM2_STRICT_SKU_REFUSE");
 }
 
@@ -93,6 +80,9 @@ fn accept_degraded_default_is_off() {
 fn accept_degraded_recognizes_explicit_1() {
     let _env = env_guard();
     std::env::set_var("DCENT_AM2_ACCEPT_DEGRADED_HARDWARE", "1");
-    assert!(accept_degraded_hardware_enabled());
+    assert_eq!(
+        accept_degraded_hardware_enabled(),
+        dcentrald_common::lab_env::compiled()
+    );
     std::env::remove_var("DCENT_AM2_ACCEPT_DEGRADED_HARDWARE");
 }
